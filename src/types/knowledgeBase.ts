@@ -1,0 +1,158 @@
+/**
+ * 知识库模块的前端类型定义。
+ *
+ * 与 Rust 后端 `knowledge_builder::types` / `knowledge_builder::events` /
+ * `fluen_knowledge::types` 一一对应，序列化格式遵循 serde 默认规则。
+ *
+ * @see src-tauri/src/knowledge_builder/types.rs
+ * @see src-tauri/src/knowledge_builder/events.rs
+ * @see crates/fluen-knowledge/src/types.rs
+ */
+
+// ---------------------------------------------------------------------------
+// 构建选项与阶段
+// ---------------------------------------------------------------------------
+
+/** 知识库构建选项（对应 Rust `KnowledgeBuildOptions`）。 */
+export interface KnowledgeBuildOptions {
+  /** 是否创建综述页（summary）。 */
+  create_summary?: boolean;
+  /** 是否创建概念页（concept）。 */
+  create_concepts?: boolean;
+  /** 是否创建实体页（entity）。 */
+  create_entities?: boolean;
+  /** 是否自动建立 summary ↔ concept/entity relations。 */
+  auto_relations?: boolean;
+  /** 概念提取数量上限。 */
+  max_concepts?: number;
+  /** 实体提取数量上限。 */
+  max_entities?: number;
+}
+
+/** 构建阶段（对应 Rust `BuildStage`，snake_case 序列化）。 */
+export type BuildStage =
+  | 'planning'
+  | 'creating_summary'
+  | 'creating_concepts'
+  | 'creating_entities'
+  | 'establishing_relations'
+  | 'done';
+
+// ---------------------------------------------------------------------------
+// 知识库条目
+// ---------------------------------------------------------------------------
+
+/** 条目类型（对应 Rust `WikiType`）。 */
+export type WikiType = 'concept' | 'entity' | 'summary';
+
+/** 检索方式（对应 Rust `RetrievalMethod`）。 */
+export type RetrievalMethod = 'keyword' | 'semantic' | 'hybrid';
+
+/** 元信息查询类型（对应 Rust `MetaQueryType`）。 */
+export type MetaQueryType = 'overview' | 'tags' | 'recent';
+
+/** 知识库条目（对应 Rust `WikiEntry`，不含正文）。 */
+export interface WikiEntry {
+  id: string;
+  wiki_type: WikiType;
+  title: string;
+  file_path: string;
+  /** 仅 summaries：源文献路径，如 `raw/ref-xxx.pdf`。 */
+  source?: string;
+  /** 仅 summaries：作者 wikiID 列表（DB 读取时为空）。 */
+  authors?: string[];
+  /** 标签 ID 列表。 */
+  tags?: string[];
+  /** 关联 wikiID 列表。 */
+  relations?: string[];
+  /** 创建时间（RFC3339）。 */
+  created: string;
+  /** 更新时间（RFC3339）。 */
+  updated: string;
+}
+
+// ---------------------------------------------------------------------------
+// 构建任务记录
+// ---------------------------------------------------------------------------
+
+/** 任务队列记录中的 `kind` 字段（internally tagged enum）。 */
+export interface TaskKindKnowledgeBuild {
+  kind: 'knowledge_build';
+  ref_id: string;
+  /** 场景化模型引用。 */
+  model_ref: { provider_id: string; model_id: string };
+  options: KnowledgeBuildOptions;
+}
+
+/** 任务状态。 */
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+/** 任务记录（仅含前端需要的字段）。 */
+export interface TaskRecord {
+  id: string;
+  project_path: string;
+  kind: TaskKindKnowledgeBuild;
+  status: TaskStatus;
+  /** ISO 8601 创建时间。 */
+  created_at: string;
+  /** ISO 8601 更新时间。 */
+  updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// 事件 payload（由后端 Tauri 事件推送）
+// ---------------------------------------------------------------------------
+
+/** `kb-build:started` 事件 payload。 */
+export interface KbBuildStartedPayload {
+  task_id: string;
+  ref_id: string;
+  title?: string | null;
+}
+
+/** `kb-build:progress` 事件 payload。 */
+export interface KbBuildProgressPayload {
+  task_id: string;
+  ref_id: string;
+  stage: string;
+  created_count: number;
+  total_planned?: number | null;
+  detail?: string | null;
+}
+
+/** `kb-build:completed` 事件 payload。 */
+export interface KbBuildCompletedPayload {
+  task_id: string;
+  ref_id: string;
+  summary_id?: string | null;
+  concept_ids: string[];
+  entity_ids: string[];
+  relations_established: boolean;
+}
+
+/** `kb-build:failed` 事件 payload。 */
+export interface KbBuildFailedPayload {
+  task_id: string;
+  ref_id: string;
+  error: string;
+}
+
+/** `kb-build:cancelled` 事件 payload。 */
+export interface KbBuildCancelledPayload {
+  task_id: string;
+  ref_id: string;
+}
+
+// ---------------------------------------------------------------------------
+// 前端构建状态
+// ---------------------------------------------------------------------------
+
+/**
+ * 单个文献的知识库构建状态（前端维护，用于 UI 展示状态徽标）。
+ *
+ * - `idle`：尚未加入知识库
+ * - `building`：构建任务进行中
+ * - `added`：已成功加入知识库（存在 summary 条目）
+ * - `failed`：最近一次构建失败
+ */
+export type KnowledgeBuildStatus = 'idle' | 'building' | 'added' | 'failed';

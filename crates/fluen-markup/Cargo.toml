@@ -1,0 +1,27 @@
+[package]
+name = "fluen-markup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parser & renderer SDK for the Fluen academic-paper markup standard (v1.1). Markdown-first, zero-dependency by default."
+keywords = ["markdown", "academic", "paper", "fluen", "parser"]
+categories = ["parser-implementations", "text-processing"]
+
+# ── 依赖哲学：原生优先，零外部依赖即可全功能工作 ─────────────
+[dependencies]
+
+# ── 可选特性 ─────────────────────────────────────────────
+# `serde`：为 model/context 提供 serde 序列化，便于宿主项目（如 Tauri/Electron）
+#          通过 IPC 传输 AST、缓存中间结果。默认关闭以保持"纯本地、零依赖"。
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+optional = true
+
+# ── 测试依赖 ─────────────────────────────────────────────
+[dev-dependencies]
+serde_json = "1"

@@ -1,0 +1,36 @@
+[package]
+name = "fluen-knowledge"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+rusqlite = { version = "0.37", features = ["bundled", "chrono", "serde_json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+thiserror = "1"
+
+# ── Optional: async 运行时 ──
+tokio = { version = "1", features = ["rt", "sync", "io-util", "io-std", "macros"], optional = true }
+
+# ── Optional: confluent agent_runtime 工具适配 ──
+confluent = { path = "../../crates/confluent", optional = true }
+
+[features]
+default = []
+# 异步知识库句柄（Arc<Mutex<Connection>> + spawn_blocking）
+async = ["dep:tokio"]
+# MCP server：将知识库暴露为 MCP 工具（JSON-RPC 2.0 over stdio）
+mcp-server = ["async"]
+# confluent agent_runtime 工具适配：将知识库操作适配为 Tool / ToolProvider
+tools = ["async", "dep:confluent"]
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tokio-util = "0.7"

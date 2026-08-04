@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "id": "fluen-dark",
+    "name": "深色",
+    "version": "1.0.0",
+    "author": "Fluen",
+    "description": "默认深色主题，对齐 DESIGN.md 调色板并适配深色背景",
+    "type": "dark",
+    "preview": {
+      "background": "#0a0a0a",
+      "accent": "#3b82f6",
+      "text": "#f6f6f6"
+    }
+  },
+  "colors": {
+    "brand": {
+      "primary": "#0a0a0a",
+      "onPrimary": "#ffffff",
+      "primarySoft": "#141414",
+      "coral": "#ff5530",
+      "magenta": "#ea5ec1",
+      "blue": "#1456f0",
+      "blueMid": "#3b82f6",
+      "blueDeep": "#1d4ed8",
+      "blue700": "#17437d",
+      "cyan": "#3daeff",
+      "blue200": "#bfdbfe",
+      "purple": "#a855f7"
+    },
+    "surface": {
+      "canvas": "#0a0a0a",
+      "surface": "#141414",
+      "surfaceDeep": "#0f0f0f",
+      "surfaceSoft": "#1a1a1a"
+    },
+    "border": {
+      "hairline": "rgba(255, 255, 255, 0.08)",
+      "hairlineSoft": "rgba(255, 255, 255, 0.05)"
+    },
+    "text": {
+      "ink": "#f6f6f6",
+      "inkStrong": "#ffffff",
+      "charcoal": "rgba(255, 255, 255, 0.85)",
+      "slate": "rgba(255, 255, 255, 0.6)",
+      "steel": "rgba(255, 255, 255, 0.5)",
+      "stone": "rgba(255, 255, 255, 0.35)",
+      "muted": "rgba(255, 255, 255, 0.25)",
+      "onPrimary": "#ffffff",
+      "onAccent": "#ffffff",
+      "onDark": "#ffffff"
+    },
+    "accent": {
+      "default": "#3b82f6",
+      "hover": "#2563eb",
+      "pressed": "#1d4ed8"
+    },
+    "state": {
+      "hover": "rgba(255, 255, 255, 0.06)",
+      "successBg": "rgba(27, 166, 115, 0.18)",
+      "successText": "#34d399",
+      "error": "#d45656",
+      "errorBg": "rgba(212, 86, 86, 0.18)",
+      "warning": "#fbbf24",
+      "warningBg": "rgba(180, 83, 9, 0.22)",
+      "info": "#3b82f6",
+      "infoBg": "rgba(59, 130, 246, 0.18)"
+    },
+    "shadow": {
+      "dock": "0 12px 40px rgba(0, 0, 0, 0.55)",
+      "card": "rgba(0, 0, 0, 0.3) 0px 1px 2px 0px",
+      "modal": "rgba(0, 0, 0, 0.5) 0px 12px 16px -4px",
+      "atmospheric": "rgba(0, 0, 0, 0.4) 0px 0px 22px 0px"
+    }
+  }
+}

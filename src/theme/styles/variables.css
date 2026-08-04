@@ -1,0 +1,145 @@
+/**
+ * 主题管理系统 — CSS 变量 fallback。
+ *
+ * 在 ThemeProvider 注入 inline style 之前提供默认值，避免 FOUC。
+ * 这里的值与 packs/light.json 和 packs/dark.json 保持同步。
+ * 主题加载完成后，inline style 会覆盖这些 fallback。
+ */
+
+/* ── 字体声明 ──────────────────────────────────────────────────────
+ * 通过 CSS 变量统一管理字体栈，便于后续用户自定义切换字体。
+ * 切换字体只需覆盖 --fluen-font-sans / --fluen-font-mono 即可。
+ * ───────────────────────────────────────────────────────────── */
+
+/* OPPO Sans 4.0 — 默认 UI 字体 */
+@font-face {
+  font-family: 'OPPO Sans';
+  src: url('../../assets/fonts/OPPO-Sans.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* 浅色模式 fallback（默认） */
+:root {
+  /* font — 字体栈（可被主题包或用户设置覆盖） */
+  --fluen-font-sans: 'OPPO Sans', 'DM Sans', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --fluen-font-mono: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+
+  /* brand — 品牌色 */
+  --fluen-primary: #0a0a0a;
+  --fluen-on-primary: #ffffff;
+  --fluen-primary-soft: #181e25;
+  --fluen-brand-coral: #ff5530;
+  --fluen-brand-magenta: #ea5ec1;
+  --fluen-brand-blue: #1456f0;
+  --fluen-brand-blue-mid: #3b82f6;
+  --fluen-brand-blue-deep: #1d4ed8;
+  --fluen-brand-blue-700: #17437d;
+  --fluen-brand-cyan: #3daeff;
+  --fluen-brand-blue-200: #bfdbfe;
+  --fluen-brand-purple: #a855f7;
+
+  /* surface — 表面色 */
+  --fluen-canvas: #ffffff;
+  --fluen-surface: #f7f8fa;
+  --fluen-surface-deep: #f2f3f5;
+  --fluen-surface-soft: #f2f3f5;
+
+  /* border — 边框色 */
+  --fluen-hairline: #e5e7eb;
+  --fluen-hairline-soft: #eaecf0;
+
+  /* text — 文字色 */
+  --fluen-ink: #0a0a0a;
+  --fluen-ink-strong: #000000;
+  --fluen-charcoal: #222222;
+  --fluen-slate: #45515e;
+  --fluen-steel: #5f5f5f;
+  --fluen-stone: #8e8e93;
+  --fluen-muted: #a8aab2;
+  --fluen-on-accent: #ffffff;
+  --fluen-on-dark: #ffffff;
+
+  /* accent — 强调色 */
+  --fluen-accent: #1d4ed8;
+  --fluen-accent-hover: #17437d;
+  --fluen-accent-pressed: #17437d;
+
+  /* state — 交互态与语义色 */
+  --fluen-hover: rgba(0, 0, 0, 0.05);
+  --fluen-success-bg: #e8ffea;
+  --fluen-success-text: #1ba673;
+  --fluen-error: #d45656;
+  --fluen-error-bg: #fee2e2;
+  --fluen-warning: #b45309;
+  --fluen-warning-bg: #fef3c7;
+  --fluen-info: #1d4ed8;
+  --fluen-info-bg: #dbeafe;
+
+  /* shadow — 阴影 */
+  --fluen-shadow-dock: 0 12px 40px rgba(0, 0, 0, 0.14);
+  --fluen-shadow-card: rgba(0, 0, 0, 0.04) 0px 1px 2px 0px;
+  --fluen-shadow-modal: rgba(36, 36, 36, 0.08) 0px 12px 16px -4px;
+  --fluen-shadow-atmospheric: rgba(0, 0, 0, 0.08) 0px 0px 22px 0px;
+}
+
+/* 深色模式 fallback */
+:root[data-theme='dark'] {
+  /* brand — 品牌色（深色模式保持不变） */
+  --fluen-primary: #0a0a0a;
+  --fluen-on-primary: #ffffff;
+  --fluen-primary-soft: #141414;
+  --fluen-brand-coral: #ff5530;
+  --fluen-brand-magenta: #ea5ec1;
+  --fluen-brand-blue: #1456f0;
+  --fluen-brand-blue-mid: #3b82f6;
+  --fluen-brand-blue-deep: #1d4ed8;
+  --fluen-brand-blue-700: #17437d;
+  --fluen-brand-cyan: #3daeff;
+  --fluen-brand-blue-200: #bfdbfe;
+  --fluen-brand-purple: #a855f7;
+
+  /* surface — 表面色 */
+  --fluen-canvas: #0a0a0a;
+  --fluen-surface: #141414;
+  --fluen-surface-deep: #0f0f0f;
+  --fluen-surface-soft: #1a1a1a;
+
+  /* border — 边框色 */
+  --fluen-hairline: rgba(255, 255, 255, 0.08);
+  --fluen-hairline-soft: rgba(255, 255, 255, 0.05);
+
+  /* text — 文字色 */
+  --fluen-ink: #f6f6f6;
+  --fluen-ink-strong: #ffffff;
+  --fluen-charcoal: rgba(255, 255, 255, 0.85);
+  --fluen-slate: rgba(255, 255, 255, 0.6);
+  --fluen-steel: rgba(255, 255, 255, 0.5);
+  --fluen-stone: rgba(255, 255, 255, 0.35);
+  --fluen-muted: rgba(255, 255, 255, 0.25);
+  --fluen-on-accent: #ffffff;
+  --fluen-on-dark: #ffffff;
+
+  /* accent — 强调色 */
+  --fluen-accent: #3b82f6;
+  --fluen-accent-hover: #2563eb;
+  --fluen-accent-pressed: #1d4ed8;
+
+  /* state — 交互态与语义色 */
+  --fluen-hover: rgba(255, 255, 255, 0.06);
+  --fluen-success-bg: rgba(27, 166, 115, 0.15);
+  --fluen-success-text: #4ade80;
+  --fluen-error: #d45656;
+  --fluen-error-bg: rgba(212, 86, 86, 0.15);
+  --fluen-warning: #f59e0b;
+  --fluen-warning-bg: rgba(245, 158, 11, 0.15);
+  --fluen-info: #3b82f6;
+  --fluen-info-bg: rgba(59, 130, 246, 0.15);
+
+  /* shadow — 阴影 */
+  --fluen-shadow-dock: 0 12px 40px rgba(0, 0, 0, 0.55);
+  --fluen-shadow-card: rgba(0, 0, 0, 0.3) 0px 1px 2px 0px;
+  --fluen-shadow-modal: rgba(0, 0, 0, 0.5) 0px 12px 16px -4px;
+  --fluen-shadow-atmospheric: rgba(0, 0, 0, 0.4) 0px 0px 22px 0px;
+}

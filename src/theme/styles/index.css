@@ -1,0 +1,7 @@
+/**
+ * 主题管理系统 — 样式入口。
+ *
+ * 引入 variables.css 提供 fallback 变量。
+ * 主题运行时变量由 ThemeProvider 通过 inline style 注入，会覆盖这些 fallback。
+ */
+@import './variables.css';

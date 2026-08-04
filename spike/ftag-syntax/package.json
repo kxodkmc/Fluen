@@ -1,0 +1,22 @@
+{
+  "name": "fluen-spike-ftag-syntax",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.6",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@lezer/markdown": "^1.7.2",
+    "@lezer/generator": "^1.8.0",
+    "@lezer/common": "^1.5.2",
+    "vitest": "^2.1.9",
+    "typescript": "~6.0.3",
+    "@types/node": "^22.0.0"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "id": "fluen-light",
+    "name": "浅色",
+    "version": "1.0.0",
+    "author": "Fluen",
+    "description": "默认浅色主题，对齐 DESIGN.md 调色板",
+    "type": "light",
+    "preview": {
+      "background": "#ffffff",
+      "accent": "#1d4ed8",
+      "text": "#0a0a0a"
+    }
+  },
+  "colors": {
+    "brand": {
+      "primary": "#0a0a0a",
+      "onPrimary": "#ffffff",
+      "primarySoft": "#181e25",
+      "coral": "#ff5530",
+      "magenta": "#ea5ec1",
+      "blue": "#1456f0",
+      "blueMid": "#3b82f6",
+      "blueDeep": "#1d4ed8",
+      "blue700": "#17437d",
+      "cyan": "#3daeff",
+      "blue200": "#bfdbfe",
+      "purple": "#a855f7"
+    },
+    "surface": {
+      "canvas": "#ffffff",
+      "surface": "#f7f8fa",
+      "surfaceDeep": "#f2f3f5",
+      "surfaceSoft": "#f2f3f5"
+    },
+    "border": {
+      "hairline": "#e5e7eb",
+      "hairlineSoft": "#eaecf0"
+    },
+    "text": {
+      "ink": "#0a0a0a",
+      "inkStrong": "#000000",
+      "charcoal": "#222222",
+      "slate": "#45515e",
+      "steel": "#5f5f5f",
+      "stone": "#8e8e93",
+      "muted": "#a8aab2",
+      "onPrimary": "#ffffff",
+      "onAccent": "#ffffff",
+      "onDark": "#ffffff"
+    },
+    "accent": {
+      "default": "#1d4ed8",
+      "hover": "#17437d",
+      "pressed": "#17437d"
+    },
+    "state": {
+      "hover": "rgba(0, 0, 0, 0.05)",
+      "successBg": "#e8ffea",
+      "successText": "#1ba673",
+      "error": "#d45656",
+      "errorBg": "#fee2e2",
+      "warning": "#b45309",
+      "warningBg": "#fef3c7",
+      "info": "#1d4ed8",
+      "infoBg": "#dbeafe"
+    },
+    "shadow": {
+      "dock": "0 12px 40px rgba(0, 0, 0, 0.14)",
+      "card": "rgba(0, 0, 0, 0.04) 0px 1px 2px 0px",
+      "modal": "rgba(36, 36, 36, 0.08) 0px 12px 16px -4px",
+      "atmospheric": "rgba(0, 0, 0, 0.08) 0px 0px 22px 0px"
+    }
+  }
+}

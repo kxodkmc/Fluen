@@ -7,4 +7,6 @@ export { useAiServices } from './useAiServices';
 export { useOcr } from './useOcr';
 export { useReferences } from './useReferences';
 export { useKnowledgeBase } from './useKnowledgeBase';
+export { useWikiExplorer } from './useWikiExplorer';
 export { useLogger } from './useLogger';
+export { useRecentProjects } from './useRecentProjects';

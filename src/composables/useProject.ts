@@ -25,6 +25,8 @@ import type {
   RenameHeadingRequest,
   SaveTempMdRequest,
 } from '../types/project';
+import type { RecentProjectEntry } from '../types/recentProjects';
+import { useRecentProjects } from './useRecentProjects';
 
 // ── 模块级状态（单例） ──────────────────────────────────────────────
 
@@ -36,6 +38,9 @@ const _error = ref<ProjectErrorResponse | null>(null);
 // ── composable ─────────────────────────────────────────────────────
 
 export function useProject() {
+  /** 最近打开项目列表 composable（单例）。 */
+  const { recordOpen, removeEntry } = useRecentProjects();
+
   /** 打开项目。成功返回 true，失败返回 false 并设置 error。 */
   async function openProject(path: string): Promise<boolean> {
     _isLoading.value = true;
@@ -44,10 +49,21 @@ export function useProject() {
       _currentProject.value = await invoke<OpenProjectResult>('open_project', {
         projectPath: path,
       });
+      // 记录到最近打开项目列表（异步，不阻塞打开流程）
+      const cfg = _currentProject.value.config;
+      const entry: RecentProjectEntry = {
+        project_path: path,
+        title: cfg.title,
+        author: cfg.author,
+        opened_at: new Date().toISOString(),
+      };
+      void recordOpen(entry);
       return true;
     } catch (err) {
       _error.value = err as ProjectErrorResponse;
       _currentProject.value = null;
+      // 项目路径可能失效，从最近列表移除
+      void removeEntry(path);
       return false;
     } finally {
       _isLoading.value = false;

@@ -176,11 +176,13 @@ fn create_entry_impl(
     let file_path = format!("wiki/{}/{}", params.wiki_type.dir(), filename);
     let full_path = references_dir.join(&file_path);
 
-    // 正文（含关联页面区）
+    // 正文：先防御性剥离 AI 可能自行写入的关联区，再通过 params.relations 正规写入。
+    // 关联关系只能由 params.relations → append_relations 写入，确保链接格式合规。
+    let stripped = markdown::strip_relations_section(&params.content);
     let body = if params.relations.is_empty() {
-        params.content.clone()
+        stripped
     } else {
-        markdown::append_relations(&params.content, &params.relations)
+        markdown::append_relations(&stripped, &params.relations)
     };
 
     // frontmatter

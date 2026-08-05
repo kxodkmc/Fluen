@@ -2,4 +2,5 @@
 export * from './BorderGlow';
 export * from './Dock';
 export * from './GlassSurface';
+export * from './LineSidebar';
 export * from './Stepper';

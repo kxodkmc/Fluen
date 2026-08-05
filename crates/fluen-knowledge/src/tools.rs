@@ -146,11 +146,11 @@ impl QueryTool {
         let parameters = json!({
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query"},
-                "method": {"type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "hybrid"},
-                "wiki_type": {"type": "string", "enum": ["summary", "concept", "entity"]},
-                "top_k": {"type": "integer", "default": 10},
-                "include_content": {"type": "boolean", "default": false}
+                "query": {"type": "string", "description": "搜索查询文本（关键词、条目标题片段或语义描述）"},
+                "method": {"type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "hybrid", "description": "检索方式：keyword=FTS5关键词，semantic=向量语义，hybrid=混合（默认）"},
+                "wiki_type": {"type": "string", "enum": ["summary", "concept", "entity"], "description": "限定条目类型（可选，不填则检索全部类型）"},
+                "top_k": {"type": "integer", "default": 10, "description": "返回结果数上限"},
+                "include_content": {"type": "boolean", "default": false, "description": "是否在结果中包含条目正文"}
             },
             "required": ["query"]
         });
@@ -219,11 +219,11 @@ impl QueryBatchTool {
         let parameters = json!({
             "type": "object",
             "properties": {
-                "queries": {"type": "array", "items": {"type": "string"}},
-                "method": {"type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "hybrid"},
-                "wiki_type": {"type": "string", "enum": ["summary", "concept", "entity"]},
-                "top_k": {"type": "integer", "default": 10},
-                "include_content": {"type": "boolean", "default": false}
+                "queries": {"type": "array", "items": {"type": "string"}, "description": "搜索查询文本列表"},
+                "method": {"type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "hybrid", "description": "检索方式"},
+                "wiki_type": {"type": "string", "enum": ["summary", "concept", "entity"], "description": "限定条目类型（可选）"},
+                "top_k": {"type": "integer", "default": 10, "description": "每个查询返回结果数上限"},
+                "include_content": {"type": "boolean", "default": false, "description": "是否包含正文"}
             },
             "required": ["queries"]
         });
@@ -281,13 +281,20 @@ impl CreateEntryTool {
         let parameters = json!({
             "type": "object",
             "properties": {
-                "wiki_type": {"type": "string", "enum": ["summary", "concept", "entity"]},
-                "title": {"type": "string"},
-                "content": {"type": "string"},
-                "source": {"type": "string"},
-                "authors": {"type": "array", "items": {"type": "string"}},
-                "tags": {"type": "array", "items": {"type": "string"}},
-                "relations": {"type": "array", "items": {"type": "string"}}
+                "wiki_type": {"type": "string", "enum": ["summary", "concept", "entity"], "description": "条目类型：summary=文献综述，concept=学术概念，entity=人物/机构/项目等实体"},
+                "title": {"type": "string", "description": "条目标题（concept 用全称如\"数智化技术\"，entity 用全名）"},
+                "content": {
+                    "type": "string",
+                    "description": "条目正文（Markdown）。**禁止包含 `## 关联页面` 区**——关联关系通过 relations 字段或 edit_entry 工具建立，不得在正文中手写。正文应包含概念定义/实体身份 + 在文献中的应用/贡献。"
+                },
+                "source": {"type": "string", "description": "仅 summary：源文献路径，格式 `raw/ref-xxxxxxxxxxxxxxxx.pdf`"},
+                "authors": {"type": "array", "items": {"type": "string"}, "description": "仅 summary：作者 wikiID 列表"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "标签名称列表（非 ID，后端自动 upsert 为 tagID）"},
+                "relations": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "关联条目的 wikiID 列表（格式 `wiki-xxxxxxxxxxxxxxxx`，**严禁使用标题或描述文本**）。若暂无关联请留空，后续由 edit_entry 工具添加。"
+                }
             },
             "required": ["wiki_type", "title", "content"]
         });
@@ -340,10 +347,28 @@ impl EditEntryTool {
         let parameters = json!({
             "type": "object",
             "properties": {
-                "wiki_id": {"type": "string"},
-                "edits": {"type": "array", "items": {"type": "object"}},
-                "add_relations": {"type": "array", "items": {"type": "string"}},
-                "add_tags": {"type": "array", "items": {"type": "string"}}
+                "wiki_id": {"type": "string", "description": "待编辑条目的 wikiID（格式 `wiki-xxxxxxxxxxxxxxxx`）"},
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["search_replace", "insert_after"], "description": "操作类型"},
+                            "search": {"type": "string", "description": "search_replace 模式：待查找的精确文本"},
+                            "replace": {"type": "string", "description": "search_replace 模式：替换文本"},
+                            "anchor": {"type": "string", "description": "insert_after 模式：锚点文本（在其后插入）"},
+                            "content": {"type": "string", "description": "insert_after 模式：待插入的内容"}
+                        },
+                        "required": ["type"]
+                    },
+                    "description": "正文编辑操作列表。**禁止用 insert_after 插入 `## 关联页面` 区**——关联关系通过 add_relations 字段建立。"
+                },
+                "add_relations": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "追加到关联页面的 wikiID 列表（格式 `wiki-xxxxxxxxxxxxxxxx`，**严禁使用标题或描述文本**）。关联是双向的，需对双方分别调用 edit_entry。"
+                },
+                "add_tags": {"type": "array", "items": {"type": "string"}, "description": "追加的标签名称列表（非 ID，后端自动 upsert）"}
             },
             "required": ["wiki_id"]
         });
@@ -397,8 +422,8 @@ impl MetaTool {
         let parameters = json!({
             "type": "object",
             "properties": {
-                "query_type": {"type": "string", "enum": ["overview", "tags", "recent"], "default": "overview"},
-                "limit": {"type": "integer", "default": 20}
+                "query_type": {"type": "string", "enum": ["overview", "tags", "recent"], "default": "overview", "description": "查询类型：overview=总览统计，tags=所有标签，recent=最近条目"},
+                "limit": {"type": "integer", "default": 20, "description": "返回结果数上限（recent 时有效）"}
             }
         });
         Self {
@@ -463,7 +488,7 @@ impl GetEntryTool {
         let parameters = json!({
             "type": "object",
             "properties": {
-                "wiki_id": {"type": "string"}
+                "wiki_id": {"type": "string", "description": "条目 wikiID（格式 `wiki-xxxxxxxxxxxxxxxx`）"}
             },
             "required": ["wiki_id"]
         });
@@ -521,7 +546,11 @@ struct ListEntriesTool {
 impl ListEntriesTool {
     fn new(kb: AsyncKnowledgeBase, name: String, config: KnowledgeConfig) -> Self {
         let description = "List all knowledge base entries (without content).".to_string();
-        let parameters = json!({"type": "object", "properties": {}});
+        let parameters = json!({
+            "type": "object",
+            "properties": {},
+            "description": "列出知识库中所有条目（仅元信息，不含正文）。用于在 Planning 阶段查询已有条目以避免重复创建。"
+        });
         Self {
             base: ToolBase::new(kb, name, description, parameters, config),
         }
@@ -569,7 +598,7 @@ impl DeleteEntryTool {
         let parameters = json!({
             "type": "object",
             "properties": {
-                "wiki_id": {"type": "string"}
+                "wiki_id": {"type": "string", "description": "待删除条目的 wikiID（格式 `wiki-xxxxxxxxxxxxxxxx`）"}
             },
             "required": ["wiki_id"]
         });

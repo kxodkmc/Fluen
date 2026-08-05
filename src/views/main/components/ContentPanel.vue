@@ -19,7 +19,8 @@ import type { ContentTab } from '../types';
 import { useI18n } from '../../../i18n';
 import { useProject } from '../../../composables/useProject';
 import { FluenEditor, FluenPreview } from './editor';
-import { ReferenceReader } from './reader';
+import { ReferenceReader, WikiReader } from './reader';
+import RecentProjects from './welcome/RecentProjects.vue';
 
 const { t } = useI18n();
 const { hasProject, config, tempMd } = useProject();
@@ -34,6 +35,8 @@ const props = defineProps<{
 defineEmits<{
   (e: 'select-tab', id: string): void;
   (e: 'close-tab', id: string): void;
+  (e: 'new-article'): void;
+  (e: 'open-article'): void;
 }>();
 
 /** 当前激活的标签页对象。 */
@@ -123,23 +126,23 @@ function onDocChange(md: string): void {
     <!-- ── 编辑区 ─────────────────────────────────────────────────────── -->
     <div class="editor-area">
       <!-- 欢迎页（无标签页时） -->
-      <div v-if="tabs.length === 0" class="welcome">
-        <div class="welcome__logo">
-          <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M4 4h12v16H4V4z" />
-            <path d="M18 8v12a2 2 0 0 1-2 2" />
-            <path d="M8 8h4M8 12h4M8 16h2" />
-          </svg>
-        </div>
-        <h1 class="welcome__title">{{ t('main.content.welcome.title') }}</h1>
-        <p class="welcome__subtitle">{{ t('main.content.welcome.subtitle') }}</p>
-        <p class="welcome__hint">{{ t('main.content.welcome.hint') }}</p>
-      </div>
+      <RecentProjects
+        v-if="tabs.length === 0"
+        @new-article="$emit('new-article')"
+        @open-article="$emit('open-article')"
+      />
 
       <!-- 文献阅读器 -->
       <ReferenceReader
         v-else-if="activeTab?.type === 'reference' && activeTab.referenceId"
         :reference-id="activeTab.referenceId"
+        @close="$emit('close-tab', activeTab.id)"
+      />
+
+      <!-- 知识库条目阅读器 -->
+      <WikiReader
+        v-else-if="activeTab?.type === 'wiki' && activeTab.wikiId"
+        :wiki-id="activeTab.wikiId"
         @close="$emit('close-tab', activeTab.id)"
       />
 
@@ -266,45 +269,6 @@ function onDocChange(md: string): void {
   flex-direction: column;
   overflow: hidden;
   position: relative;
-}
-
-/* 欢迎页 */
-.welcome {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  color: var(--fluen-stone);
-}
-
-.welcome__logo {
-  margin-bottom: 12px;
-  color: var(--fluen-accent);
-}
-
-.welcome__title {
-  margin: 0;
-  font-family: var(--fluen-font-sans);
-  font-size: 28px;
-  font-weight: 600;
-  color: var(--fluen-ink);
-  letter-spacing: -0.02em;
-}
-
-.welcome__subtitle {
-  margin: 0;
-  font-family: var(--fluen-font-sans);
-  font-size: 14px;
-  color: var(--fluen-slate);
-}
-
-.welcome__hint {
-  margin: 0;
-  font-family: var(--fluen-font-sans);
-  font-size: 13px;
-  color: var(--fluen-stone);
 }
 
 /* 编辑器占位 */

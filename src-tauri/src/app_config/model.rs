@@ -68,6 +68,11 @@ pub struct AppConfig {
     /// 日志系统配置。
     #[serde(default)]
     pub logging: LogConfig,
+    /// 最近打开项目显示数量（1-8，默认 4）。
+    ///
+    /// 控制欢迎页"最近打开"区域展示的项目数量上限。
+    #[serde(default = "default_recent_projects_count")]
+    pub recent_projects_count: u32,
 }
 
 impl Default for AppConfig {
@@ -78,6 +83,7 @@ impl Default for AppConfig {
             language: Language::default(),
             onboarding_completed: false,
             logging: LogConfig::default(),
+            recent_projects_count: default_recent_projects_count(),
         }
     }
 }
@@ -85,13 +91,22 @@ impl Default for AppConfig {
 impl AppConfig {
     /// 校验配置完整性。
     ///
-    /// 当前仅校验版本号非空，后续可按需扩展。
+    /// 校验版本号非空、`recent_projects_count` 在 1-8 范围、日志配置合法。
     pub fn validate(&self) -> Result<(), AppConfigError> {
         if self.version.trim().is_empty() {
             return Err(AppConfigError::Validation(
                 "version 不能为空".into(),
             ));
         }
+        if !(1..=8).contains(&self.recent_projects_count) {
+            return Err(AppConfigError::Validation(format!(
+                "recent_projects_count 必须在 1-8 范围内，当前为: {}",
+                self.recent_projects_count
+            )));
+        }
+        self.logging
+            .validate()
+            .map_err(AppConfigError::Validation)?;
         Ok(())
     }
 }
@@ -102,6 +117,11 @@ impl AppConfig {
 
 fn default_version() -> String {
     "1.0.0".to_string()
+}
+
+/// `recent_projects_count` 字段的默认值。
+fn default_recent_projects_count() -> u32 {
+    4
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +139,7 @@ mod tests {
         assert_eq!(config.theme, ThemeMode::Light);
         assert_eq!(config.language, Language::ZhCN);
         assert!(!config.onboarding_completed);
+        assert_eq!(config.recent_projects_count, 4);
     }
 
     #[test]
@@ -134,6 +155,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_recent_projects_count_out_of_range() {
+        let mut config = AppConfig::default();
+        config.recent_projects_count = 0;
+        assert!(config.validate().is_err());
+
+        config.recent_projects_count = 9;
+        assert!(config.validate().is_err());
+
+        config.recent_projects_count = 1;
+        assert!(config.validate().is_ok());
+
+        config.recent_projects_count = 8;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn json_roundtrip() {
         let config = AppConfig {
             version: "1.0.0".into(),
@@ -141,6 +178,7 @@ mod tests {
             language: Language::En,
             onboarding_completed: true,
             logging: LogConfig::default(),
+            recent_projects_count: 6,
         };
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
@@ -148,6 +186,7 @@ mod tests {
         assert_eq!(parsed.theme, ThemeMode::Dark);
         assert_eq!(parsed.language, Language::En);
         assert!(parsed.onboarding_completed);
+        assert_eq!(parsed.recent_projects_count, 6);
     }
 
     #[test]
@@ -183,5 +222,6 @@ mod tests {
         assert_eq!(config.theme, ThemeMode::Light);
         assert_eq!(config.language, Language::ZhCN);
         assert!(!config.onboarding_completed);
+        assert_eq!(config.recent_projects_count, 4);
     }
 }

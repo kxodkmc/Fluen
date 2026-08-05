@@ -183,6 +183,36 @@ pub fn remove_relations(body: &str, removed_ids: &[String]) -> String {
     result
 }
 
+/// 从正文中移除 `## 关联页面` 区（包括 header 及其下所有链接行）。
+///
+/// 用于 `create_entry` 时防御性剥离 AI 可能自行写入的关联区，
+/// 确保关联关系只能通过 `params.relations` → [`append_relations`] 正规写入。
+///
+/// 若正文不含该区，原样返回。
+pub fn strip_relations_section(body: &str) -> String {
+    const HEADER: &str = "## 关联页面";
+
+    let Some(pos) = body.find(HEADER) else {
+        return body.to_string();
+    };
+
+    // 找到下一个 `## ` 级标题或文末，确定要移除的范围
+    let after_header = &body[pos + HEADER.len()..];
+    let next_section = after_header
+        .find("\n## ")
+        .map(|p| p)
+        .unwrap_or(after_header.len());
+
+    let before = body[..pos].trim_end();
+    let after = body[pos + HEADER.len() + next_section..].trim_start_matches('\n');
+
+    if after.is_empty() {
+        before.to_string()
+    } else {
+        format!("{}\n\n{}", before, after)
+    }
+}
+
 /// 将标题转为文件名安全的字符串。
 ///
 /// 去除文件系统非法字符（/ \ : * ? " < > |），限制长度 50 字符。
@@ -228,6 +258,31 @@ mod tests {
             extract_wiki_id_from_link("wiki-91f2c43bf4de401e"),
             Some("wiki-91f2c43bf4de401e".into())
         );
+    }
+
+    #[test]
+    fn test_strip_relations_section_no_section() {
+        let body = "概念定义：测试内容\n\n第二段";
+        assert_eq!(strip_relations_section(body), body);
+    }
+
+    #[test]
+    fn test_strip_relations_section_at_end() {
+        let body = "概念定义：测试内容\n\n## 关联页面\n- [[wiki-xxx-测试]]\n";
+        let stripped = strip_relations_section(body);
+        assert!(!stripped.contains("## 关联页面"));
+        assert!(!stripped.contains("[[wiki-xxx"));
+        assert!(stripped.contains("概念定义：测试内容"));
+    }
+
+    #[test]
+    fn test_strip_relations_section_in_middle() {
+        let body = "正文内容\n\n## 关联页面\n- [[wiki-xxx]]\n\n## 其他章节\n更多内容";
+        let stripped = strip_relations_section(body);
+        assert!(!stripped.contains("## 关联页面"));
+        assert!(!stripped.contains("[[wiki-xxx"));
+        assert!(stripped.contains("## 其他章节"));
+        assert!(stripped.contains("更多内容"));
     }
 
     #[test]

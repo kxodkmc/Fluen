@@ -14,6 +14,7 @@
 import { computed } from 'vue';
 import OutlinePanel from './panels/OutlinePanel.vue';
 import ReferencesPanel from './panels/ReferencesPanel.vue';
+import KnowledgeBasePanel from './panels/KnowledgeBasePanel.vue';
 
 const props = defineProps<{
   /** 当前激活的活动栏项 id */
@@ -41,7 +42,9 @@ const outerWidth = computed(() => (props.collapsed ? 0 : props.width));
       <div v-show="activeActivity === 'references'" class="sidebar__section">
         <ReferencesPanel />
       </div>
-      <!-- 后续扩展：search / wiki 等面板 -->
+      <div v-show="activeActivity === 'knowledge'" class="sidebar__section">
+        <KnowledgeBasePanel />
+      </div>
     </div>
   </aside>
 </template>

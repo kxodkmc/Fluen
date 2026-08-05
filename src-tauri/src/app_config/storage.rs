@@ -150,6 +150,7 @@ mod tests {
             language: Language::En,
             onboarding_completed: true,
             logging: crate::logging::LogConfig::default(),
+            recent_projects_count: 4,
         }
     }
 

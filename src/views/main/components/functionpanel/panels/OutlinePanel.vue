@@ -1,12 +1,13 @@
 <script setup lang="ts">
 /**
- * OutlinePanel — 文章大纲面板。
+ * OutlinePanel — 文章大纲面板（Word 风格）。
  *
  * 功能：
  *   - 展示 `.temp.md` 的 1-6 级标题树
- *   - 支持按层级范围筛选（H1-H6 切换按钮组）
+ *   - 按层级差异化字号/字重（H1 最大最粗，H6 最小最细）
+ *   - 节点支持折叠/展开（仅含子节点的节点显示折叠按钮）
+ *   - 标题栏提供「全部折叠」「全部展开」「新建章节」操作
  *   - 点击标题跳转到编辑器对应位置
- *   - 标题栏 [+] 按钮新建一级标题章节
  *   - 节点 hover 显示 ✎（重命名）和 +（新建子标题）
  *   - 无项目时展示空状态占位
  *
@@ -25,19 +26,14 @@ const {
   outline,
   hasOutline,
   hasProject,
-  minLevel,
-  maxLevel,
   isSaving,
   jumpTo,
-  setMinLevel,
-  setMaxLevel,
   renameNode,
   insertChildHeading,
+  expandAll,
+  collapseAll,
 } = useOutline();
 const { createSection } = useProject();
-
-/** 层级切换按钮的选项。 */
-const LEVEL_OPTIONS = [1, 2, 3, 4, 5, 6] as const;
 
 // ── 新建章节状态 ────────────────────────────────────────────────────
 
@@ -47,31 +43,6 @@ const _showAddSection = ref(false);
 const _addSectionValue = ref('');
 /** 新建章节输入框引用。 */
 const _addSectionInputRef = ref<HTMLInputElement | null>(null);
-
-// ── 层级筛选 ────────────────────────────────────────────────────────
-
-/** 某层级是否启用（在 minLevel ~ maxLevel 范围内）。 */
-function isLevelActive(level: number): boolean {
-  return level >= minLevel.value && level <= maxLevel.value;
-}
-
-/** 切换某层级的显示/隐藏。 */
-function toggleLevel(level: number): void {
-  if (isLevelActive(level)) {
-    if (minLevel.value === maxLevel.value) return;
-    if (level === minLevel.value) {
-      setMinLevel(level + 1);
-    } else if (level === maxLevel.value) {
-      setMaxLevel(level - 1);
-    }
-  } else {
-    if (level < minLevel.value) {
-      setMinLevel(level);
-    } else {
-      setMaxLevel(level);
-    }
-  }
-}
 
 // ── 新建章节 ────────────────────────────────────────────────────────
 
@@ -115,17 +86,41 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
     <!-- ── 标题栏 ────────────────────────────────────────────────────── -->
     <div class="outline-panel__header">
       <span class="outline-panel__title">{{ t('main.sidebar.outline.title') }}</span>
-      <button
-        class="outline-panel__add-btn"
-        :class="{ 'outline-panel__add-btn--disabled': !hasProject || isSaving }"
-        :disabled="!hasProject || isSaving"
-        :title="t('main.sidebar.outline.addSection')"
-        @click="showAddSection"
-      >
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-      </button>
+      <div class="outline-panel__tools">
+        <button
+          v-if="hasOutline"
+          class="outline-panel__tool-btn"
+          :title="t('main.sidebar.outline.collapseAll')"
+          @click="collapseAll"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 8l7 7 7-7" />
+            <path d="M5 4h14" />
+          </svg>
+        </button>
+        <button
+          v-if="hasOutline"
+          class="outline-panel__tool-btn"
+          :title="t('main.sidebar.outline.expandAll')"
+          @click="expandAll"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 16l7-7 7 7" />
+            <path d="M5 4h14" />
+          </svg>
+        </button>
+        <button
+          class="outline-panel__add-btn"
+          :class="{ 'outline-panel__add-btn--disabled': !hasProject || isSaving }"
+          :disabled="!hasProject || isSaving"
+          :title="t('main.sidebar.outline.addSection')"
+          @click="showAddSection"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
+      </div>
     </div>
 
     <!-- ── 新建章节输入框 ────────────────────────────────────────────── -->
@@ -143,22 +138,8 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
       />
     </div>
 
-    <!-- ── 筛选按钮组 ────────────────────────────────────────────────── -->
-    <div v-if="hasOutline" class="outline-panel__filter">
-      <button
-        v-for="level in LEVEL_OPTIONS"
-        :key="level"
-        class="filter-btn"
-        :class="{ 'filter-btn--active': isLevelActive(level) }"
-        :title="t('main.sidebar.outline.levelHint', { level })"
-        @click="toggleLevel(level)"
-      >
-        H{{ level }}
-      </button>
-    </div>
-
     <!-- ── 大纲列表（递归渲染） ──────────────────────────────────────── -->
-    <div v-if="hasOutline" class="outline-panel__body">
+    <ul v-if="hasOutline" class="outline-panel__body">
       <OutlineNodeItem
         v-for="node in outline"
         :key="`${node.sectionId ?? ''}-${node.line}`"
@@ -167,7 +148,7 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
         @rename="handleRename"
         @add-child="handleAddChild"
       />
-    </div>
+    </ul>
 
     <!-- ── 空状态 ────────────────────────────────────────────────────── -->
     <div v-else class="outline-panel__empty">
@@ -194,7 +175,7 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 10px 10px 8px;
   flex-shrink: 0;
 }
 
@@ -203,27 +184,54 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--fluen-slate);
+  letter-spacing: 0.06em;
+  color: var(--fluen-stone);
 }
 
+.outline-panel__tools {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+/* 工具按钮（折叠/展开全部）—— 极简，无背景，hover 才显现 */
+.outline-panel__tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--fluen-stone);
+  cursor: pointer;
+  border-radius: 5px;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.outline-panel__tool-btn:hover {
+  background: var(--fluen-hover);
+  color: var(--fluen-ink);
+}
+
+/* 新建章节按钮（强调色） */
 .outline-panel__add-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   border: none;
   background: var(--fluen-accent);
   color: var(--fluen-on-accent);
   cursor: pointer;
-  border-radius: 6px;
-  transition: all 0.15s ease;
-  flex-shrink: 0;
+  border-radius: 5px;
+  transition: opacity 0.14s ease;
+  margin-left: 3px;
 }
 
 .outline-panel__add-btn:hover:not(:disabled) {
-  opacity: 0.85;
+  opacity: 0.88;
 }
 
 .outline-panel__add-btn--disabled,
@@ -235,15 +243,15 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
 
 /* ── 新建章节输入框 ────────────────────────────────────────────────── */
 .outline-panel__add-section {
-  padding: 0 12px 8px;
+  padding: 2px 8px 6px;
   flex-shrink: 0;
 }
 
 .outline-panel__add-input {
   width: 100%;
-  padding: 4px 8px;
+  padding: 5px 10px;
   border: 1px solid var(--fluen-accent);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--fluen-canvas);
   color: var(--fluen-ink);
   font-family: var(--fluen-font-sans);
@@ -255,45 +263,13 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
   opacity: 0.6;
 }
 
-/* ── 筛选按钮组 ────────────────────────────────────────────────────── */
-.outline-panel__filter {
-  display: flex;
-  gap: 4px;
-  padding: 0 12px 8px;
-  flex-shrink: 0;
-}
-
-.filter-btn {
-  height: 22px;
-  min-width: 30px;
-  padding: 0 6px;
-  border: 1px solid var(--fluen-hairline);
-  border-radius: 4px;
-  background: var(--fluen-canvas);
-  color: var(--fluen-stone);
-  font-family: var(--fluen-font-sans);
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.filter-btn:hover {
-  border-color: var(--fluen-accent);
-  color: var(--fluen-ink);
-}
-
-.filter-btn--active {
-  background: var(--fluen-ink);
-  border-color: var(--fluen-ink);
-  color: var(--fluen-on-accent);
-}
-
 /* ── 大纲列表 ──────────────────────────────────────────────────────── */
 .outline-panel__body {
   flex: 1;
   overflow-y: auto;
-  padding: 0 8px 12px;
+  list-style: none;
+  padding: 2px 6px 14px;
+  margin: 0;
 }
 
 /* ── 空状态 ────────────────────────────────────────────────────────── */
@@ -303,14 +279,14 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: 10px;
   color: var(--fluen-stone);
 }
 
 .outline-panel__empty-text {
   margin: 0;
   font-family: var(--fluen-font-sans);
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--fluen-stone);
 }
 </style>

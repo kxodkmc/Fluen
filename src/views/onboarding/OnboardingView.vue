@@ -103,8 +103,9 @@ const handleComplete = async (): Promise<void> => {
   }
 
   /* 2. 构建 AppConfig 并保存（主题、语言、onboarding 标记） */
+  const existing = await loadAppConfig();
   const appConfig: AppConfig = {
-    version: '1.0.0',
+    ...existing,
     theme: state.data.theme,
     language: state.data.language,
     onboarding_completed: true,

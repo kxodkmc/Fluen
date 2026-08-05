@@ -20,6 +20,7 @@
  */
 import { ref, watch, provide } from 'vue';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 import TitleBar from './components/TitleBar.vue';
 import FunctionPanel from './components/FunctionPanel.vue';
 import ContentPanel from './components/ContentPanel.vue';
@@ -116,6 +117,17 @@ async function handleMenuSelect(itemId: string): Promise<void> {
     showNewProjectDialog.value = true;
   } else if (itemId === 'openArticle') {
     await handleOpenArticle();
+  } else if (itemId === 'openLogsDir') {
+    await handleOpenLogsDir();
+  }
+}
+
+/** 打开日志存放目录（系统文件管理器）。 */
+async function handleOpenLogsDir(): Promise<void> {
+  try {
+    await invoke('open_logs_dir');
+  } catch (err) {
+    console.error('[MainView] 打开日志目录失败:', err);
   }
 }
 
@@ -186,6 +198,8 @@ watch(
         :active-tab-id="layout.activeTabId.value"
         @select-tab="layout.setActiveTab"
         @close-tab="layout.closeTab"
+        @new-article="showNewProjectDialog = true"
+        @open-article="handleOpenArticle"
       />
 
       <!-- 右侧面板区（Motis 对话 / 学术助手） -->

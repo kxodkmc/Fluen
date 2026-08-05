@@ -14,6 +14,7 @@ mod motis_chat;
 mod mascot;
 mod platform;
 mod project;
+mod recent_projects;
 #[allow(dead_code)]
 mod references;
 mod task_queue;
@@ -21,6 +22,7 @@ mod task_queue;
 use ai_services::storage::ConfigStorage as AiServicesConfigStorage;
 use app_config::storage::AppConfigStorage;
 use llm_config::storage::ConfigStorage;
+use recent_projects::storage::RecentProjectsStorage;
 use task_queue::TaskQueueState;
 
 #[tauri::command]
@@ -39,9 +41,7 @@ pub fn run() {
         .unwrap_or_default();
 
     // 初始化日志系统（失败不阻塞启动，后续 tracing 调用退化为静默）。
-    let log_guard = platform::fluen_cache_dir()
-        .ok()
-        .and_then(|cache_dir| logging::init_logging(cache_dir, &log_config).ok());
+    let log_guard = logging::init_logging(&log_config).ok();
     tracing::info!(target: "fluen_logging", "Fluen 启动中");
 
     let llm_storage =
@@ -57,6 +57,8 @@ pub fn run() {
     let ocr_state = ai_services::commands::OcrState::new();
     let import_state = references::commands::ImportState::new();
     let task_queue_state = TaskQueueState::new();
+    let recent_projects_storage =
+        RecentProjectsStorage::new().expect("无法确定最近打开项目数据目录");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -71,6 +73,7 @@ pub fn run() {
         .manage(ocr_state)
         .manage(import_state)
         .manage(task_queue_state)
+        .manage(recent_projects_storage)
         .manage(logging::LogGuardHolder(log_guard))
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -143,7 +146,12 @@ pub fn run() {
             knowledge_builder::commands::knowledge_get_entry,
             knowledge_builder::commands::knowledge_query,
             knowledge_builder::commands::knowledge_meta,
+            recent_projects::commands::recent_projects_list,
+            recent_projects::commands::recent_projects_record,
+            recent_projects::commands::recent_projects_remove,
+            recent_projects::commands::recent_projects_trim,
             logging::commands::log_frontend,
+            logging::commands::open_logs_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

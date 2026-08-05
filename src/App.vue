@@ -11,9 +11,9 @@
  *   - the .app-root border-radius is removed while maximized to avoid
  *     clipped corners on a full-screen window
  */
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { OnboardingView, MainView, SettingsView } from './views';
+import { OnboardingView, MainView, SettingsView, KnowledgeGraphView } from './views';
 import { ThemeProvider } from './theme';
 import { useAppConfig } from './composables/useAppConfig';
 import { useI18n } from './i18n';
@@ -22,6 +22,21 @@ const onboarded = ref(false);
 
 /** 当前视图状态：onboarding 完成后在 main / settings 之间切换。 */
 const currentView = ref<'main' | 'settings'>('main');
+
+/**
+ * 是否以网状图子窗口模式启动。
+ *
+ * 子窗口由 `openKnowledgeGraphWindow` 创建，URL 携带 `?view=graph` 参数。
+ * 该窗口跳过 onboarding 与主界面，直接渲染 `KnowledgeGraphView`。
+ */
+const isGraphWindow = computed(() => {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('view') === 'graph';
+  } catch {
+    return false;
+  }
+});
 
 const handleEnter = (): void => {
   onboarded.value = true;
@@ -66,7 +81,9 @@ onUnmounted(() => {
 
 <template>
   <ThemeProvider>
-    <div class="app-root" :class="{ 'app-root--maximized': isMaximized }">
+    <!-- 网状图子窗口：跳过主界面流程，直接渲染网状图视图 -->
+    <KnowledgeGraphView v-if="isGraphWindow" />
+    <div v-else class="app-root" :class="{ 'app-root--maximized': isMaximized }">
       <OnboardingView v-if="!onboarded" @enter="handleEnter" />
       <SettingsView
         v-else-if="currentView === 'settings'"

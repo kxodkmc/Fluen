@@ -18,7 +18,7 @@
  * ```
  */
 
-import { ref, computed, watch, readonly } from 'vue';
+import { ref, shallowRef, computed, watch, readonly } from 'vue';
 import { useProject } from '../../../composables/useProject';
 import { useFluenEditor } from '../components/editor/composables/useFluenEditor';
 import { parseOutline, filterByLevel, type OutlineNode } from './outlineParser';
@@ -34,9 +34,16 @@ const _jumpTarget = ref<{ line: number; timestamp: number } | null>(null);
 /** 活动行（光标行，0-based）。由 `useFluenEditor().onActiveLineChange` 推送，供 UI 高亮。 */
 const _activeLine = ref<number | null>(null);
 
-// ── 内部缓存：完整大纲（未筛选） ────────────────────────────────────
+/**
+ * 折叠节点集合（按 sectionId 索引，跨大纲重新解析保持稳定）。
+ * 使用 shallowRef + 新 Set 实例触发响应式更新。
+ */
+const _collapsedSet = shallowRef<Set<string>>(new Set());
 
-let _fullOutline: OutlineNode[] = [];
+// ── 内部缓存：完整大纲（未筛选） ────────────────────────────────────
+// 使用 shallowRef 确保 computed（outline / hasOutline）能响应大纲变化。
+// 此前的 plain let 变量不会被 Vue 追踪，导致项目打开后大纲面板不刷新。
+const _fullOutline = shallowRef<OutlineNode[]>([]);
 
 // ── 编辑器联动订阅（模块级，随单例生命周期存在；不显式清理） ──────────
 
@@ -48,7 +55,7 @@ let _fullOutline: OutlineNode[] = [];
  * 返回的 unsubscribe 函数随单例生命周期保留，不显式调用。
  */
 useFluenEditor().onDocChange((md) => {
-  _fullOutline = md ? parseOutline(md) : [];
+  _fullOutline.value = md ? parseOutline(md) : [];
 });
 
 /**
@@ -68,18 +75,18 @@ export function useOutline() {
   watch(
     tempMd,
     (md) => {
-      _fullOutline = md ? parseOutline(md) : [];
+      _fullOutline.value = md ? parseOutline(md) : [];
     },
     { immediate: true },
   );
 
   /** 筛选后的大纲树。 */
   const outline = computed(() =>
-    filterByLevel(_fullOutline, _minLevel.value, _maxLevel.value),
+    filterByLevel(_fullOutline.value, _minLevel.value, _maxLevel.value),
   );
 
   /** 是否有大纲内容。 */
-  const hasOutline = computed(() => _fullOutline.length > 0);
+  const hasOutline = computed(() => _fullOutline.value.length > 0);
 
   /** 触发跳转到指定行。同时驱动 ContentPanel 滚动（_jumpTarget）与编辑器滚动（scrollToLine）。 */
   function jumpTo(line: number): void {
@@ -106,6 +113,46 @@ export function useOutline() {
   function resetFilter(): void {
     _minLevel.value = 1;
     _maxLevel.value = 6;
+  }
+
+  // ── 折叠/展开 ───────────────────────────────────────────────────
+
+  /** 节点是否处于折叠状态（无 sectionId 的节点永不折叠）。 */
+  function isCollapsed(node: OutlineNode): boolean {
+    if (!node.sectionId || node.children.length === 0) return false;
+    return _collapsedSet.value.has(node.sectionId);
+  }
+
+  /** 切换节点折叠状态。 */
+  function toggleCollapse(node: OutlineNode): void {
+    if (!node.sectionId || node.children.length === 0) return;
+    const next = new Set(_collapsedSet.value);
+    if (next.has(node.sectionId)) {
+      next.delete(node.sectionId);
+    } else {
+      next.add(node.sectionId);
+    }
+    _collapsedSet.value = next;
+  }
+
+  /** 展开所有节点。 */
+  function expandAll(): void {
+    _collapsedSet.value = new Set();
+  }
+
+  /** 折叠所有有子节点的节点。 */
+  function collapseAll(): void {
+    const ids: string[] = [];
+    function walk(nodes: OutlineNode[]): void {
+      for (const n of nodes) {
+        if (n.sectionId && n.children.length > 0) {
+          ids.push(n.sectionId);
+        }
+        walk(n.children);
+      }
+    }
+    walk(_fullOutline.value);
+    _collapsedSet.value = new Set(ids);
   }
 
   /**
@@ -160,5 +207,11 @@ export function useOutline() {
     resetFilter,
     renameNode,
     insertChildHeading,
+
+    // 折叠/展开
+    isCollapsed,
+    toggleCollapse,
+    expandAll,
+    collapseAll,
   };
 }

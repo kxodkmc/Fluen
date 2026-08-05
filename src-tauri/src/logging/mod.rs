@@ -1,41 +1,55 @@
 //! # logging
 //!
-//! 统一日志系统——基于 `tracing` + `tracing-subscriber` + `tracing-appender`。
+//! 统一日志系统——基于 `tracing` + `tracing-subscriber` + 自定义滚动文件写入器。
 //!
 //! 提供能力：
-//! - 按天滚动的文件日志（非阻塞写入），与前端日志同文件
+//! - 每次运行独立日志文件（文件名含 `YYYYMMDDHHMMSS` 时间戳）
+//! - 单文件条目数超阈值时自动滚动创建新文件（`-1`/`-2` 后缀）
+//! - 累计文件数超阈值时自动清理最旧文件
+//! - 可选的日志存放目录（默认 `fluen_cache_dir()/logs/`）
 //! - 可选的控制台镜像（开发模式）
 //! - 环境变量 `FLUEN_LOG` 覆盖级别（最高优先，便于临时调试）
 //! - 前端日志经 [`commands::log_frontend`] 桥接到同一文件
 //!
-//! ## 日志位置
+//! ## 文件命名
 //!
-//! `fluen_cache_dir()/logs/fluen.log.YYYY-MM-DD`（遵循 AGENTS.md 缓存目录规范，
-//! 可随时清除，不影响功能）。
+//! - 首个文件：`fluen_YYYYMMDDHHMMSS.log`
+//! - 滚动文件：`fluen_YYYYMMDDHHMMSS-1.log`、`fluen_YYYYMMDDHHMMSS-2.log`…
 //!
 //! ## 初始化
 //!
 //! 在 [`crate::run`] 最开头调用 [`init_logging`]，返回的
 //! [`WorkerGuard`] 必须在应用整个生命周期内持有（存入 Tauri manage state，
 //! 见 [`LogGuardHolder`]），drop 时刷盘并关闭后台写入线程。
-//!
-//! ## 级别优先级
-//!
-//! 1. 环境变量 `FLUEN_LOG`（如 `debug`、`info,fluen_frontend=debug`）
-//! 2. [`LogConfig::level`]
-//!
-//! ## 稳定性
-//!
-//! 日志初始化失败**不影响应用启动**：返回 `Err` 时调用方应继续运行，
-//! 后续 `tracing::` 调用退化为静默（无输出）。
 
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+use crate::platform;
+
 pub mod commands;
+
+/// 单文件最大条目数默认值。
+const DEFAULT_MAX_ENTRIES_PER_FILE: u32 = 4096;
+/// 单文件最大条目数下限。
+pub const MIN_MAX_ENTRIES_PER_FILE: u32 = 512;
+/// 单文件最大条目数上限。
+pub const MAX_MAX_ENTRIES_PER_FILE: u32 = 8192;
+
+/// 累计日志文件数默认值。
+const DEFAULT_MAX_FILE_COUNT: u32 = 64;
+/// 累计日志文件数下限。
+pub const MIN_MAX_FILE_COUNT: u32 = 1;
+/// 累计日志文件数上限。
+pub const MAX_MAX_FILE_COUNT: u32 = 8192;
+
+/// 日志文件名前缀。
+const LOG_FILE_PREFIX: &str = "fluen_";
 
 /// 日志配置。对应 `app_config.json` 中的 `logging` 段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,9 +60,15 @@ pub struct LogConfig {
     /// 是否同时输出到 stdout 控制台（建议仅在开发模式开启）。
     #[serde(default)]
     pub console_enabled: bool,
-    /// 日志文件保留天数，过期文件启动时清理。`0` 表示不清理。
-    #[serde(default = "default_retention_days")]
-    pub retention_days: u32,
+    /// 自定义日志存放目录。为空时使用默认缓存目录下的 `logs/` 子目录。
+    #[serde(default)]
+    pub log_dir: Option<String>,
+    /// 单个日志文件最大条目数（超限自动滚动创建新文件）。
+    #[serde(default = "default_max_entries_per_file")]
+    pub max_entries_per_file: u32,
+    /// 累计日志文件数上限（超限自动清理最旧文件）。
+    #[serde(default = "default_max_file_count")]
+    pub max_file_count: u32,
 }
 
 impl Default for LogConfig {
@@ -56,8 +76,39 @@ impl Default for LogConfig {
         Self {
             level: default_level(),
             console_enabled: false,
-            retention_days: default_retention_days(),
+            log_dir: None,
+            max_entries_per_file: default_max_entries_per_file(),
+            max_file_count: default_max_file_count(),
         }
+    }
+}
+
+impl LogConfig {
+    /// 校验配置完整性。
+    ///
+    /// - `max_entries_per_file` 必须在 [`MIN_MAX_ENTRIES_PER_FILE`]..=[`MAX_MAX_ENTRIES_PER_FILE`]
+    /// - `max_file_count` 必须在 [`MIN_MAX_FILE_COUNT`]..=[`MAX_MAX_FILE_COUNT`]
+    /// - `log_dir` 若存在则不能为空字符串
+    pub fn validate(&self) -> Result<(), String> {
+        if !(MIN_MAX_ENTRIES_PER_FILE..=MAX_MAX_ENTRIES_PER_FILE).contains(&self.max_entries_per_file)
+        {
+            return Err(format!(
+                "max_entries_per_file 必须在 {MIN_MAX_ENTRIES_PER_FILE}-{MAX_MAX_ENTRIES_PER_FILE} 范围内，当前为: {}",
+                self.max_entries_per_file
+            ));
+        }
+        if !(MIN_MAX_FILE_COUNT..=MAX_MAX_FILE_COUNT).contains(&self.max_file_count) {
+            return Err(format!(
+                "max_file_count 必须在 {MIN_MAX_FILE_COUNT}-{MAX_MAX_FILE_COUNT} 范围内，当前为: {}",
+                self.max_file_count
+            ));
+        }
+        if let Some(dir) = &self.log_dir {
+            if dir.trim().is_empty() {
+                return Err("log_dir 不能为空字符串".into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -65,8 +116,12 @@ fn default_level() -> String {
     "info".to_string()
 }
 
-fn default_retention_days() -> u32 {
-    7
+fn default_max_entries_per_file() -> u32 {
+    DEFAULT_MAX_ENTRIES_PER_FILE
+}
+
+fn default_max_file_count() -> u32 {
+    DEFAULT_MAX_FILE_COUNT
 }
 
 /// 持有 [`WorkerGuard`]，存入 Tauri manage state 以保证应用生命周期内不 drop。
@@ -80,6 +135,28 @@ pub struct LogGuardHolder(pub Option<WorkerGuard>);
 pub enum LogError {
     #[error("无法创建日志目录 {dir}: {source}")]
     CreateDir { dir: String, source: std::io::Error },
+    #[error("无法创建日志文件 {path}: {source}")]
+    CreateFile { path: String, source: std::io::Error },
+    #[error("无法确定平台缓存目录")]
+    Platform,
+}
+
+/// 解析日志存放目录。
+///
+/// 优先使用 `config.log_dir`，为空时回退到 `fluen_cache_dir()/logs/`。
+/// 目录不存在时自动创建。
+pub fn resolve_logs_dir(config: &LogConfig) -> Result<PathBuf, LogError> {
+    let logs_dir = match config.log_dir.as_ref().filter(|d| !d.trim().is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => platform::fluen_cache_dir()
+            .map_err(|_| LogError::Platform)?
+            .join("logs"),
+    };
+    std::fs::create_dir_all(&logs_dir).map_err(|e| LogError::CreateDir {
+        dir: logs_dir.display().to_string(),
+        source: e,
+    })?;
+    Ok(logs_dir)
 }
 
 /// 初始化全局日志系统。
@@ -92,23 +169,17 @@ pub enum LogError {
 ///
 /// # 文件滚动
 ///
-/// 使用 `tracing_appender::rolling::daily`，文件名 `fluen.log.YYYY-MM-DD`。
-/// 启动时按文件名中的日期清理超过 `retention_days` 的文件。
-pub fn init_logging(
-    cache_dir: PathBuf,
-    config: &LogConfig,
-) -> Result<WorkerGuard, LogError> {
-    let logs_dir = cache_dir.join("logs");
-    std::fs::create_dir_all(&logs_dir).map_err(|e| LogError::CreateDir {
-        dir: logs_dir.display().to_string(),
-        source: e,
-    })?;
+/// 每次运行创建独立日志文件（`fluen_YYYYMMDDHHMMSS.log`），
+/// 单文件条目数超 `max_entries_per_file` 时自动滚动（`-1`/`-2` 后缀），
+/// 累计文件数超 `max_file_count` 时自动清理最旧文件。
+pub fn init_logging(config: &LogConfig) -> Result<WorkerGuard, LogError> {
+    let logs_dir = resolve_logs_dir(config)?;
+    let max_entries = config.max_entries_per_file as u64;
 
-    cleanup_old_logs(&logs_dir, config.retention_days);
+    cleanup_excess_logs(&logs_dir, config.max_file_count);
 
-    // 按天滚动文件 appender（当前文件名为 fluen.log.YYYY-MM-DD）
-    let file_appender = tracing_appender::rolling::daily(&logs_dir, "fluen.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let writer = RollingFileWriter::new(&logs_dir, max_entries)?;
+    let (non_blocking, guard) = tracing_appender::non_blocking(writer);
 
     // 构建 EnvFilter：环境变量优先
     let filter = EnvFilter::try_from_env("FLUEN_LOG")
@@ -140,43 +211,159 @@ pub fn init_logging(
         dir = %logs_dir.display(),
         level = %config.level,
         console = config.console_enabled,
+        max_entries = config.max_entries_per_file,
+        max_files = config.max_file_count,
         "日志系统已初始化"
     );
 
     Ok(guard)
 }
 
-/// 清理过期日志文件。
+// ===========================================================================
+// 滚动文件写入器
+// ===========================================================================
+
+/// 基于条目数的滚动文件写入器。
 ///
-/// 按文件名中的日期判断（`fluen.log.YYYY-MM-DD`），删除早于
-/// `retention_days` 前的文件。解析失败或非日志文件跳过。
-/// 任何 IO 错误静默忽略，不影响启动。
-fn cleanup_old_logs(logs_dir: &Path, retention_days: u32) {
-    if retention_days == 0 {
+/// 每次运行以 `fluen_YYYYMMDDHHMMSS.log` 起始，按换行符统计已写入条目数，
+/// 达到 `max_entries` 后自动滚动到 `fluen_YYYYMMDDHHMMSS-1.log` 等后续文件。
+/// 适用于 `tracing_appender::non_blocking` 的后台线程模型——单线程独占访问。
+pub struct RollingFileWriter {
+    logs_dir: PathBuf,
+    session_ts: String,
+    file_index: u32,
+    current_file: Option<std::io::BufWriter<File>>,
+    entry_count: u64,
+    max_entries: u64,
+}
+
+impl RollingFileWriter {
+    /// 创建写入器并打开首个会话文件。
+    pub fn new(logs_dir: &Path, max_entries: u64) -> Result<Self, LogError> {
+        let session_ts = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
+        let mut writer = Self {
+            logs_dir: logs_dir.to_path_buf(),
+            session_ts,
+            file_index: 0,
+            current_file: None,
+            entry_count: 0,
+            max_entries,
+        };
+        writer.open_session_file()?;
+        Ok(writer)
+    }
+
+    /// 打开当前 `file_index` 对应的会话文件。
+    ///
+    /// - index 0 → `fluen_YYYYMMDDHHMMSS.log`
+    /// - index N → `fluen_YYYYMMDDHHMMSS-N.log`
+    ///
+    /// 若文件已存在（同秒内重复启动），递增后缀直到找到可用文件名。
+    fn open_session_file(&mut self) -> Result<(), LogError> {
+        // 先关闭旧文件（BufWriter drop 时自动 flush）
+        self.current_file = None;
+
+        let filename = if self.file_index == 0 {
+            format!("{LOG_FILE_PREFIX}{}.log", self.session_ts)
+        } else {
+            format!("{LOG_FILE_PREFIX}{}-{}.log", self.session_ts, self.file_index)
+        };
+        let mut path = self.logs_dir.join(&filename);
+
+        // 同秒冲突时递增后缀
+        while path.exists() && self.file_index == 0 {
+            self.file_index += 1;
+            path = self.logs_dir.join(format!(
+                "{LOG_FILE_PREFIX}{}-{}.log",
+                self.session_ts, self.file_index
+            ));
+        }
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| LogError::CreateFile {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+        self.current_file = Some(std::io::BufWriter::new(file));
+        self.entry_count = 0;
+        Ok(())
+    }
+
+    /// 滚动到下一个文件。
+    fn rotate(&mut self) -> Result<(), LogError> {
+        self.file_index += 1;
+        self.open_session_file()
+    }
+}
+
+impl Write for RollingFileWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let file = self
+            .current_file
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "日志文件未打开"))?;
+        let written = file.write(buf)?;
+        // 按换行符统计条目数
+        let newlines = buf.iter().filter(|&&b| b == b'\n').count() as u64;
+        self.entry_count += newlines;
+        // 达到阈值时滚动（当前条目已完整写入旧文件）
+        if self.entry_count >= self.max_entries {
+            if let Some(f) = self.current_file.as_mut() {
+                f.flush()?;
+            }
+            let _ = self.rotate();
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(f) = self.current_file.as_mut() {
+            f.flush()?;
+        }
+        Ok(())
+    }
+}
+
+// ===========================================================================
+// 旧文件清理
+// ===========================================================================
+
+/// 清理超额日志文件。
+///
+/// 扫描目录下所有 `fluen_*.log` 文件，按文件名排序（时间戳即年代序），
+/// 保留最新的 `max_file_count` 个，删除其余。
+fn cleanup_excess_logs(logs_dir: &Path, max_file_count: u32) {
+    if max_file_count == 0 {
         return;
     }
-    let cutoff =
-        chrono::Local::now().date_naive() - chrono::Duration::days(retention_days as i64);
-
     let entries = match std::fs::read_dir(logs_dir) {
         Ok(e) => e,
         Err(_) => return,
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Some(date_str) = name.strip_prefix("fluen.log.") else {
-            continue;
-        };
-        let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else {
-            continue;
-        };
-        if date < cutoff {
-            let _ = std::fs::remove_file(&path);
-        }
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with(LOG_FILE_PREFIX) && n.ends_with(".log"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if files.len() <= max_file_count as usize {
+        return;
+    }
+
+    // 按文件名升序（时间戳即年代序），删除最旧的
+    files.sort();
+    let to_remove = files.len().saturating_sub(max_file_count as usize);
+    for path in files.iter().take(to_remove) {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -193,7 +380,9 @@ mod tests {
         let cfg = LogConfig::default();
         assert_eq!(cfg.level, "info");
         assert!(!cfg.console_enabled);
-        assert_eq!(cfg.retention_days, 7);
+        assert!(cfg.log_dir.is_none());
+        assert_eq!(cfg.max_entries_per_file, DEFAULT_MAX_ENTRIES_PER_FILE);
+        assert_eq!(cfg.max_file_count, DEFAULT_MAX_FILE_COUNT);
     }
 
     #[test]
@@ -201,13 +390,17 @@ mod tests {
         let cfg = LogConfig {
             level: "debug".into(),
             console_enabled: true,
-            retention_days: 14,
+            log_dir: Some("/tmp/fluen-logs".into()),
+            max_entries_per_file: 2048,
+            max_file_count: 32,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: LogConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.level, "debug");
         assert!(parsed.console_enabled);
-        assert_eq!(parsed.retention_days, 14);
+        assert_eq!(parsed.log_dir.as_deref(), Some("/tmp/fluen-logs"));
+        assert_eq!(parsed.max_entries_per_file, 2048);
+        assert_eq!(parsed.max_file_count, 32);
     }
 
     #[test]
@@ -216,54 +409,164 @@ mod tests {
         let cfg: LogConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.level, "info");
         assert!(!cfg.console_enabled);
-        assert_eq!(cfg.retention_days, 7);
+        assert!(cfg.log_dir.is_none());
+        assert_eq!(cfg.max_entries_per_file, DEFAULT_MAX_ENTRIES_PER_FILE);
+        assert_eq!(cfg.max_file_count, DEFAULT_MAX_FILE_COUNT);
     }
 
     #[test]
-    fn cleanup_old_logs_removes_expired_keeps_recent() {
+    fn log_config_validate_ok() {
+        assert!(LogConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn log_config_validate_entries_out_of_range() {
+        let mut cfg = LogConfig::default();
+        cfg.max_entries_per_file = MIN_MAX_ENTRIES_PER_FILE - 1;
+        assert!(cfg.validate().is_err());
+
+        cfg.max_entries_per_file = MAX_MAX_ENTRIES_PER_FILE + 1;
+        assert!(cfg.validate().is_err());
+
+        cfg.max_entries_per_file = MIN_MAX_ENTRIES_PER_FILE;
+        assert!(cfg.validate().is_ok());
+
+        cfg.max_entries_per_file = MAX_MAX_ENTRIES_PER_FILE;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn log_config_validate_file_count_out_of_range() {
+        let mut cfg = LogConfig::default();
+        cfg.max_file_count = 0;
+        assert!(cfg.validate().is_err());
+
+        cfg.max_file_count = MAX_MAX_FILE_COUNT + 1;
+        assert!(cfg.validate().is_err());
+
+        cfg.max_file_count = MIN_MAX_FILE_COUNT;
+        assert!(cfg.validate().is_ok());
+
+        cfg.max_file_count = MAX_MAX_FILE_COUNT;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn log_config_validate_empty_log_dir() {
+        let mut cfg = LogConfig::default();
+        cfg.log_dir = Some("   ".into());
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn cleanup_excess_logs_removes_oldest() {
         let tmp = std::env::temp_dir().join(format!(
-            "fluen_log_test_{}_cleanup",
+            "fluen_log_test_{}_excess",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        // 过期文件（2020 年）
-        let old_file = tmp.join("fluen.log.2020-01-01");
-        std::fs::write(&old_file, "old").unwrap();
-
-        // 今天文件
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let recent_file = tmp.join(format!("fluen.log.{today}"));
-        std::fs::write(&recent_file, "recent").unwrap();
-
+        // 创建 5 个日志文件（时间戳递增）
+        for i in 0..5 {
+            let name = format!("{LOG_FILE_PREFIX}2026010100000{}.log", i);
+            std::fs::write(tmp.join(name), "x").unwrap();
+        }
         // 非日志文件（应保留）
-        let other_file = tmp.join("notes.txt");
-        std::fs::write(&other_file, "notes").unwrap();
+        std::fs::write(tmp.join("notes.txt"), "notes").unwrap();
 
-        cleanup_old_logs(&tmp, 7);
+        cleanup_excess_logs(&tmp, 3);
 
-        assert!(!old_file.exists(), "过期日志应被删除");
-        assert!(recent_file.exists(), "当天日志应保留");
-        assert!(other_file.exists(), "非日志文件应保留");
+        let remaining: Vec<String> = std::fs::read_dir(&tmp)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().to_string_lossy().into_owned().into())
+            .collect();
+        let log_count = remaining
+            .iter()
+            .filter(|n| n.starts_with(LOG_FILE_PREFIX) && n.ends_with(".log"))
+            .count();
+        assert_eq!(log_count, 3, "应保留 3 个日志文件");
+        assert!(
+            remaining.contains(&"notes.txt".to_string()),
+            "非日志文件应保留"
+        );
+        // 最旧的应被删除
+        assert!(
+            !remaining.contains(&format!("{LOG_FILE_PREFIX}20260101000000.log")),
+            "最旧日志应被删除"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn cleanup_zero_retention_is_noop() {
+    fn cleanup_excess_logs_noop_when_under_limit() {
         let tmp = std::env::temp_dir().join(format!(
-            "fluen_log_test_{}_zero",
+            "fluen_log_test_{}_noop",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let old_file = tmp.join("fluen.log.2020-01-01");
-        std::fs::write(&old_file, "old").unwrap();
 
-        cleanup_old_logs(&tmp, 0);
+        std::fs::write(tmp.join(format!("{LOG_FILE_PREFIX}20260101000000.log")), "x").unwrap();
+        cleanup_excess_logs(&tmp, 64);
+        let count = std::fs::read_dir(&tmp).unwrap().count();
+        assert_eq!(count, 1);
 
-        assert!(old_file.exists(), "retention_days=0 应不清理");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rolling_writer_creates_session_file() {
+        let tmp = std::env::temp_dir().join(format!(
+            "fluen_log_test_{}_rolling",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut writer = RollingFileWriter::new(&tmp, 3).unwrap();
+        writer.write_all(b"a\n").unwrap();
+        writer.write_all(b"b\n").unwrap();
+        writer.write_all(b"c\n").unwrap();
+        // 第 3 条后应滚动，第 4 条写入新文件
+        writer.write_all(b"d\n").unwrap();
+        writer.flush().unwrap();
+
+        let files: Vec<String> = std::fs::read_dir(&tmp)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().to_string_lossy().into_owned().into())
+            .collect();
+        assert_eq!(files.len(), 2, "应创建 2 个文件（滚动一次）");
+        assert!(
+            files.iter().any(|f| f.ends_with("-1.log")),
+            "应存在滚动后缀 -1 的文件: {:?}",
+            files
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rolling_writer_handles_no_newline() {
+        let tmp = std::env::temp_dir().join(format!(
+            "fluen_log_test_{}_nonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut writer = RollingFileWriter::new(&tmp, 2).unwrap();
+        // 无换行符的写入不计为条目
+        writer.write_all(b"partial").unwrap();
+        writer.write_all(b" line\n").unwrap();
+        writer.flush().unwrap();
+
+        let count = std::fs::read_dir(&tmp).unwrap().count();
+        assert_eq!(count, 1, "1 条记录不应滚动");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

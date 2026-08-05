@@ -51,7 +51,7 @@ export type RetrievalMethod = 'keyword' | 'semantic' | 'hybrid';
 /** 元信息查询类型（对应 Rust `MetaQueryType`）。 */
 export type MetaQueryType = 'overview' | 'tags' | 'recent';
 
-/** 知识库条目（对应 Rust `WikiEntry`，不含正文）。 */
+/** 知识库条目（对应 Rust `WikiEntry`，列表查询时不含正文）。 */
 export interface WikiEntry {
   id: string;
   wiki_type: WikiType;
@@ -63,12 +63,83 @@ export interface WikiEntry {
   authors?: string[];
   /** 标签 ID 列表。 */
   tags?: string[];
-  /** 关联 wikiID 列表。 */
+  /** 关联 wikiID 列表（出向）。 */
   relations?: string[];
+  /** 正文（列表查询时为空，详情查询时填充）。 */
+  content?: string;
   /** 创建时间（RFC3339）。 */
   created: string;
   /** 更新时间（RFC3339）。 */
   updated: string;
+}
+
+/**
+ * 知识库条目详情（对应 Rust `WikiEntryDetail`）。
+ *
+ * 通过 `#[serde(flatten)]` 扩展 `WikiEntry`，额外提供标签名与关联条目标题。
+ * 由 `knowledge_get_entry` 命令返回。
+ */
+export interface WikiEntryDetail extends WikiEntry {
+  /** 标签名称列表，与 `tags` 一一对应（空时省略）。 */
+  tag_titles?: string[];
+  /** 关联条目标题列表，与 `relations` 一一对应（空时省略）。 */
+  relation_titles?: string[];
+}
+
+/** 标签（对应 Rust `WikiTag`）。 */
+export interface WikiTag {
+  id: string;
+  title: string;
+}
+
+/** 实际使用的检索方式（对应 Rust `RetrievalMethodUsed`，snake_case 序列化）。 */
+export type RetrievalMethodUsed =
+  | 'direct_id_lookup'
+  | 'keyword'
+  | 'semantic'
+  | 'hybrid';
+
+/** 单条检索结果（对应 Rust `QueryMatch`）。 */
+export interface QueryMatch {
+  wiki_id: string;
+  /** 条目类型（Rust 序列化为 `type`）。 */
+  wiki_type: WikiType;
+  title: string;
+  file_path: string;
+  /** 匹配度得分（ID 直查时固定 1.0）。 */
+  score: number;
+  /** 正文（仅 include_content=true 时返回）。 */
+  content?: string;
+}
+
+/** 检索结果（对应 Rust `QueryResult`）。 */
+export interface QueryResult {
+  success: boolean;
+  retrieval_method_used: RetrievalMethodUsed;
+  results: QueryMatch[];
+}
+
+/** 近期更新条目（对应 Rust `RecentEntry`，仅含 id 与 title）。 */
+export interface RecentEntry {
+  id: string;
+  title: string;
+}
+
+/** 元信息数据体（对应 Rust `MetaData`，按 query_type 返回不同字段）。 */
+export interface MetaData {
+  total_entries: number;
+  total_tags: number;
+  embedding_enabled: boolean;
+  /** query_type='tags' 时返回。 */
+  tags?: WikiTag[];
+  /** query_type='recent' 时返回。 */
+  recent_entries?: RecentEntry[];
+}
+
+/** 元信息查询结果（对应 Rust `MetaResult`）。 */
+export interface MetaResult {
+  success: boolean;
+  data: MetaData;
 }
 
 // ---------------------------------------------------------------------------

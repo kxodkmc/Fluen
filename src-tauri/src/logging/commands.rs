@@ -14,7 +14,12 @@
 //! 不会落盘。这与后端行为一致，避免噪音。
 
 use serde::{Deserialize, Serialize};
+use tauri::State;
+use tauri_plugin_opener::OpenerExt;
 use tracing::{self, Level};
+
+use crate::app_config::storage::AppConfigStorage;
+use super::{resolve_logs_dir};
 
 /// 前端日志级别。与前端 `logger.ts` 的级别对齐（小写序列化）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -77,6 +82,24 @@ pub async fn log_frontend(entries: Vec<FrontendLogEntry>) {
             Level::ERROR => tracing::error!(target: "fluen_frontend", scope = %scope, "{}", msg),
         }
     }
+}
+
+/// 打开日志存放目录（在系统文件管理器中打开）。
+///
+/// 解析当前配置的日志目录（自定义或默认 `cache_dir/logs`），
+/// 目录不存在时自动创建，随后通过 `tauri-plugin-opener` 打开。
+#[tauri::command]
+pub fn open_logs_dir(
+    app: tauri::AppHandle,
+    storage: State<'_, AppConfigStorage>,
+) -> Result<String, String> {
+    let config = storage.get().map_err(|e| e.to_string())?;
+    let log_config = &config.logging;
+    let logs_dir = resolve_logs_dir(log_config).map_err(|e| e.to_string())?;
+    app.opener()
+        .open_path(logs_dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())?;
+    Ok(logs_dir.to_string_lossy().to_string())
 }
 
 // ===========================================================================

@@ -35,6 +35,10 @@ export const ACTIVITY_ITEMS: ActivityItem[] = [
     id: 'references',
     icon: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z',
   },
+  {
+    id: 'knowledge',
+    icon: 'M12 7c-1.5-1.5-3.5-2-6-2H2v15h4c2.5 0 4.5.5 6 2 1.5-1.5 3.5-2 6-2h4V5h-4c-2.5 0-4.5.5-6 2zM12 7v15',
+  },
 ];
 
 /* ── 标题栏菜单 ───────────────────────────────────────────────────────── */
@@ -46,6 +50,9 @@ export const FILE_MENU_ITEM_IDS = [
   'openArticle',
   'recentArticles',
 ] as const;
+
+/** 帮助菜单子项 ID。 */
+export const HELP_MENU_ITEM_IDS = ['openLogsDir'] as const;
 
 /** 应用标题（显示于标题栏左侧 logo 旁）。 */
 export const APP_TITLE = 'Fluen';

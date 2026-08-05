@@ -12,7 +12,7 @@
  * 整体为 Tauri 拖拽区域；交互元素通过 data-tauri-drag-region="false" 排除拖拽。
  */
 import { ref, computed } from 'vue';
-import { TITLE_BAR_MENU_IDS, FILE_MENU_ITEM_IDS, APP_TITLE } from '../../constants';
+import { TITLE_BAR_MENU_IDS, FILE_MENU_ITEM_IDS, HELP_MENU_ITEM_IDS, APP_TITLE } from '../../constants';
 import { useI18n } from '../../../../i18n';
 import TitleBarMenuDropdown from './TitleBarMenuDropdown.vue';
 import type { MenuItem } from './TitleBarMenuDropdown.vue';
@@ -38,6 +38,14 @@ const fileMenuItems = computed<MenuItem[]>(() =>
   FILE_MENU_ITEM_IDS.map((id) => ({
     id,
     label: t(`main.titleBar.menus.filesItems.${id}`),
+  })),
+);
+
+/** 帮助菜单子项列表。 */
+const helpMenuItems = computed<MenuItem[]>(() =>
+  HELP_MENU_ITEM_IDS.map((id) => ({
+    id,
+    label: t(`main.titleBar.menus.helpItems.${id}`),
   })),
 );
 
@@ -118,6 +126,15 @@ function handleSelect(itemId: string): void {
           v-if="id === 'files'"
           :items="fileMenuItems"
           :visible="activeMenu === 'files'"
+          @select="handleSelect"
+          @close="closeMenu"
+        />
+
+        <!-- 帮助菜单子菜单 -->
+        <TitleBarMenuDropdown
+          v-if="id === 'help'"
+          :items="helpMenuItems"
+          :visible="activeMenu === 'help'"
           @select="handleSelect"
           @close="closeMenu"
         />

@@ -20,7 +20,7 @@ export interface SettingsSection {
 }
 
 /** 设置页面导航目标（从 TitleBar 下拉菜单触发）。 */
-export type SettingsSectionId = 'appearance' | 'language' | 'llmConfig' | 'motis' | 'aiServices';
+export type SettingsSectionId = 'general' | 'appearance' | 'language' | 'llmConfig' | 'motis' | 'aiServices';
 
 /**
  * 分区导航注入 key。

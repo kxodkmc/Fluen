@@ -14,8 +14,17 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import type { AppConfig, Language, ThemeMode } from '../types/app';
+import type { AppConfig, Language, LogConfig, ThemeMode } from '../types/app';
 import { i18nInstance } from '../i18n';
+
+/** 默认日志配置（与后端 `LogConfig::default` 对齐）。 */
+const DEFAULT_LOGGING: LogConfig = {
+  level: 'info',
+  console_enabled: false,
+  log_dir: null,
+  max_entries_per_file: 4096,
+  max_file_count: 64,
+};
 
 /** 默认配置。 */
 const DEFAULT_CONFIG: AppConfig = {
@@ -23,6 +32,8 @@ const DEFAULT_CONFIG: AppConfig = {
   theme: 'light',
   language: 'zh-CN',
   onboarding_completed: false,
+  logging: { ...DEFAULT_LOGGING },
+  recent_projects_count: 4,
 };
 
 /**

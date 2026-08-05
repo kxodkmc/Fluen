@@ -6,3 +6,4 @@ export * from './mascot';
 export * from './aiServices';
 export * from './references';
 export * from './reader';
+export * from './recentProjects';

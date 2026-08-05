@@ -28,13 +28,15 @@ export interface ContentTab {
   /** 标签页标题 */
   title: string;
   /** 标签页类型 */
-  type: 'file' | 'editor' | 'welcome' | 'reference';
+  type: 'file' | 'editor' | 'welcome' | 'reference' | 'wiki';
   /** SVG path data（可选，标签页图标） */
   icon?: string;
   /** 是否已修改（显示圆点指示） */
   dirty?: boolean;
   /** 当 type='reference' 时，关联的文献 ID。 */
   referenceId?: string;
+  /** 当 type='wiki' 时，关联的知识库条目 ID。 */
+  wikiId?: string;
 }
 
 /** AI 面板会话角色。 */

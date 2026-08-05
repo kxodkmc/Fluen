@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use confluent::agent_runtime::{
-    InvocationContext, RuntimeObserver, Tool, ToolError, ToolProvider, ToolSchema,
+    AgentEvent, InvocationContext, RuntimeObserver, Tool, ToolError, ToolProvider, ToolSchema,
 };
 use confluent::llmkit::{
     AnthropicProvider, AnthropicTransformer, ApiStyle, ChatClient, ChatClientConfig,
@@ -31,6 +31,36 @@ pub type PlanCapture = Arc<Mutex<Option<ExtractionPlan>>>;
 /// 每次 `runtime.run()` 前清空，运行中观察者写入，运行后 pipeline 读取。
 /// 消除了此前通过 title 反查 wiki_id 的脆弱路径（AI 标点漂移会导致反查失败）。
 pub type CreateEntryCapture = Arc<Mutex<Option<String>>>;
+
+/// 共享捕获状态：用于 UsageObserver 把 LLM usage 传回 pipeline。
+///
+/// V2.1：每次 `runtime.run()` 后从中读取 `prompt_tokens + completion_tokens`
+/// 作为会话真实上下文占用，替代 V2.0 的累加估算（避免 Context Overflow）。
+pub type UsageCapture = Arc<Mutex<Option<UsageSnapshot>>>;
+
+/// 单次 `runtime.run()` 的 LLM usage 快照。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsageSnapshot {
+    /// 输入 tokens（含 system + 历史轮次 + 当前输入）。
+    pub prompt_tokens: usize,
+    /// 输出 tokens。
+    pub completion_tokens: usize,
+}
+
+impl UsageSnapshot {
+    /// 总占用 = 输入 + 输出。
+    pub fn total(&self) -> usize {
+        self.prompt_tokens + self.completion_tokens
+    }
+
+    /// 从 AgentEvent::Finish 的 usage 构造。
+    pub fn from_token_usage(usage: &confluent::agent_runtime::TokenUsage) -> Self {
+        Self {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+        }
+    }
+}
 
 /// `knowledge_create_entry` 工具名称。
 const CREATE_ENTRY_TOOL_NAME: &str = "knowledge_create_entry";
@@ -66,6 +96,43 @@ impl RuntimeObserver for CreateEntryObserver {
                 *self.capture.lock().expect("create_entry capture poisoned") =
                     Some(wiki_id.to_string());
             }
+        }
+    }
+}
+
+/// 观察者：捕获 LLM 调用的真实 token usage。
+///
+/// V2.1：通过监听 [`AgentEvent::Finish`] 提取 `prompt_tokens` 与
+/// `completion_tokens`，写入共享 capture。pipeline 在 `runtime.run()`
+/// 返回后读取，作为会话真实上下文占用（避免 V2.0 的累加估算误差）。
+///
+/// `input_tokens` 已包含完整历史（system + 所有历史轮次输入输出 + 当前轮输入），
+/// 直接取最后一次调用的 `input + output` 作为 `history_used`。
+pub struct UsageObserver {
+    capture: UsageCapture,
+}
+
+impl UsageObserver {
+    pub fn new(capture: UsageCapture) -> Self {
+        Self { capture }
+    }
+}
+
+impl RuntimeObserver for UsageObserver {
+    fn on_agent_event(
+        &self,
+        event: &AgentEvent,
+        _ctx: &confluent::agent_runtime::ExecutionContext,
+    ) {
+        if let AgentEvent::Finish { usage, .. } = event {
+            let snapshot = UsageSnapshot::from_token_usage(usage);
+            tracing::debug!(
+                prompt_tokens = snapshot.prompt_tokens,
+                completion_tokens = snapshot.completion_tokens,
+                total = snapshot.total(),
+                "捕获 LLM usage"
+            );
+            *self.capture.lock().expect("usage capture poisoned") = Some(snapshot);
         }
     }
 }
@@ -362,8 +429,9 @@ impl ToolProvider for SubmitPlanProvider {
 /// - KnowledgeToolProvider（5 个工具：query/query_batch/create/edit/get_entry）
 /// - SubmitPlanProvider（Planning 阶段专用，捕获 ExtractionPlan）
 /// - CreateEntryObserver（Execution 阶段捕获 wiki_id，消除 title 反查）
+/// - UsageObserver（V2.1：捕获 LLM 真实 usage，供会话预算跟踪）
 ///
-/// `plan_capture` 与 `entry_capture` 由调用方创建并传入，
+/// `plan_capture` / `entry_capture` / `usage_capture` 由调用方创建并传入，
 /// pipeline 在对应阶段执行后从中读取结果。
 pub async fn build_kb_runtime(
     llm: &LlmConfig,
@@ -371,6 +439,7 @@ pub async fn build_kb_runtime(
     kb: fluen_knowledge::async_kb::AsyncKnowledgeBase,
     plan_capture: PlanCapture,
     entry_capture: CreateEntryCapture,
+    usage_capture: UsageCapture,
 ) -> Result<ConfluentRuntime, KnowledgeBuilderError> {
     let (provider, model_id) = resolve_kb_provider(llm, model_ref)?;
     let chat_client = build_chat_client(provider)?;
@@ -391,6 +460,7 @@ pub async fn build_kb_runtime(
     ));
     let plan_provider = Arc::new(SubmitPlanProvider::new(plan_capture));
     let entry_observer = Arc::new(CreateEntryObserver::new(entry_capture));
+    let usage_observer = Arc::new(UsageObserver::new(usage_capture));
 
     tracing::debug!(model_id = %model_ref.model_id, agent_id = "knowledge-builder", "装配 ConfluentRuntime");
     let runtime = ConfluentRuntimeBuilder::new()
@@ -400,6 +470,7 @@ pub async fn build_kb_runtime(
         .with_tool_provider(kb_provider as Arc<dyn ToolProvider>)
         .with_tool_provider(plan_provider as Arc<dyn ToolProvider>)
         .with_observer(entry_observer as Arc<dyn RuntimeObserver>)
+        .with_observer(usage_observer as Arc<dyn RuntimeObserver>)
         .build()
         .await
         .map_err(|e| {

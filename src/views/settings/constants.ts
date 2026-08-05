@@ -11,14 +11,22 @@
  */
 
 import type { SettingsSection } from './types';
+import GeneralSection from './sections/GeneralSection.vue';
 import AppearanceSection from './sections/AppearanceSection.vue';
 import LanguageSection from './sections/LanguageSection.vue';
 import LlmConfigSection from './sections/LlmConfigSection.vue';
 import MotisSection from './sections/MotisSection.vue';
 import AiServicesSection from './sections/AiServicesSection.vue';
+import LoggingSection from './sections/LoggingSection.vue';
 
 /** 设置分区注册表（有序）。 */
 export const SETTINGS_SECTIONS: SettingsSection[] = [
+  {
+    id: 'general',
+    labelKey: 'settings.sections.general',
+    icon: 'M3 6l9-3 9 3M3 6l9 3 9-3M3 6v12l9 3 9-3V6M12 9v12',
+    component: GeneralSection,
+  },
   {
     id: 'appearance',
     labelKey: 'settings.sections.appearance',
@@ -49,7 +57,13 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     icon: 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10',
     component: AiServicesSection,
   },
+  {
+    id: 'logging',
+    labelKey: 'settings.sections.logging',
+    icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8 M10 9H8',
+    component: LoggingSection,
+  },
 ];
 
 /** 默认激活的分区 ID。 */
-export const DEFAULT_SETTINGS_SECTION = 'appearance';
+export const DEFAULT_SETTINGS_SECTION = 'general';

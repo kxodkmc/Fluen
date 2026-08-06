@@ -55,24 +55,6 @@ export interface ReferenceEntry {
 }
 
 // ---------------------------------------------------------------------------
-// 批量导入任务
-// ---------------------------------------------------------------------------
-
-/** 批量导入任务句柄（`import_references` 立即返回）。 */
-export interface ImportJobHandle {
-  /** 任务 ID。 */
-  job_id: string;
-  /** 所有待导入文件的文献 ID 列表（已预分配）。 */
-  reference_ids: string[];
-}
-
-/** 批量导入任务状态（对应 Rust `ImportJobStatus`，tag = "kind"）。 */
-export type ImportJobStatus =
-  | { kind: 'running'; total: number; completed: number; failed: number; current: string | null }
-  | { kind: 'finished'; total: number; completed: number; failed: number; results: ReferenceEntry[] }
-  | { kind: 'cancelled' };
-
-// ---------------------------------------------------------------------------
 // 一致性校验报告
 // ---------------------------------------------------------------------------
 
@@ -105,30 +87,6 @@ export interface ImportProgressPayload {
   ocr_progress?: OcrProgress | null;
 }
 
-/**
- * 导入进度状态（合并 `import_started` 与 `import_progress` 事件信息）。
- *
- * `import_started` 提供 `filename`，后续 `import_progress` 不再携带，
- * 因此在前端维护一份合并状态以保留文件名供 UI 展示。
- */
-export interface ImportProgressState extends ImportProgressPayload {
-  /** 原始文件名（来自 `import_started` 事件）。 */
-  filename: string;
-}
-
-/**
- * 失败条目状态（合并 `import_started` 的 filename 与 `import_failed` 的 error）。
- *
- * `import_failed` 事件本身不携带 filename，前端在收到失败事件时
- * 从进度状态中补齐文件名，便于在失败列表中展示。
- */
-export interface ImportFailedState {
-  /** 原始文件名。 */
-  filename: string;
-  /** 错误消息。 */
-  error: string;
-}
-
 /** `reference:import_completed` 事件 payload。 */
 export interface ImportCompletedPayload {
   job_id: string | null;
@@ -141,14 +99,6 @@ export interface ImportFailedPayload {
   job_id: string | null;
   reference_id: string;
   error: string;
-}
-
-/** `reference:job_completed` 事件 payload。 */
-export interface JobCompletedPayload {
-  job_id: string;
-  total: number;
-  completed: number;
-  failed: number;
 }
 
 // ---------------------------------------------------------------------------

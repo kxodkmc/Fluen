@@ -498,8 +498,9 @@ async fn on_planning_summarize(
 
 /// 创建 summary 条目。
 ///
-/// AI 调用 `knowledge_create_entry`，[`super::llm_helper::CreateEntryObserver`] 自动捕获返回的 `wiki_id`。
-/// 返回 `(wiki_id, usage)`。
+/// AI 调用 `knowledge_create_entry`（新建）或 `knowledge_edit_entry`
+/// （合并到已有相似条目），[`super::llm_helper::CreateEntryObserver`]
+/// 自动捕获返回的 `wiki_id`。返回 `(wiki_id, usage)`。
 async fn run_create_summary(
     runtime: &confluent::ConfluentRuntime,
     entry_capture: &CreateEntryCapture,
@@ -531,8 +532,9 @@ async fn run_create_summary(
 
 /// 创建单个 concept 条目。
 ///
-/// AI 调用 `knowledge_create_entry`，[`super::llm_helper::CreateEntryObserver`] 自动捕获返回的 `wiki_id`。
-/// 返回 `(wiki_id, usage)`。
+/// AI 调用 `knowledge_create_entry`（新建）或 `knowledge_edit_entry`
+/// （合并到已有相似条目），[`super::llm_helper::CreateEntryObserver`]
+/// 自动捕获返回的 `wiki_id`。返回 `(wiki_id, usage)`。
 async fn run_create_concept(
     runtime: &confluent::ConfluentRuntime,
     entry_capture: &CreateEntryCapture,
@@ -563,8 +565,9 @@ async fn run_create_concept(
 
 /// 创建单个 entity 条目。
 ///
-/// AI 调用 `knowledge_create_entry`，[`super::llm_helper::CreateEntryObserver`] 自动捕获返回的 `wiki_id`。
-/// 返回 `(wiki_id, usage)`。
+/// AI 调用 `knowledge_create_entry`（新建）或 `knowledge_edit_entry`
+/// （合并到已有相似条目），[`super::llm_helper::CreateEntryObserver`]
+/// 自动捕获返回的 `wiki_id`。返回 `(wiki_id, usage)`。
 async fn run_create_entity(
     runtime: &confluent::ConfluentRuntime,
     entry_capture: &CreateEntryCapture,
@@ -742,8 +745,10 @@ fn take_capture(capture: &CreateEntryCapture, context: &str) -> Result<String, K
         .expect("entry capture poisoned")
         .take()
         .ok_or_else(|| {
-            tracing::error!(context = %context, "AI 未调用 create_entry（capture 为空）");
-            KnowledgeBuilderError::AiOutput(format!("AI 未调用 create_entry 创建 {context}"))
+            tracing::error!(context = %context, "AI 未调用条目操作工具（create_entry/edit_entry，capture 为空）");
+            KnowledgeBuilderError::AiOutput(format!(
+                "AI 未调用 create_entry / edit_entry 创建 {context}"
+            ))
         })?;
     tracing::debug!(context = %context, wiki_id = %wiki_id, "从 capture 获取 wiki_id");
     Ok(wiki_id)

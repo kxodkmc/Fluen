@@ -133,46 +133,6 @@ impl ReferenceEntry {
 }
 
 // ---------------------------------------------------------------------------
-// 批量导入任务
-// ---------------------------------------------------------------------------
-
-/// 批量导入任务句柄（`import_references` 立即返回）。
-#[derive(Debug, Clone, Serialize)]
-pub struct ImportJobHandle {
-    /// 任务 ID。
-    pub job_id: String,
-    /// 所有待导入文件的文献 ID 列表（已预分配）。
-    pub reference_ids: Vec<String>,
-}
-
-/// 批量导入任务状态。
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ImportJobStatus {
-    /// 运行中。
-    Running {
-        /// 总数。
-        total: usize,
-        /// 已完成数（含失败）。
-        completed: usize,
-        /// 失败数。
-        failed: usize,
-        /// 当前正在处理的文献 ID。
-        current: Option<String>,
-    },
-    /// 已完成。
-    Finished {
-        total: usize,
-        completed: usize,
-        failed: usize,
-        /// 成功导入的文献条目。
-        results: Vec<ReferenceEntry>,
-    },
-    /// 已取消。
-    Cancelled,
-}
-
-// ---------------------------------------------------------------------------
 // 一致性校验报告
 // ---------------------------------------------------------------------------
 

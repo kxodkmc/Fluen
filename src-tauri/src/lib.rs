@@ -19,6 +19,11 @@ mod recent_projects;
 mod references;
 mod task_queue;
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tauri::Manager;
+
 use ai_services::storage::ConfigStorage as AiServicesConfigStorage;
 use app_config::storage::AppConfigStorage;
 use llm_config::storage::ConfigStorage;
@@ -55,7 +60,6 @@ pub fn run() {
     let motis_chat_state = motis_chat::MotisChatState::new();
     let editor_state = editor::commands::EditorState::new();
     let ocr_state = ai_services::commands::OcrState::new();
-    let import_state = references::commands::ImportState::new();
     let task_queue_state = TaskQueueState::new();
     let recent_projects_storage =
         RecentProjectsStorage::new().expect("无法确定最近打开项目数据目录");
@@ -71,10 +75,38 @@ pub fn run() {
         .manage(motis_chat_state)
         .manage(editor_state)
         .manage(ocr_state)
-        .manage(import_state)
         .manage(task_queue_state)
         .manage(recent_projects_storage)
         .manage(logging::LogGuardHolder(log_guard))
+        .setup(|app| {
+            // 启动时中断接续：从最近打开项目列表恢复未完成任务
+            // （文献导入 / 知识库构建），Running 任务重置为 Pending 后继续执行。
+            let recent = app.state::<RecentProjectsStorage>();
+            let project_paths: Vec<PathBuf> = recent
+                .get()
+                .map(|data| {
+                    data.entries
+                        .iter()
+                        .map(|e| PathBuf::from(&e.project_path))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let task_queue_state = app.state::<TaskQueueState>();
+            let llm_storage = app.state::<ConfigStorage>();
+            let ai_storage = app.state::<AiServicesConfigStorage>();
+            let recovered = task_queue::recovery::recover_on_startup(
+                app.handle(),
+                &Arc::new(llm_storage.inner().clone()),
+                &Arc::new(ai_storage.inner().clone()),
+                &task_queue_state,
+                project_paths,
+            );
+            if recovered > 0 {
+                tracing::info!(recovered, "启动时已触发任务恢复");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             llm_config::commands::get_llm_config,
@@ -116,11 +148,7 @@ pub fn run() {
             editor::commands::editor_record_file_delete,
             editor::commands::editor_record_auto_optimize,
             editor::commands::editor_clear_history,
-            references::commands::import_reference,
-            references::commands::import_references,
-            references::commands::get_import_status,
-            references::commands::cancel_import,
-            references::commands::cancel_all_imports,
+            references::commands::references_enqueue_imports,
             references::commands::list_references,
             references::commands::get_reference,
             references::commands::delete_reference,

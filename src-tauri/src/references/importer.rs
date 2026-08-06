@@ -83,23 +83,26 @@ impl ReferenceImporter {
         let provider = ai_config
             .active_provider(ServiceCategory::Ocr)
             .ok_or_else(|| {
-                ReferenceError::OcrUnavailable("未配置 OCR 提供商，请在设置中添加".into())
+                let msg = "未配置 OCR 提供商，请在设置中添加".to_string();
+                tracing::error!(scope = "references", error = %msg, "创建文献导入器失败");
+                ReferenceError::OcrUnavailable(msg)
             })?;
 
         if !provider.enabled {
-            return Err(ReferenceError::OcrUnavailable(
-                "当前 OCR 提供商已禁用，请在设置中启用".into(),
-            ));
+            let msg = "当前 OCR 提供商已禁用，请在设置中启用".to_string();
+            tracing::error!(scope = "references", provider_id = %provider.id, error = %msg, "创建文献导入器失败");
+            return Err(ReferenceError::OcrUnavailable(msg));
         }
 
         if provider.api_key.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
-            return Err(ReferenceError::OcrUnavailable(
-                "OCR 提供商缺少 API Key，请在设置中配置".into(),
-            ));
+            let msg = "OCR 提供商缺少 API Key，请在设置中配置".to_string();
+            tracing::error!(scope = "references", provider_id = %provider.id, error = %msg, "创建文献导入器失败");
+            return Err(ReferenceError::OcrUnavailable(msg));
         }
 
-        let ocr_provider = create_ocr_provider(provider)
-            .map_err(ReferenceError::Ocr)?;
+        let ocr_provider = create_ocr_provider(provider).inspect_err(|e| {
+            tracing::error!(scope = "references", error = %e, "创建 OCR provider 失败");
+        }).map_err(ReferenceError::Ocr)?;
 
         Ok(Self { ocr_provider })
     }
@@ -125,17 +128,55 @@ impl ReferenceImporter {
         // 用 Arc 共享 on_progress：直接调用 + 移入 Boxed 闭包
         let on_progress = Arc::new(on_progress);
 
+        tracing::info!(
+            scope = "references", reference_id = %reference_id,
+            file = %file_path,
+            force,
+            "文献导入开始"
+        );
+
         // Phase 0: Pre-flight
-        let format = preflight_check(src_path)?;
+        let format = preflight_check(src_path).inspect_err(|e| {
+            tracing::error!(
+                scope = "references", reference_id = %reference_id,
+                file = %file_path,
+                error = %e,
+                "Pre-flight 检查失败"
+            );
+        })?;
 
         // Phase 1: 去重
-        let file_hash = compute_file_hash(src_path)?;
+        let file_hash = compute_file_hash(src_path).inspect_err(|e| {
+            tracing::error!(
+                scope = "references", reference_id = %reference_id,
+                file = %file_path,
+                error = %e,
+                "计算文件哈希失败"
+            );
+        })?;
         if !force {
-            if let Some(existing) = index.find_by_hash(&file_hash)? {
-                return Err(ReferenceError::Duplicate {
-                    existing_title: existing.title,
-                    existing_id: existing.id,
-                });
+            if let Some(existing) = index.find_by_hash(&file_hash).inspect_err(|e| {
+                tracing::error!(
+                    scope = "references", reference_id = %reference_id,
+                    error = %e,
+                    "按哈希查重失败"
+                );
+            })? {
+                // 相同 reference_id = 本任务中断后重跑（崩溃恢复 / 重试），
+                // 索引中已有自身条目属预期，跳过去重以支持幂等覆盖。
+                if existing.id != reference_id {
+                    tracing::warn!(
+                        scope = "references", reference_id = %reference_id,
+                        file = %file_path,
+                        existing_id = %existing.id,
+                        existing_title = %existing.title,
+                        "重复文献，跳过导入"
+                    );
+                    return Err(ReferenceError::Duplicate {
+                        existing_title: existing.title,
+                        existing_id: existing.id,
+                    });
+                }
             }
         }
 
@@ -151,7 +192,20 @@ impl ReferenceImporter {
         let resource_rel = ReferenceEntry::resource_rel_path(&id);
 
         let raw_abs = project_dir.join(&raw_rel);
-        backup_file(src_path, &raw_abs)?;
+        backup_file(src_path, &raw_abs).inspect_err(|e| {
+            tracing::error!(
+                scope = "references", reference_id = %reference_id,
+                src = %src_path.display(),
+                dest = %raw_abs.display(),
+                error = %e,
+                "备份原文件失败"
+            );
+        })?;
+        tracing::debug!(
+            scope = "references", reference_id = %reference_id,
+            dest = %raw_abs.display(),
+            "原文件已备份"
+        );
 
         let entry = ReferenceEntry {
             id: id.clone(),
@@ -171,7 +225,13 @@ impl ReferenceImporter {
             status: ReferenceStatus::Pending,
             error: None,
         };
-        index.upsert(entry.clone())?;
+        index.upsert(entry.clone()).inspect_err(|e| {
+            tracing::error!(
+                scope = "references", reference_id = %reference_id,
+                error = %e,
+                "写入索引条目失败（status=Pending）"
+            );
+        })?;
 
         // Phase 3: OCR 处理
         index.update(|entries| {
@@ -179,7 +239,15 @@ impl ReferenceImporter {
                 e.status = ReferenceStatus::Processing;
             }
             Ok(())
+        }).inspect_err(|e| {
+            tracing::error!(
+                scope = "references", reference_id = %reference_id,
+                error = %e,
+                "更新索引状态为 Processing 失败"
+            );
         })?;
+
+        tracing::info!(scope = "references", reference_id = %reference_id, "OCR 处理开始");
 
         (*on_progress)(ImportProgress {
             stage: "ocr".into(),
@@ -203,6 +271,7 @@ impl ReferenceImporter {
         {
             Ok(result) => result,
             Err(AiServiceError::Cancelled) => {
+                tracing::warn!(scope = "references", reference_id = %reference_id, "OCR 已取消，标记失败");
                 // 取消时标记 Failed
                 index.update(|entries| {
                     if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
@@ -210,25 +279,49 @@ impl ReferenceImporter {
                         e.error = Some("已取消".into());
                     }
                     Ok(())
+                }).inspect_err(|e| {
+                    tracing::error!(
+                        scope = "references", reference_id = %reference_id,
+                        error = %e,
+                        "取消后更新索引失败"
+                    );
                 })?;
                 return Err(ReferenceError::Cancelled);
             }
             Err(e) => {
                 let err_msg = e.to_string();
+                tracing::error!(
+                    scope = "references", reference_id = %reference_id,
+                    error = %err_msg,
+                    "OCR 识别失败"
+                );
                 index.update(|entries| {
                     if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
                         e.status = ReferenceStatus::Failed;
                         e.error = Some(err_msg.clone());
                     }
                     Ok(())
+                }).inspect_err(|e| {
+                    tracing::error!(
+                        scope = "references", reference_id = %reference_id,
+                        error = %e,
+                        "OCR 失败后更新索引失败"
+                    );
                 })?;
                 return Err(ReferenceError::Ocr(e));
             }
         };
 
         if cancel_token.is_cancelled() {
+            tracing::warn!(scope = "references", reference_id = %reference_id, "OCR 期间收到取消信号");
             return Err(ReferenceError::Cancelled);
         }
+
+        tracing::debug!(
+            scope = "references", reference_id = %reference_id,
+            pages = ocr_result.pages.len(),
+            "OCR 识别完成"
+        );
 
         // Phase 4: 保存结果
         (*on_progress)(ImportProgress {
@@ -239,7 +332,14 @@ impl ReferenceImporter {
         let resource_abs = project_dir.join(&resource_rel);
         let md_abs = project_dir.join(&md_rel);
 
-        let combined_md = save_ocr_result(&ocr_result, &md_abs, &resource_abs, &id)?;
+        let combined_md = save_ocr_result(&ocr_result, &md_abs, &resource_abs, &id).inspect_err(|e| {
+            tracing::error!(
+                scope = "references", reference_id = %reference_id,
+                md = %md_abs.display(),
+                error = %e,
+                "保存 OCR 结果失败"
+            );
+        })?;
 
         // Phase 5: 完成收尾
         let title = extract_title(&combined_md, &entry.original_filename);
@@ -249,7 +349,19 @@ impl ReferenceImporter {
             error: None,
             ..entry
         };
-        index.upsert(final_entry.clone())?;
+        index.upsert(final_entry.clone()).inspect_err(|e| {
+            tracing::error!(
+                scope = "references", reference_id = %reference_id,
+                error = %e,
+                "更新索引状态为 Completed 失败"
+            );
+        })?;
+
+        tracing::info!(
+            scope = "references", reference_id = %reference_id,
+            title = %final_entry.title,
+            "文献导入完成"
+        );
 
         Ok(final_entry)
     }

@@ -18,22 +18,30 @@ use std::sync::Arc;
 
 use tauri::AppHandle;
 
+use crate::ai_services::storage::ConfigStorage as AiServicesConfigStorage;
 use crate::llm_config::storage::ConfigStorage as LlmConfigStorage;
 
 use super::state::TaskQueueState;
 use super::store::TaskStore;
+
+/// 全部任务种类（启动恢复时按种类分别检查并启动对应 runner）。
+///
+/// 新增任务种类时在此登记即可自动获得崩溃恢复能力。
+const ALL_TASK_KINDS: [&str; 2] = ["knowledge_build", "reference_import"];
 
 /// 启动时恢复：对给定项目列表执行中断接续。
 ///
 /// 流程：
 /// 1. 清理所有项目的会话池（runtime 历史在内存中，崩溃后无法恢复）。
 /// 2. 对每个项目，创建 `TaskStore`，将 Running 任务重置为 Pending。
-/// 3. 若存在 Pending 任务，spawn 一个 `TaskRunner` 继续执行。
+/// 3. 对每种任务种类，若存在 Pending 任务，spawn 对应种类的
+///    `TaskRunner` 继续执行（不同种类并行，互不阻塞）。
 ///
-/// 返回触发恢复的项目数量（即存在 Pending 任务的项目数）。
+/// 返回触发恢复的 runner 数量。
 pub fn recover_on_startup(
     app: &AppHandle,
     llm_storage: &Arc<LlmConfigStorage>,
+    ai_storage: &Arc<AiServicesConfigStorage>,
     state: &TaskQueueState,
     project_paths: Vec<PathBuf>,
 ) -> usize {
@@ -66,23 +74,33 @@ pub fn recover_on_startup(
             }
         }
 
-        // 检查是否有 Pending 任务
-        let has_pending = match store.next_pending() {
-            Ok(Some(_)) => true,
-            Ok(None) => false,
-            Err(e) => {
-                tracing::warn!(
-                    project = %project_path.display(),
-                    error = %e,
-                    "读取 Pending 任务失败"
-                );
-                false
-            }
-        };
+        // 按种类分别检查并启动对应 runner
+        for kind in ALL_TASK_KINDS {
+            let has_pending = match store.next_pending_of(kind) {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!(
+                        project = %project_path.display(),
+                        kind,
+                        error = %e,
+                        "读取 Pending 任务失败"
+                    );
+                    false
+                }
+            };
 
-        if has_pending {
-            if state.try_start_runner(project_path, store, llm_storage.clone(), app.clone()) {
-                recovered += 1;
+            if has_pending {
+                if state.try_start_runner(
+                    project_path.clone(),
+                    kind,
+                    store.clone(),
+                    llm_storage.clone(),
+                    ai_storage.clone(),
+                    app.clone(),
+                ) {
+                    recovered += 1;
+                }
             }
         }
     }

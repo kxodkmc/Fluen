@@ -18,8 +18,10 @@
  *   - `useKnowledgeBase` composable：知识库构建状态（跨组件共享）
  *
  * 事件流：
- *   - 批量导入采用 fire-and-forget 模型：`importFiles` 立即返回任务句柄，
- *     进度与结果通过 `reference:*` 事件推送，由 composable 注册到任务队列。
+ *   - 批量导入采用队列模型：`importFiles` 将每个文件入队一个
+ *     `reference_import` 任务（先到先导、串行执行），进度与结果通过
+ *     `reference:*` 事件推送，由 composable 注册到任务队列；导入按钮
+ *     始终可用，多次导入全部排队。
  *   - 知识库构建通过 `knowledge_build_start` 入队，`kb-build:*` 事件
  *     由 `useKnowledgeBase` 监听并更新 `buildStatusOf(refId)`。
  */
@@ -37,7 +39,6 @@ import ContextMenu, { type ContextMenuItem } from '../../../../../components/Con
 const { t } = useI18n();
 const {
   references,
-  isImporting,
   error,
   loadReferences,
   importFiles,
@@ -137,8 +138,8 @@ function buildContextMenuItems(entry: ReferenceEntry): ContextMenuItem[] {
     icon: ICON_EDIT_TITLE,
   });
 
-  // 重试（仅 failed 状态显示）
-  if (entry.status === 'failed' && !isImporting.value) {
+  // 重试（仅 failed 状态显示，可排队执行）
+  if (entry.status === 'failed') {
     items.push({
       id: 'retry',
       label: t('main.sidebar.references.retry'),
@@ -236,7 +237,7 @@ watch(projectPath, async (path) => {
 
 /** 点击导入按钮：打开文件选择对话框并触发批量导入。 */
 async function handleImport(): Promise<void> {
-  if (!projectPath.value || isImporting.value) return;
+  if (!projectPath.value) return;
   try {
     const selected = await openDialog({
       multiple: true,
@@ -267,7 +268,7 @@ async function handleDelete(entry: ReferenceEntry): Promise<void> {
 
 /** 重试失败导入。 */
 async function handleRetry(entry: ReferenceEntry): Promise<void> {
-  if (!projectPath.value || isImporting.value) return;
+  if (!projectPath.value) return;
   try {
     await retryImport(projectPath.value, entry.id);
   } catch (err) {
@@ -420,6 +421,13 @@ function buildBadges(entry: ReferenceEntry): StatusBadge[] {
         tone: 'success',
       });
       break;
+    case 'partial':
+      badges.push({
+        id: 'kb',
+        label: t('main.sidebar.references.badgeKnowledgePartial'),
+        tone: 'warning',
+      });
+      break;
     case 'failed':
       badges.push({
         id: 'kb',
@@ -455,8 +463,8 @@ function badgeClass(tone: BadgeTone): string {
       <span class="references-panel__title">{{ t('main.sidebar.references.title') }}</span>
       <button
         class="references-panel__import-btn"
-        :class="{ 'references-panel__import-btn--disabled': !hasProject || isImporting }"
-        :disabled="!hasProject || isImporting"
+        :class="{ 'references-panel__import-btn--disabled': !hasProject }"
+        :disabled="!hasProject"
         :title="t('main.sidebar.references.import')"
         @click="handleImport"
       >
@@ -569,7 +577,7 @@ function badgeClass(tone: BadgeTone): string {
             </svg>
           </button>
           <button
-            v-if="entry.status === 'failed' && !isImporting"
+            v-if="entry.status === 'failed'"
             class="ref-action"
             :title="t('main.sidebar.references.retry')"
             @click.stop="handleRetry(entry)"

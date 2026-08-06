@@ -9,13 +9,31 @@
 //! - 读取时若文件不存在返回空队列（`TaskQueueFile::new()`），不视为错误。
 //! - 文件损坏时返回错误，由上层决定备份重置或上报。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::error::TaskQueueError;
 use super::types::{TaskKind, TaskQueueFile, TaskRecord, TaskStatus};
 
 /// 任务队列文件名（位于项目 `data/` 目录下）。
 const TASK_QUEUE_FILE_NAME: &str = "task-queue.json";
+
+/// 项目级写锁表（queue_file 路径 → 锁）。
+///
+/// 同一项目可能同时存在多个 runner（按任务种类并行，如知识库构建与
+/// 文献导入），它们共享同一 `task-queue.json`。所有"读-改-写"操作
+/// 必须经项目锁串行化，防止并发 load/save 导致丢失更新。
+static PROJECT_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+/// 获取指定任务队列文件的项目级写锁。
+fn project_lock(queue_file: &Path) -> Arc<Mutex<()>> {
+    let map = PROJECT_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map.lock().expect("PROJECT_LOCKS poisoned");
+    map.entry(queue_file.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 /// 项目级任务队列持久化层。
 ///
@@ -88,6 +106,7 @@ impl TaskStore {
         &self,
         kind: TaskKind,
     ) -> Result<TaskRecord, TaskQueueError> {
+        let _guard = project_lock(&self.queue_file);
         let mut file = self.load()?;
         let record = TaskRecord::new_pending(self.project_path.to_string_lossy().as_ref(), kind);
         file.tasks.push(record.clone());
@@ -137,6 +156,29 @@ impl TaskStore {
         Ok(pending.into_iter().next())
     }
 
+    /// 取下一个指定种类的 Pending 任务（按创建时间最早）。
+    ///
+    /// 按任务种类分队列：同项目不同种类的任务由各自 runner 并行消费。
+    /// 无匹配的 Pending 任务时返回 `None`。
+    pub fn next_pending_of(
+        &self,
+        kind: &str,
+    ) -> Result<Option<TaskRecord>, TaskQueueError> {
+        let file = self.load()?;
+        let mut pending: Vec<_> = file
+            .tasks
+            .into_iter()
+            .filter(|t| t.status == TaskStatus::Pending && t.kind.kind_name() == kind)
+            .collect();
+        pending.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(pending.into_iter().next())
+    }
+
+    /// 是否存在指定种类的 Pending 任务（供启动恢复检查）。
+    pub fn has_pending_of(&self, kind: &str) -> bool {
+        self.next_pending_of(kind).map(|t| t.is_some()).unwrap_or(false)
+    }
+
     /// 更新任务状态。
     ///
     /// 任务不存在时返回 `NotFound` 错误。
@@ -146,6 +188,7 @@ impl TaskStore {
         task_id: &str,
         status: TaskStatus,
     ) -> Result<(), TaskQueueError> {
+        let _guard = project_lock(&self.queue_file);
         let mut file = self.load()?;
         let task = file
             .tasks
@@ -174,6 +217,7 @@ impl TaskStore {
         status: TaskStatus,
         error: &str,
     ) -> Result<(), TaskQueueError> {
+        let _guard = project_lock(&self.queue_file);
         let mut file = self.load()?;
         let task = file
             .tasks
@@ -201,6 +245,7 @@ impl TaskStore {
         task_id: &str,
         checkpoint: &serde_json::Value,
     ) -> Result<(), TaskQueueError> {
+        let _guard = project_lock(&self.queue_file);
         let mut file = self.load()?;
         let task = file
             .tasks
@@ -215,6 +260,7 @@ impl TaskStore {
     ///
     /// Running 状态的任务不允许删除（需先取消）。
     pub fn delete(&self, task_id: &str) -> Result<(), TaskQueueError> {
+        let _guard = project_lock(&self.queue_file);
         let mut file = self.load()?;
         let task = file
             .tasks
@@ -234,6 +280,7 @@ impl TaskStore {
     ///
     /// 返回清除的任务数。
     pub fn clear_finished(&self) -> Result<usize, TaskQueueError> {
+        let _guard = project_lock(&self.queue_file);
         let mut file = self.load()?;
         let before = file.tasks.len();
         file.tasks.retain(|t| !t.status.is_terminal());
@@ -246,6 +293,7 @@ impl TaskStore {
     ///
     /// 返回被重置的任务 ID 列表。
     pub fn reset_running_to_pending(&self) -> Result<Vec<String>, TaskQueueError> {
+        let _guard = project_lock(&self.queue_file);
         let mut file = self.load()?;
         let mut reset_ids = Vec::new();
         for task in file.tasks.iter_mut() {
@@ -333,6 +381,34 @@ mod tests {
         store.update_status(&r1.id, TaskStatus::Completed).unwrap();
         let next = store.next_pending().unwrap().unwrap();
         assert_eq!(next.id, r2.id);
+    }
+
+    #[test]
+    fn next_pending_of_filters_by_kind() {
+        let (_dir, store) = temp_store();
+        // 同一项目混合两种任务
+        let kb = store.enqueue(sample_kind()).unwrap();
+        let imp = store
+            .enqueue(TaskKind::ReferenceImport {
+                file_path: "/tmp/a.pdf".into(),
+                reference_id: "ref-123".into(),
+                force: false,
+            })
+            .unwrap();
+
+        // 按种类各取各的
+        let next_kb = store.next_pending_of("knowledge_build").unwrap().unwrap();
+        assert_eq!(next_kb.id, kb.id);
+        let next_imp = store.next_pending_of("reference_import").unwrap().unwrap();
+        assert_eq!(next_imp.id, imp.id);
+        assert!(store.next_pending_of("unknown_kind").unwrap().is_none());
+
+        // 一方完成后不影响另一方
+        store.update_status(&kb.id, TaskStatus::Completed).unwrap();
+        assert!(store.next_pending_of("knowledge_build").unwrap().is_none());
+        assert!(store.next_pending_of("reference_import").unwrap().is_some());
+        assert!(store.has_pending_of("reference_import"));
+        assert!(!store.has_pending_of("knowledge_build"));
     }
 
     #[test]

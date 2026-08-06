@@ -183,6 +183,7 @@ export default {
         authorInfoPlaceholder: 'Autor pendiente',
         // Insignias de estado (extensible: añadido / en proceso / traducido …)
         badgeKnowledgeBase: 'En BC',
+        badgeKnowledgePartial: 'BC parcial',
         badgeKnowledgeBuilding: 'Añadiendo…',
         badgeKnowledgeFailed: 'BC falló',
         badgeTranslated: 'Traducido',

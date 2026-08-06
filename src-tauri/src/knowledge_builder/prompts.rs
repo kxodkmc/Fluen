@@ -55,6 +55,8 @@ pub const PLANNING_PROMPT: &str = r#"你是学术文献知识库的规划助手�
    - summary_points: 字符串数组（3-5 个要点）
    - concepts: 数组，每个元素含 title/brief/existing_id/merge_supplement
    - entities: 数组，同上
+   - **必填约束**：concepts 和 entities 的每个元素都必须提供 `title` 与 `brief` 两个必填字段。
+     缺任一字段（例如只写 title 没有 brief）会导致整个计划解析失败，你必须补全后重新提交
 
 ## 重要说明
 
@@ -63,6 +65,7 @@ pub const PLANNING_PROMPT: &str = r#"你是学术文献知识库的规划助手�
 - 去重判断要严格：宁可合并到已有条目，也不要新建近似条目
   例如"机器学习"/"机器学习技术"/"ML"应合并到同一个 concept
 - brief 字段要具体（用于第二阶段生成正文），不要仅复制标题
+- 提交前自查：concepts 与 entities 中每个元素均包含 title 和 brief，JSON 结构完整无缺漏
 
 ## 已有知识库条目（Index 快照）
 
@@ -93,7 +96,10 @@ pub const CREATE_SUMMARY_PROMPT: &str = r#"为以下文献创建综述页（summ
 - source 字段必须为 `raw/{ref_id}.pdf`
 - title 用文献标题（若已知）或"文献综述-{ref_id}"
 - content 写 200-400 字综述，涵盖研究问题、方法、结论
-- 可输出自由文本，但必须以 create_entry 或 edit_entry 调用结束
+- 可输出自由文本，但**必须以一次 `knowledge_create_entry` 或 `knowledge_edit_entry` 工具调用结束**：
+  - 候选中无相似条目 → 调用 `knowledge_create_entry`（wiki_type=summary）
+  - 候选中存在相似条目 → 调用 `knowledge_edit_entry` 合并补充内容
+  - 二选一，必须调用其一；回复若没有这两个工具调用，本轮将被判定失败
 "#;
 
 /// 创建单个 concept 条目的 prompt。
@@ -117,7 +123,7 @@ pub const CREATE_CONCEPT_PROMPT: &str = r#"为以下概念创建知识库条目�
 - title 用概念全称（如"数智化技术"而非"数智化"）
 - content 包含：概念定义 + 该文献中的具体应用/贡献
 - **禁止在 content 中写入 `## 关联页面` 区**：关联关系由后续阶段统一建立，AI 不得自行写入
-- 可输出自由文本，但必须以 create_entry 或 edit_entry 调用结束
+- 可输出自由文本，但**必须以一次 `knowledge_create_entry` 或 `knowledge_edit_entry` 工具调用结束**（二选一，不可漏调）
 "#;
 
 /// 创建单个 entity 条目的 prompt。
@@ -143,7 +149,7 @@ pub const CREATE_ENTITY_PROMPT: &str = r#"为以下实体创建知识库条目�
 - **仅基于文献明确陈述的内容**，不得推断或幻觉
   若文献信息不足，在 content 中注明"待补充"
 - **禁止在 content 中写入 `## 关联页面` 区**：关联关系由后续阶段统一建立，AI 不得自行写入
-- 可输出自由文本，但必须以 create_entry 或 edit_entry 调用结束
+- 可输出自由文本，但**必须以一次 `knowledge_create_entry` 或 `knowledge_edit_entry` 工具调用结束**（二选一，不可漏调）
 "#;
 
 /// 为 concept/entity 建立关联关系的 prompt（独立阶段）。

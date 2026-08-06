@@ -183,6 +183,7 @@ export default {
         authorInfoPlaceholder: '作者信息待解析',
         // 状态徽标（可扩展：已入库 / 入库中 / 已翻译 …）
         badgeKnowledgeBase: '已入库',
+        badgeKnowledgePartial: '部分入库',
         badgeKnowledgeBuilding: '入库中…',
         badgeKnowledgeFailed: '入库失败',
         badgeTranslated: '已翻译',

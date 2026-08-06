@@ -29,6 +29,21 @@ pub struct ConfigStorage {
     cache: RwLock<Option<AiServicesConfig>>,
 }
 
+impl Clone for ConfigStorage {
+    /// 克隆存储实例（含当前内存缓存快照）。
+    ///
+    /// 供 [`crate::task_queue`] 以 `Arc` 共享给 runner 使用：
+    /// 每个 runner 持有一份独立句柄，读写同一配置文件，缓存相互独立无竞争。
+    fn clone(&self) -> Self {
+        let cache_snapshot = self.cache.read().unwrap().clone();
+        Self {
+            config_dir: self.config_dir.clone(),
+            config_file: self.config_file.clone(),
+            cache: RwLock::new(cache_snapshot),
+        }
+    }
+}
+
 impl ConfigStorage {
     /// 创建存储实例，自动解析当前平台的配置目录。
     pub fn new() -> Result<Self, PlatformError> {

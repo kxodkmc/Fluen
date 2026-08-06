@@ -3,34 +3,29 @@
  *
  * 封装 Tauri invoke 调用与 `reference:*` 事件监听，提供：
  *   - 文献列表加载 / 删除 / 重试 / 修改标题
- *   - 单文件导入（await）与批量导入（fire-and-forget）
- *   - 导入进度通过任务队列通知系统（useTaskQueue）实时展示在状态栏
+ *   - 批量导入（队列入队）：每个文件入队一个 `reference_import` 任务，
+ *     由后端任务队列（task_queue）按 FIFO 串行执行，先到先导；
+ *     导入按钮始终可用，多次导入全部排队
+ *   - 任务状态展示：每个任务在任务队列 UI 注册一条独立记录
  *   - 取消导入任务
  *
- * 事件流设计：
- *   - `import_reference`（单文件）：await 返回结果，进度通过事件推送
- *   - `import_references`（批量）：立即返回 `ImportJobHandle`，进度和结果仅通过事件推送
- *
- * 任务队列集成：
- *   - 批量导入开始时注册任务（category: 'import'），进度 = 已完成文件数 / 总文件数
- *   - 事件实时更新任务进度与详情（当前文件名、OCR 页数等）
- *   - 任务完成时标记 completed / failed
+ * 队列设计（与后端 `task_queue` 对应）：
+ *   - `references_enqueue_imports` 一次入队全部文件，立即返回任务记录列表
+ *   - 任务状态（pending/running/completed/failed/cancelled）持久化在
+ *     `{project}/data/task-queue.json`，App 崩溃后重启自动续跑（幂等）
+ *   - 执行进度与结果通过 `reference:import_started|progress|completed|failed`
+ *     事件推送，事件的 `job_id` 即任务队列的 `task_id`
+ *   - 单个文件失败不阻塞队列，失败原因记录在任务 `error` 字段与文献
+ *     条目 `error` 字段
+ *   - 竞态补偿：任务入队后可能立即终态（事件先于 invoke 返回），入队
+ *     返回后查询一次任务队列状态并刷新文献列表，补齐丢失的事件
  *
  * @example
  * ```ts
- * const {
- *   references, isImporting, activeJobId,
- *   loadReferences, importFiles, importSingle, cancelImport, deleteReference,
- * } = useReferences();
+ * const { references, isImporting, loadReferences, importFiles, cancelAllImports } = useReferences();
  *
- * // 加载列表
  * await loadReferences(projectPath);
- *
- * // 批量导入（进度自动推送至状态栏任务队列）
- * const handle = await importFiles(projectPath, ['/path/a.pdf', '/path/b.pdf']);
- *
- * // 取消
- * await cancelImport(projectPath, handle.job_id);
+ * const records = await importFiles(projectPath, ['/path/a.pdf', '/path/b.pdf']);
  * ```
  */
 
@@ -39,27 +34,29 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import { useI18n } from '../i18n';
+import { useLogger } from './useLogger';
 import { useTaskQueue } from '../views/main/components/statusbar/taskqueue/useTaskQueue';
+import type { TaskRecord } from '../types/taskQueue';
 import type {
   ConsistencyReport,
-  ImportJobHandle,
   ImportProgressPayload,
   ImportStartedPayload,
   ImportCompletedPayload,
   ImportFailedPayload,
-  JobCompletedPayload,
   ReferenceEntry,
 } from '../types/references';
 
 // ---------------------------------------------------------------------------
-// 事件名常量（与后端 commands.rs 保持一致）
+// 事件名常量（与后端 references/events.rs 保持一致）
 // ---------------------------------------------------------------------------
 
 const EVENT_IMPORT_STARTED = 'reference:import_started';
 const EVENT_IMPORT_PROGRESS = 'reference:import_progress';
 const EVENT_IMPORT_COMPLETED = 'reference:import_completed';
 const EVENT_IMPORT_FAILED = 'reference:import_failed';
-const EVENT_JOB_COMPLETED = 'reference:job_completed';
+
+/** 后端取消任务时的错误文案（与 runner.rs 保持一致）。 */
+const CANCEL_MESSAGE = '已取消';
 
 /**
  * 检测当前是否运行在 Tauri 环境中。
@@ -68,8 +65,19 @@ function isTauriEnvironment(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
+/** 从文献导入任务提取源文件名（UI 展示用）。 */
+function filenameFromTask(task: TaskRecord): string {
+  if (task.kind.kind === 'reference_import') {
+    const p = task.kind.file_path;
+    const idx = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+    return idx >= 0 ? p.slice(idx + 1) : p;
+  }
+  return '导入任务';
+}
+
 export function useReferences() {
   const { t } = useI18n();
+  const log = useLogger('references');
   const { register, update, complete, fail: failTask, cancel: cancelTask } = useTaskQueue();
 
   /* ── 响应式状态 ─────────────────────────────────────────────────────── */
@@ -77,55 +85,56 @@ export function useReferences() {
   /** 文献列表。 */
   const references = ref<ReferenceEntry[]>([]);
 
-  /** 当前活跃的导入任务 ID（无活跃任务时为 null）。 */
-  const activeJobId = ref<string | null>(null);
-
-  /** 是否正在导入（单文件 await 或批量任务进行中）。 */
+  /** 是否正在导入（当前批次尚有未终态任务）。 */
   const isImporting = ref(false);
 
   /** 最后一次错误信息。 */
   const error = ref<string | null>(null);
 
-  /* ── 内部跟踪（不暴露，用于任务队列进度计算）────────────────────────── */
+  /* ── 内部跟踪（不暴露）──────────────────────────────────────────────── */
 
-  /** reference_id → filename 映射（来自 import_started 事件）。 */
+  /** reference_id → filename 映射（来自 import_started 事件，供进度展示）。 */
   const fileNames = new Map<string, string>();
 
-  /** 当前任务在任务队列中的 ID。 */
-  let currentTaskId: string | null = null;
+  /** 当前批次所有任务 ID（用于取消）。 */
+  let batchTaskIds: string[] = [];
 
-  /** 总文件数。 */
-  let totalCount = 0;
-
-  /** 已完成文件数。 */
-  let completedCount = 0;
-
-  /** 已失败文件数。 */
-  let failedCount = 0;
+  /** 当前批次未终态的任务 ID（isImporting 依据）。 */
+  let pendingTaskIds: string[] = [];
 
   /* ── 事件监听管理 ───────────────────────────────────────────────────── */
 
   /** 已注册的事件取消监听函数列表。 */
   const unlistenFns: UnlistenFn[] = [];
 
-  /** 注册所有 `reference:*` 事件监听。 */
+  /** 任务终态：更新未终态集合，全部结束时复位导入状态。 */
+  function markTaskFinished(taskId: string | null): void {
+    if (!taskId) return;
+    pendingTaskIds = pendingTaskIds.filter((id) => id !== taskId);
+    if (pendingTaskIds.length === 0) {
+      isImporting.value = false;
+    }
+  }
+
+  /** 注册所有 `reference:*` 事件监听（按 `job_id` 路由到对应 UI 任务）。 */
   async function setupEventListeners(): Promise<void> {
     if (!isTauriEnvironment()) return;
 
     unlistenFns.push(
       await listen<ImportStartedPayload>(EVENT_IMPORT_STARTED, (e) => {
-        const { reference_id, filename } = e.payload;
+        const { reference_id, filename, job_id } = e.payload;
         fileNames.set(reference_id, filename);
-        if (currentTaskId) {
-          update(currentTaskId, { detail: filename });
+        log.debug('导入开始', { job_id, reference_id, filename });
+        if (job_id) {
+          update(job_id, { detail: filename });
         }
       }),
     );
 
     unlistenFns.push(
       await listen<ImportProgressPayload>(EVENT_IMPORT_PROGRESS, (e) => {
-        if (!currentTaskId) return;
-        const { reference_id, stage, ocr_progress } = e.payload;
+        const { reference_id, stage, ocr_progress, job_id } = e.payload;
+        if (!job_id) return;
         const filename = fileNames.get(reference_id) ?? '';
         let detail = filename;
         if (stage === 'ocr' && ocr_progress?.extracted_pages != null && ocr_progress?.total_pages != null) {
@@ -133,51 +142,40 @@ export function useReferences() {
         } else if (stage === 'saving') {
           detail = `${filename} · ${t('main.sidebar.references.stageSaving')}`;
         }
-        update(currentTaskId, { detail });
+        log.trace('导入进度', { job_id, reference_id, stage, ocr_progress });
+        update(job_id, { detail });
       }),
     );
 
     unlistenFns.push(
       await listen<ImportCompletedPayload>(EVENT_IMPORT_COMPLETED, (e) => {
-        const { reference_id, entry } = e.payload;
+        const { reference_id, entry, job_id } = e.payload;
         fileNames.delete(reference_id);
-        completedCount++;
-        if (currentTaskId) {
-          update(currentTaskId, {
-            progress: { current: completedCount + failedCount, total: totalCount },
-          });
-        }
-        // 同步更新文献列表
+        // 列表同步无条件执行：含启动恢复等历史任务，完成即刷新条目
         updateReferenceInList(entry);
+        log.info('导入完成', { job_id, reference_id, title: entry.title });
+        if (job_id) {
+          complete(job_id);
+          markTaskFinished(job_id);
+        }
       }),
     );
 
     unlistenFns.push(
       await listen<ImportFailedPayload>(EVENT_IMPORT_FAILED, (e) => {
-        const { reference_id } = e.payload;
+        const { reference_id, error: err, job_id } = e.payload;
+        const filename = fileNames.get(reference_id);
         fileNames.delete(reference_id);
-        failedCount++;
-        if (currentTaskId) {
-          update(currentTaskId, {
-            progress: { current: completedCount + failedCount, total: totalCount },
-          });
-        }
-      }),
-    );
-
-    unlistenFns.push(
-      await listen<JobCompletedPayload>(EVENT_JOB_COMPLETED, (e) => {
-        if (currentTaskId) {
-          const { completed, failed } = e.payload;
-          if (failed > 0 && completed === 0) {
-            failTask(currentTaskId);
+        log.error('导入失败', { job_id, reference_id, filename, error: err });
+        if (job_id) {
+          // 取消以「已取消」文案表达，统一展示为 cancelled 状态
+          if (err === CANCEL_MESSAGE) {
+            cancelTask(job_id);
           } else {
-            complete(currentTaskId);
+            failTask(job_id, err);
           }
-          currentTaskId = null;
+          markTaskFinished(job_id);
         }
-        isImporting.value = false;
-        activeJobId.value = null;
       }),
     );
   }
@@ -188,15 +186,6 @@ export function useReferences() {
       unlisten();
     }
     unlistenFns.length = 0;
-  }
-
-  /** 重置导入状态（开始新任务前调用）。 */
-  function resetImportState(): void {
-    fileNames.clear();
-    totalCount = 0;
-    completedCount = 0;
-    failedCount = 0;
-    error.value = null;
   }
 
   /** 更新列表中的某条文献（已完成时调用）。 */
@@ -226,166 +215,124 @@ export function useReferences() {
         projectPath,
       });
       references.value = list;
+      log.debug('加载文献列表成功', { count: list.length, projectPath });
       return list;
     } catch (err) {
       const msg = typeof err === 'string' ? err : String(err);
       error.value = msg;
-      console.error('[useReferences] 加载文献列表失败:', err);
+      log.error('加载文献列表失败', { projectPath, error: msg });
       return [];
     }
   }
 
   /**
-   * 导入单个文献（await 语义，等待完成）。
+   * 批量导入文献——全部入队，由后端队列按顺序串行执行。
    *
-   * @param projectPath 项目根路径
-   * @param filePath 文件路径
-   * @param force 是否强制导入（跳过去重）
-   */
-  async function importSingle(
-    projectPath: string,
-    filePath: string,
-    force = false,
-  ): Promise<ReferenceEntry | null> {
-    if (!isTauriEnvironment()) {
-      throw new Error('文献导入功能仅在 Tauri 环境下可用');
-    }
-
-    resetImportState();
-    totalCount = 1;
-    isImporting.value = true;
-    error.value = null;
-
-    // 确保事件监听已注册
-    if (unlistenFns.length === 0) {
-      await setupEventListeners();
-    }
-
-    // 注册任务队列
-    currentTaskId = `import.single.${Date.now()}`;
-    register(currentTaskId, {
-      title: t('main.sidebar.references.import'),
-      status: 'running',
-      category: 'import',
-      progress: { current: 0, total: 1 },
-    });
-
-    try {
-      const entry = await invoke<ReferenceEntry>('import_reference', {
-        filePath,
-        projectPath,
-        force,
-      });
-      if (currentTaskId) {
-        complete(currentTaskId);
-        currentTaskId = null;
-      }
-      return entry;
-    } catch (err) {
-      const msg = typeof err === 'string' ? err : String(err);
-      error.value = msg;
-      if (currentTaskId) {
-        failTask(currentTaskId, msg);
-        currentTaskId = null;
-      }
-      throw err;
-    } finally {
-      isImporting.value = false;
-    }
-  }
-
-  /**
-   * 批量导入文献（fire-and-forget 语义）。
-   *
-   * 立即返回任务句柄，进度和结果通过事件推送。
-   * 进度同时注册到任务队列通知系统，在状态栏实时展示。
+   * 每个文件入队一个 `reference_import` 任务（先到先导），立即返回任务记录。
+   * 入队返回后查询一次任务状态并刷新文献列表，补齐"入队后立即终态"
+   * 导致的竞态丢失；此后进度由 `reference:*` 事件驱动。
    *
    * @param projectPath 项目根路径
    * @param filePaths 文件路径列表
-   * @returns 任务句柄（含 job_id 和预分配的 reference_ids）
+   * @returns 入队的任务记录列表
    */
   async function importFiles(
     projectPath: string,
     filePaths: string[],
-  ): Promise<ImportJobHandle> {
+  ): Promise<TaskRecord[]> {
     if (!isTauriEnvironment()) {
       throw new Error('文献导入功能仅在 Tauri 环境下可用');
     }
-
-    resetImportState();
-    totalCount = filePaths.length;
-    isImporting.value = true;
+    if (filePaths.length === 0) return [];
 
     // 确保事件监听已注册
     if (unlistenFns.length === 0) {
       await setupEventListeners();
     }
 
+    log.info('批量导入请求（入队）', { count: filePaths.length, filePaths, projectPath });
+
+    const records = await invoke<TaskRecord[]>('references_enqueue_imports', {
+      projectPath,
+      filePaths,
+    });
+
+    batchTaskIds = records.map((r) => r.id);
+    pendingTaskIds = [...batchTaskIds];
+    isImporting.value = true;
+    fileNames.clear();
+    log.info('批量导入任务已入队', { task_ids: batchTaskIds, count: batchTaskIds.length });
+
+    // 竞态补偿：入队后任务可能已立即终态（事件先于 invoke 返回），
+    // 查询任务队列最新状态按终态注册 UI 任务，并刷新文献列表补齐条目。
     try {
-      const handle = await invoke<ImportJobHandle>('import_references', {
-        filePaths,
+      const all = await invoke<TaskRecord[]>('task_queue_list', {
         projectPath,
+        statusFilter: null,
       });
-      activeJobId.value = handle.job_id;
-
-      // 注册任务到队列
-      currentTaskId = `import.job.${handle.job_id}`;
-      register(currentTaskId, {
-        title: t('main.sidebar.references.import'),
-        status: 'running',
-        category: 'import',
-        progress: { current: 0, total: totalCount },
-      });
-
-      return handle;
+      const fresh = new Map(all.map((r) => [r.id, r]));
+      for (const r of records) {
+        const latest = fresh.get(r.id);
+        const status = latest?.status;
+        const title = filenameFromTask(r);
+        if (status === 'completed') {
+          register(r.id, { title, status: 'completed', category: 'import' });
+          markTaskFinished(r.id);
+        } else if (status === 'failed') {
+          register(r.id, {
+            title,
+            status: 'failed',
+            error: latest?.error ?? undefined,
+            category: 'import',
+          });
+          markTaskFinished(r.id);
+        } else {
+          // pending / running / 状态未知：等待事件驱动
+          register(r.id, { title, status: 'running', category: 'import' });
+        }
+      }
+      // 刷新列表：竞态窗口内完成的条目（事件未处理）在此补齐
+      await loadReferences(projectPath);
     } catch (err) {
-      isImporting.value = false;
-      const msg = typeof err === 'string' ? err : String(err);
-      error.value = msg;
-      throw err;
+      log.warn('同步任务状态失败，等待事件驱动', { error: String(err) });
+      for (const r of records) {
+        register(r.id, {
+          title: filenameFromTask(r),
+          status: 'running',
+          category: 'import',
+        });
+      }
     }
+
+    return records;
   }
 
   /**
-   * 取消指定导入任务。
+   * 取消当前批次所有导入任务。
+   *
+   * 仅取消本批次入队且尚未终态的任务；已执行完的忽略。
+   * 取消不产生完整事件流（Pending 任务被静默置为 Cancelled），
+   * 因此在取消命令返回后主动将 UI 任务标记为 cancelled。
    *
    * @param projectPath 项目根路径
-   * @param jobId 任务 ID
    */
-  async function cancelImport(projectPath: string, jobId: string): Promise<void> {
-    if (!isTauriEnvironment()) return;
-    try {
-      await invoke('cancel_import', { projectPath, jobId });
-      if (currentTaskId) {
-        cancelTask(currentTaskId);
-        currentTaskId = null;
-      }
-    } catch (err) {
-      console.error('[useReferences] 取消导入失败:', err);
-    }
-  }
-
-  /**
-   * 取消所有进行中的导入任务。
-   *
-   * @param projectPath 项目根路径
-   * @returns 已取消的任务数
-   */
-  async function cancelAllImports(projectPath: string): Promise<number> {
-    if (!isTauriEnvironment()) return 0;
-    try {
-      const count = await invoke<number>('cancel_all_imports', { projectPath });
-      if (currentTaskId) {
-        cancelTask(currentTaskId);
-        currentTaskId = null;
-      }
-      isImporting.value = false;
-      activeJobId.value = null;
-      return count;
-    } catch (err) {
-      console.error('[useReferences] 取消所有导入失败:', err);
-      return 0;
-    }
+  async function cancelAllImports(projectPath: string): Promise<void> {
+    if (!isTauriEnvironment() || batchTaskIds.length === 0) return;
+    const taskIds = [...batchTaskIds];
+    log.info('取消导入批次', { task_ids: taskIds });
+    await Promise.all(
+      taskIds.map(async (taskId) => {
+        try {
+          await invoke('task_queue_cancel', { taskId, projectPath });
+        } catch (err) {
+          const msg = typeof err === 'string' ? err : String(err);
+          log.error('取消导入任务失败', { taskId, error: msg });
+        }
+        cancelTask(taskId);
+        markTaskFinished(taskId);
+      }),
+    );
+    batchTaskIds = [];
   }
 
   /**
@@ -402,43 +349,76 @@ export function useReferences() {
     try {
       await invoke('delete_reference', { projectPath, referenceId });
       references.value = references.value.filter((r) => r.id !== referenceId);
+      log.debug('删除文献成功', { referenceId });
     } catch (err) {
       const msg = typeof err === 'string' ? err : String(err);
       error.value = msg;
+      log.error('删除文献失败', { referenceId, error: msg });
       throw err;
     }
   }
 
   /**
-   * 重试失败的导入。
+   * 重试失败的导入——重新入队一个 `reference_import` 任务（跳过文件去重）。
    *
    * @param projectPath 项目根路径
    * @param referenceId 文献 ID
-   * @returns 更新后的文献条目
+   * @returns 入队的任务记录
    */
   async function retryImport(
     projectPath: string,
     referenceId: string,
-  ): Promise<ReferenceEntry | null> {
+  ): Promise<TaskRecord | null> {
     if (!isTauriEnvironment()) return null;
-
-    isImporting.value = true;
-    error.value = null;
-
-    try {
-      const entry = await invoke<ReferenceEntry>('retry_import', {
-        projectPath,
-        referenceId,
-      });
-      updateReferenceInList(entry);
-      return entry;
-    } catch (err) {
-      const msg = typeof err === 'string' ? err : String(err);
-      error.value = msg;
-      throw err;
-    } finally {
-      isImporting.value = false;
+    if (unlistenFns.length === 0) {
+      await setupEventListeners();
     }
+    log.info('重试导入请求（入队）', { referenceId, projectPath });
+
+    const record = await invoke<TaskRecord>('retry_import', {
+      projectPath,
+      referenceId,
+    });
+
+    batchTaskIds = [record.id];
+    pendingTaskIds = [record.id];
+    isImporting.value = true;
+    fileNames.clear();
+
+    // 竞态补偿（同 importFiles）
+    try {
+      const all = await invoke<TaskRecord[]>('task_queue_list', {
+        projectPath,
+        statusFilter: null,
+      });
+      const latest = all.find((r) => r.id === record.id);
+      const status = latest?.status;
+      const title = filenameFromTask(record);
+      if (status === 'completed') {
+        register(record.id, { title, status: 'completed', category: 'import' });
+        markTaskFinished(record.id);
+      } else if (status === 'failed') {
+        register(record.id, {
+          title,
+          status: 'failed',
+          error: latest?.error ?? undefined,
+          category: 'import',
+        });
+        markTaskFinished(record.id);
+      } else {
+        register(record.id, { title, status: 'running', category: 'import' });
+      }
+      await loadReferences(projectPath);
+    } catch (err) {
+      log.warn('同步任务状态失败，等待事件驱动', { error: String(err) });
+      register(record.id, {
+        title: filenameFromTask(record),
+        status: 'running',
+        category: 'import',
+      });
+    }
+
+    return record;
   }
 
   /**
@@ -462,10 +442,12 @@ export function useReferences() {
         title,
       });
       updateReferenceInList(entry);
+      log.debug('更新文献标题成功', { referenceId, title: entry.title });
       return entry;
     } catch (err) {
       const msg = typeof err === 'string' ? err : String(err);
       error.value = msg;
+      log.error('更新文献标题失败', { referenceId, error: msg });
       throw err;
     }
   }
@@ -481,13 +463,15 @@ export function useReferences() {
   ): Promise<ConsistencyReport | null> {
     if (!isTauriEnvironment()) return null;
     try {
-      return await invoke<ConsistencyReport>('check_references_consistency', {
+      const report = await invoke<ConsistencyReport>('check_references_consistency', {
         projectPath,
       });
+      log.debug('一致性校验完成', { projectPath, report });
+      return report;
     } catch (err) {
       const msg = typeof err === 'string' ? err : String(err);
       error.value = msg;
-      console.error('[useReferences] 一致性校验失败:', err);
+      log.error('一致性校验失败', { projectPath, error: msg });
       return null;
     }
   }
@@ -501,14 +485,11 @@ export function useReferences() {
   return {
     // 响应式状态
     references,
-    activeJobId,
     isImporting,
     error,
     // 命令
     loadReferences,
-    importSingle,
     importFiles,
-    cancelImport,
     cancelAllImports,
     deleteReference,
     retryImport,

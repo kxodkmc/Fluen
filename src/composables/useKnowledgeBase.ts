@@ -217,16 +217,51 @@ export function useKnowledgeBase() {
    *
    * @param projectPath 项目根路径
    */
+  /**
+   * 加载知识库现状，回填每个文献的构建状态。
+   *
+   * 判定依据"知识库实际条目 + 最近一次构建任务状态"，避免把
+   * "失败后遗留的部分条目"误读为"完整入库"：
+   * - 有条目且最近构建成功 / 无任务记录 → `added`（已入库）
+   * - 有条目但最近构建失败 / 被取消 → `partial`（部分入库）
+   * - 有条目且构建任务排队 / 进行中 → `building`（入库中）
+   *
+   * @param projectPath 项目根路径
+   */
   async function loadExistingStatus(projectPath: string): Promise<void> {
     if (!isTauriEnvironment()) return;
     try {
-      const entries = await invoke<WikiEntry[]>('knowledge_list_entries', {
-        projectPath,
-      });
+      const [entries, tasks] = await Promise.all([
+        invoke<WikiEntry[]>('knowledge_list_entries', { projectPath }),
+        // 任务队列查询失败不阻塞知识库扫描（无任务记录时按 added 处理）
+        invoke<TaskRecord[]>('task_queue_list', { projectPath, statusFilter: null }).catch(
+          () => [],
+        ),
+      ]);
+
+      // ref_id → 最近一次知识库构建任务（created_at 最新）
+      const latestKbTask = new Map<string, TaskRecord>();
+      for (const task of tasks) {
+        if (task.kind.kind !== 'knowledge_build') continue;
+        const refId = task.kind.ref_id;
+        const prev = latestKbTask.get(refId);
+        if (!prev || task.created_at > prev.created_at) {
+          latestKbTask.set(refId, task);
+        }
+      }
+
       for (const entry of entries) {
         if (entry.wiki_type !== 'summary') continue;
         const refId = extractRefIdFromSource(entry.source);
-        if (refId && buildStatusMap[refId] !== 'building') {
+        if (!refId || buildStatusMap[refId] === 'building') continue;
+
+        const task = latestKbTask.get(refId);
+        if (task?.status === 'failed' || task?.status === 'cancelled') {
+          // 有条目但最近构建未成功：部分入库（避免误读为完整入库）
+          buildStatusMap[refId] = 'partial';
+        } else if (task?.status === 'pending' || task?.status === 'running') {
+          buildStatusMap[refId] = 'building';
+        } else {
           buildStatusMap[refId] = 'added';
         }
       }

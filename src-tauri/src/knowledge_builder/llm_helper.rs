@@ -64,12 +64,18 @@ impl UsageSnapshot {
 
 /// `knowledge_create_entry` 工具名称。
 const CREATE_ENTRY_TOOL_NAME: &str = "knowledge_create_entry";
+/// `knowledge_edit_entry` 工具名称（合并路径：候选命中已有条目时调用）。
+const EDIT_ENTRY_TOOL_NAME: &str = "knowledge_edit_entry";
 
-/// 观察者：捕获 `knowledge_create_entry` 工具返回的 `wiki_id`。
+/// 观察者：捕获条目操作工具返回的 `wiki_id`。
 ///
 /// 注册到 ConfluentRuntime 后，在每次工具调用结束时检查工具名，
-/// 若为 `knowledge_create_entry` 则从返回值中提取 `wiki_id` 写入 capture。
-/// pipeline 在 `runtime.run()` 返回后从 capture 读取，无需再通过 title 反查。
+/// 若为 `knowledge_create_entry`（新建）或 `knowledge_edit_entry`
+/// （合并到已有条目），则从返回值中提取 `wiki_id` 写入 capture。
+///
+/// **必须同时监听两个工具**：Execution 阶段 AI 依据 L2 检索结果二选一——
+/// 无相似条目时新建（create_entry），有相似条目时合并（edit_entry）。
+/// 只监听 create_entry 会在合并路径下误报"AI 未调用 create_entry"。
 pub struct CreateEntryObserver {
     capture: CreateEntryCapture,
 }
@@ -87,12 +93,12 @@ impl RuntimeObserver for CreateEntryObserver {
         _duration: Duration,
         result: &Result<Value, ToolError>,
     ) {
-        if tool != CREATE_ENTRY_TOOL_NAME {
+        if tool != CREATE_ENTRY_TOOL_NAME && tool != EDIT_ENTRY_TOOL_NAME {
             return;
         }
         if let Ok(val) = result {
             if let Some(wiki_id) = val.get("wiki_id").and_then(|v| v.as_str()) {
-                tracing::debug!(wiki_id = %wiki_id, "捕获 create_entry 结果");
+                tracing::debug!(tool = %tool, wiki_id = %wiki_id, "捕获条目操作结果");
                 *self.capture.lock().expect("create_entry capture poisoned") =
                     Some(wiki_id.to_string());
             }

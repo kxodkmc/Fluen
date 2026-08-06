@@ -146,29 +146,11 @@ export interface MetaResult {
 // 构建任务记录
 // ---------------------------------------------------------------------------
 
-/** 任务队列记录中的 `kind` 字段（internally tagged enum）。 */
-export interface TaskKindKnowledgeBuild {
-  kind: 'knowledge_build';
-  ref_id: string;
-  /** 场景化模型引用。 */
-  model_ref: { provider_id: string; model_id: string };
-  options: KnowledgeBuildOptions;
-}
-
-/** 任务状态。 */
-export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-
-/** 任务记录（仅含前端需要的字段）。 */
-export interface TaskRecord {
-  id: string;
-  project_path: string;
-  kind: TaskKindKnowledgeBuild;
-  status: TaskStatus;
-  /** ISO 8601 创建时间。 */
-  created_at: string;
-  /** ISO 8601 更新时间。 */
-  updated_at: string;
-}
+/**
+ * 任务队列通用类型统一收口在 `./taskQueue`，此处 re-export 保持
+ * 既有 import 路径兼容（useKnowledgeBase 等）。
+ */
+export type { TaskKind, TaskKindKnowledgeBuild, TaskRecord, TaskStatus } from './taskQueue';
 
 // ---------------------------------------------------------------------------
 // 事件 payload（由后端 Tauri 事件推送）
@@ -226,4 +208,4 @@ export interface KbBuildCancelledPayload {
  * - `added`：已成功加入知识库（存在 summary 条目）
  * - `failed`：最近一次构建失败
  */
-export type KnowledgeBuildStatus = 'idle' | 'building' | 'added' | 'failed';
+export type KnowledgeBuildStatus = 'idle' | 'building' | 'added' | 'partial' | 'failed';

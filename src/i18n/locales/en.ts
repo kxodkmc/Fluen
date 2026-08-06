@@ -183,6 +183,7 @@ export default {
         authorInfoPlaceholder: 'Author info pending',
         // Status badges (extensible: added / building / translated …)
         badgeKnowledgeBase: 'In KB',
+        badgeKnowledgePartial: 'Partial in KB',
         badgeKnowledgeBuilding: 'Adding…',
         badgeKnowledgeFailed: 'KB failed',
         badgeTranslated: 'Translated',

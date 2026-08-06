@@ -1,11 +1,12 @@
-//! 任务队列全局状态：管理各项目 runner 生命周期、取消令牌与会话池。
+//! 任务队列全局状态：管理各项目各种类 runner 生命周期、取消令牌与会话池。
 //!
 //! 通过 Tauri `manage` 注册为应用级状态，供 commands 与 runner 共享。
 //!
 //! ## 设计
 //!
 //! - **取消令牌集合**：`task_id → CancellationToken`，全局共享，commands 与 runner 都可访问。
-//! - **活跃 runner 集合**：`project_path` 集合，防止同项目重复 spawn runner。
+//! - **活跃 runner 集合**：`"{project_path}|{kind}"` 集合，防止同项目同种类重复 spawn runner；
+//!   不同种类（知识库构建 / 文献导入等）各自并行执行。
 //! - **会话池集合**：`project_path → Arc<SessionPool>`，跨 runner 复用知识库构建会话
 //!   （V2.1：跨论文 runtime 复用，命中模型前缀缓存）。
 //! - **runner spawn**：通过 [`TaskQueueState::try_start_runner`] 启动，
@@ -18,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::ai_services::storage::ConfigStorage as AiServicesConfigStorage;
 use crate::knowledge_builder::session::SessionPool;
 use crate::llm_config::storage::ConfigStorage as LlmConfigStorage;
 
@@ -67,20 +69,27 @@ impl TaskQueueState {
             .clone()
     }
 
-    /// 尝试为指定项目启动 runner。
+    /// 尝试为指定项目启动指定种类的 runner。
     ///
-    /// 若该项目已有活跃 runner，返回 `false`（不重复启动）。
+    /// 同一项目不同种类（如知识库构建 / 文献导入）各有独立 runner，
+    /// 并行消费各自队列互不阻塞；同一种类同项目不重复启动。
+    /// 若该项目该种类已有活跃 runner，返回 `false`。
     /// 否则 spawn 一个新 runner，返回 `true`。
     ///
     /// runner 完成后会自动从 `active_runners` 中移除自身。
     pub fn try_start_runner(
         &self,
         project_path: PathBuf,
+        kind: &'static str,
         store: Arc<TaskStore>,
         llm_storage: Arc<LlmConfigStorage>,
+        ai_storage: Arc<AiServicesConfigStorage>,
         app: AppHandle,
     ) -> bool {
-        let path_key = project_path.to_string_lossy().to_string();
+        let path_key = format!(
+            "{}|{kind}",
+            project_path.to_string_lossy()
+        );
         {
             let mut active = self.active_runners.lock().unwrap();
             if active.contains(&path_key) {
@@ -94,16 +103,26 @@ impl TaskQueueState {
         let session_pool = self.get_or_create_session_pool(&project_path);
         let runner = TaskRunner::new(
             project_path,
+            kind,
             store,
             llm_storage,
+            ai_storage,
             app,
             cancel_tokens,
             session_pool,
         );
 
-        // spawn runner，完成后自动清理 active_runners
+        // spawn runner；run_loop 消费完本种类任务后，退出前复查队列
+        //（入队与 runner 退出之间存在窗口：窗口期入队的新任务会被
+        // try_start_runner 以"已有活跃 runner"拒绝，需在此兜底继续消费，
+        // 直至队列真正清空才移除活跃标记）。
         tauri::async_runtime::spawn(async move {
-            runner.run_loop().await;
+            loop {
+                runner.run_loop().await;
+                if !runner.has_pending() {
+                    break;
+                }
+            }
             let mut active = active_runners.lock().unwrap();
             active.remove(&path_key);
         });

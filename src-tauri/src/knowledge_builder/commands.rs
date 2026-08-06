@@ -19,6 +19,7 @@ use fluen_knowledge::types::{
     MetaQueryType, QueryResult, RetrievalMethod, WikiEntry, WikiEntryDetail, WikiType,
 };
 
+use crate::ai_services::storage::ConfigStorage as AiServicesConfigStorage;
 use crate::llm_config::model::SceneModelRef;
 use crate::llm_config::storage::ConfigStorage as LlmConfigStorage;
 use crate::task_queue::state::TaskQueueState;
@@ -49,6 +50,7 @@ pub async fn knowledge_build_start(
     ref_id: String,
     options: Option<KnowledgeBuildOptions>,
     llm_storage: State<'_, LlmConfigStorage>,
+    ai_storage: State<'_, AiServicesConfigStorage>,
     state: State<'_, TaskQueueState>,
     app: AppHandle,
 ) -> Result<TaskRecord, KnowledgeBuilderError> {
@@ -98,8 +100,10 @@ pub async fn knowledge_build_start(
 
     state.try_start_runner(
         project_path_buf,
+        record.kind.kind_name(),
         store,
         Arc::new(llm_storage.inner().clone()),
+        Arc::new(ai_storage.inner().clone()),
         app,
     );
 

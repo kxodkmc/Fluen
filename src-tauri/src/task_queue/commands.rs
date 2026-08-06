@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, State};
 
+use crate::ai_services::storage::ConfigStorage as AiServicesConfigStorage;
 use crate::llm_config::storage::ConfigStorage as LlmConfigStorage;
 
 use super::error::TaskQueueError;
@@ -38,6 +39,7 @@ pub async fn task_queue_enqueue(
     kind: TaskKind,
     state: State<'_, TaskQueueState>,
     llm_storage: State<'_, LlmConfigStorage>,
+    ai_storage: State<'_, AiServicesConfigStorage>,
     app: AppHandle,
 ) -> Result<TaskRecord, TaskQueueError> {
     let project_path_buf = PathBuf::from(&project_path);
@@ -46,12 +48,14 @@ pub async fn task_queue_enqueue(
     // 入队
     let record = store.enqueue(kind)?;
 
-    // 触发 runner（若该项目的 runner 已活跃，则不重复启动；
+    // 触发对应种类的 runner（若该项目的该种类 runner 已活跃，则不重复启动；
     // 当前任务会在现有 runner 的循环中被拾取）
     state.try_start_runner(
         project_path_buf,
+        record.kind.kind_name(),
         store,
         Arc::new(llm_storage.inner().clone()),
+        Arc::new(ai_storage.inner().clone()),
         app,
     );
 
@@ -76,11 +80,14 @@ pub async fn task_queue_list(
 
 /// 取消任务。
 ///
-/// 若任务正在执行，调用对应 CancellationToken 触发取消。
-/// 任务状态会被标记为 Cancelled，checkpoint 保留（可继续）。
+/// 若任务正在执行，调用对应 CancellationToken 触发取消（runner 检测后
+/// 自行更新状态并推送事件）；若任务未在执行（Pending），直接标记为
+/// Cancelled。
 ///
-/// 若任务不在执行中（Pending），直接标记为 Cancelled。
 /// 已终态（Completed/Failed/Cancelled）的任务返回 `InvalidState` 错误。
+///
+/// 先尝试取消令牌再读状态，避免"读状态 → 决策"窗口内 runner 抢先
+/// 置 Running 导致的 TOCTOU（取消令牌存在即视为执行中）。
 #[tauri::command]
 pub async fn task_queue_cancel(
     task_id: String,
@@ -88,25 +95,21 @@ pub async fn task_queue_cancel(
     state: State<'_, TaskQueueState>,
 ) -> Result<(), TaskQueueError> {
     let store = TaskStore::new(&project_path);
-    let task = store.find(&task_id)?;
 
+    // 执行中的任务：取消令牌生效，runner 负责更新终态
+    if state.cancel_task(&task_id) {
+        return Ok(());
+    }
+
+    // 未在执行（Pending，或终态后令牌已移除）：读状态处理
+    let task = store.find(&task_id)?;
     if task.status.is_terminal() {
         return Err(TaskQueueError::InvalidState(format!(
             "任务 {task_id} 已是终态 {:?}，无法取消",
             task.status
         )));
     }
-
-    if task.status == TaskStatus::Running {
-        // 调用取消令牌，runner 检测到后会自行更新状态
-        if !state.cancel_task(&task_id) {
-            // 令牌不存在（可能 runner 已退出），直接置为 Cancelled
-            store.update_status(&task_id, TaskStatus::Cancelled)?;
-        }
-    } else {
-        // Pending：直接标记为 Cancelled
-        store.update_status(&task_id, TaskStatus::Cancelled)?;
-    }
+    store.update_status(&task_id, TaskStatus::Cancelled)?;
 
     Ok(())
 }
@@ -121,12 +124,13 @@ pub async fn task_queue_retry(
     project_path: String,
     state: State<'_, TaskQueueState>,
     llm_storage: State<'_, LlmConfigStorage>,
+    ai_storage: State<'_, AiServicesConfigStorage>,
     app: AppHandle,
 ) -> Result<(), TaskQueueError> {
     let project_path_buf = PathBuf::from(&project_path);
     let store = Arc::new(TaskStore::new(&project_path_buf));
 
-    {
+    let kind_name = {
         let s = TaskStore::new(&project_path_buf);
         let task = s.find(&task_id)?;
         if !task.status.can_resume() {
@@ -136,13 +140,16 @@ pub async fn task_queue_retry(
             )));
         }
         s.update_status(&task_id, TaskStatus::Pending)?;
-    }
+        task.kind.kind_name()
+    };
 
-    // 触发 runner
+    // 触发对应种类的 runner
     state.try_start_runner(
         project_path_buf,
+        kind_name,
         store,
         Arc::new(llm_storage.inner().clone()),
+        Arc::new(ai_storage.inner().clone()),
         app,
     );
 
@@ -159,9 +166,10 @@ pub async fn task_queue_resume(
     project_path: String,
     state: State<'_, TaskQueueState>,
     llm_storage: State<'_, LlmConfigStorage>,
+    ai_storage: State<'_, AiServicesConfigStorage>,
     app: AppHandle,
 ) -> Result<(), TaskQueueError> {
-    task_queue_retry(task_id, project_path, state, llm_storage, app).await
+    task_queue_retry(task_id, project_path, state, llm_storage, ai_storage, app).await
 }
 
 /// 删除任务记录。

@@ -34,6 +34,7 @@
 pub mod commands;
 pub mod consistency;
 pub mod error;
+pub mod events;
 pub mod importer;
 pub mod marks;
 pub mod model;

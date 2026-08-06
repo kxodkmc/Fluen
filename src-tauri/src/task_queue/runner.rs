@@ -1,11 +1,14 @@
-//! 项目级串行任务执行器。
+//! 项目级单种类串行任务执行器。
 //!
-//! 每个 [`TaskRunner`] 绑定一个项目，串行执行该项目下的 Pending 任务。
-//! 通过 [`TaskQueueState`] 管理各项目的 runner 生命周期。
+//! 每个 [`TaskRunner`] 绑定一个项目与一个任务种类，串行执行该项目下
+//! 该种类的 Pending 任务。同一项目不同种类各有独立 runner，并行执行
+//! 互不阻塞（如知识库构建与文献导入可同时进行）。
+//! 通过 [`TaskQueueState`] 管理各项目各 runner 的生命周期。
 //!
-//! ## 设计（V2.1）
+//! ## 设计（V2.2）
 //!
-//! - **单 worker 串行**：同一项目内任务严格按 FIFO 顺序执行，避免并发写入知识库。
+//! - **单 worker 串行**：同一项目同一种类内任务严格按 FIFO 顺序执行；
+//!   不同种类并行（各自的 runner 独立消费）。
 //! - **取消令牌**：每个任务关联一个 [`CancellationToken`]，支持运行中取消。
 //! - **事件推送**：通过 Tauri `Window::emit` 推送任务进度与终态事件到前端。
 //! - **checkpoint 持久化**：执行中持续更新 checkpoint，中断后可从断点恢复。
@@ -20,6 +23,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
+use crate::ai_services::storage::ConfigStorage as AiServicesConfigStorage;
 use crate::knowledge_builder::context_budget::ContextBudget;
 use crate::knowledge_builder::error_classify::{
     backoff_delay, classify_error, LlmErrorKind, MAX_TRANSIENT_RETRIES,
@@ -34,6 +38,13 @@ use crate::knowledge_builder::types::KnowledgeBuildCheckpoint;
 use crate::knowledge_builder::KnowledgeBuilderError as KbError;
 use crate::llm_config::model::SceneModelRef;
 use crate::llm_config::storage::ConfigStorage as LlmConfigStorage;
+use crate::references::error::ReferenceError;
+use crate::references::events::{
+    ImportCompletedPayload, ImportFailedPayload, ImportProgressPayload, ImportStartedPayload,
+    EVENT_IMPORT_COMPLETED, EVENT_IMPORT_FAILED, EVENT_IMPORT_PROGRESS, EVENT_IMPORT_STARTED,
+};
+use crate::references::importer::{ImportProgress, ReferenceImporter};
+use crate::references::storage::ReferenceIndex;
 
 use fluen_knowledge::async_kb::AsyncKnowledgeBase;
 
@@ -49,10 +60,16 @@ use super::types::{TaskKind, TaskRecord, TaskStatus};
 pub struct TaskRunner {
     /// 项目根路径。
     project_path: PathBuf,
+    /// 本 runner 消费的任务种类（`TaskKind::kind_name`，如 `knowledge_build`）。
+    ///
+    /// 同项目不同种类的任务由各自 runner 并行消费（互不阻塞）。
+    kind: &'static str,
     /// 任务存储（同项目共享）。
     store: Arc<TaskStore>,
     /// LLM 配置存储（用于解析场景化模型）。
     llm_storage: Arc<LlmConfigStorage>,
+    /// AI 服务配置存储（用于创建 OCR provider）。
+    ai_storage: Arc<AiServicesConfigStorage>,
     /// Tauri 应用句柄（用于 emit 事件与获取窗口）。
     app: AppHandle,
     /// 取消令牌集合（task_id → token）。
@@ -65,28 +82,35 @@ impl TaskRunner {
     /// 创建 runner 实例。
     pub fn new(
         project_path: impl Into<PathBuf>,
+        kind: &'static str,
         store: Arc<TaskStore>,
         llm_storage: Arc<LlmConfigStorage>,
+        ai_storage: Arc<AiServicesConfigStorage>,
         app: AppHandle,
         cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
         session_pool: Arc<SessionPool>,
     ) -> Self {
         Self {
             project_path: project_path.into(),
+            kind,
             store,
             llm_storage,
+            ai_storage,
             app,
             cancel_tokens,
             session_pool,
         }
     }
 
-    /// 持续消费 Pending 任务，直到无任务可执行。
+    /// 持续消费本种类 Pending 任务，直到无任务可执行。
     ///
-    /// 单 worker 串行：每次循环拾取最早创建的 Pending 任务，执行完毕后再取下一个。
-    pub async fn run_loop(self) {
+    /// 单 worker 串行：每次循环拾取最早创建的本种类 Pending 任务，
+    /// 执行完毕后再取下一个。不同种类的 runner 并行执行互不阻塞。
+    ///
+    /// 以 `&self` 借用，调用方可多次调用（如退出前复查队列兜底）。
+    pub async fn run_loop(&self) {
         loop {
-            match self.store.next_pending() {
+            match self.store.next_pending_of(self.kind) {
                 Ok(Some(task)) => {
                     if let Err(e) = self.execute_one(&task).await {
                         tracing::error!(
@@ -103,6 +127,11 @@ impl TaskRunner {
                 }
             }
         }
+    }
+
+    /// 队列中是否仍有本种类 Pending 任务（runner 退出前复查用）。
+    pub fn has_pending(&self) -> bool {
+        self.store.has_pending_of(self.kind)
     }
 
     /// 执行单个任务（含状态转换、事件推送、checkpoint 持久化）。
@@ -169,6 +198,108 @@ impl TaskRunner {
             } => self
                 .execute_knowledge_build(task, ref_id, model_ref, options, cancel)
                 .await,
+            TaskKind::ReferenceImport {
+                file_path,
+                reference_id,
+                force,
+            } => self
+                .execute_reference_import(task, file_path, reference_id, *force, cancel)
+                .await,
+        }
+    }
+
+    /// 执行文献导入任务（OCR 转 Markdown）。
+    ///
+    /// 复用 [`ReferenceImporter`] 的完整导入管线（preflight → 去重 →
+    /// 备份 → OCR → 保存），进度通过 `reference:import_progress` 事件推送。
+    /// 重跑幂等：去重检查跳过自身条目（中断恢复 / 重试场景）。
+    async fn execute_reference_import(
+        &self,
+        task: &TaskRecord,
+        file_path: &str,
+        reference_id: &str,
+        force: bool,
+        cancel: &CancellationToken,
+    ) -> Result<(), TaskQueueError> {
+        tracing::info!(
+            task_id = %task.id,
+            reference_id = %reference_id,
+            file = %file_path,
+            force,
+            "文献导入任务分发"
+        );
+
+        let ai_config = self
+            .ai_storage
+            .get()
+            .map_err(|e| TaskQueueError::Execution(format!("读取 OCR 配置失败: {e}")))?;
+        let importer = ReferenceImporter::new(&ai_config)
+            .map_err(|e| TaskQueueError::Execution(e.to_string()))?;
+
+        let index = ReferenceIndex::new(&self.project_path);
+        let window = self.app.get_webview_window("main");
+
+        let task_id = task.id.clone();
+        let reference_id_owned = reference_id.to_string();
+        let result = importer
+            .import_single(
+                file_path,
+                &self.project_path,
+                &index,
+                reference_id,
+                force,
+                move |progress: ImportProgress| {
+                    if let Some(ref window) = window {
+                        let _ = window.emit(
+                            EVENT_IMPORT_PROGRESS,
+                            &ImportProgressPayload {
+                                job_id: task_id.clone(),
+                                reference_id: reference_id_owned.clone(),
+                                stage: progress.stage.clone(),
+                                ocr_progress: progress.ocr_progress,
+                            },
+                        );
+                    }
+                },
+                cancel,
+            )
+            .await;
+
+        match result {
+            Ok(entry) => {
+                tracing::info!(
+                    task_id = %task.id,
+                    reference_id = %entry.id,
+                    title = %entry.title,
+                    "文献导入任务执行成功"
+                );
+                // 直接携带 entry 推送完成事件（避免 emit_completed 二次读索引）
+                if let Some(window) = self.app.get_webview_window("main") {
+                    let _ = window.emit(
+                        EVENT_IMPORT_COMPLETED,
+                        &ImportCompletedPayload {
+                            job_id: task.id.clone(),
+                            reference_id: entry.id.clone(),
+                            entry,
+                        },
+                    );
+                }
+                Ok(())
+            }
+            Err(ReferenceError::Cancelled) => {
+                tracing::warn!(task_id = %task.id, reference_id = %reference_id, "文献导入任务被取消");
+                Err(TaskQueueError::Cancelled)
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                tracing::error!(
+                    task_id = %task.id,
+                    reference_id = %reference_id,
+                    error = %err_msg,
+                    "文献导入任务执行失败"
+                );
+                Err(TaskQueueError::Execution(err_msg))
+            }
         }
     }
 
@@ -396,65 +527,129 @@ impl TaskRunner {
     }
 
     fn emit_started(&self, task: &TaskRecord) {
-        if let Some(window) = self.app.get_webview_window("main") {
-            let ref_id = task.kind.ref_id().map(|s| s.to_string());
-            let _ = window.emit(
-                EVENT_KB_BUILD_STARTED,
-                KbBuildStartedPayload {
-                    task_id: task.id.clone(),
-                    ref_id: ref_id.clone().unwrap_or_default(),
-                    title: None,
-                },
-            );
+        let Some(window) = self.app.get_webview_window("main") else {
+            return;
+        };
+        match &task.kind {
+            TaskKind::KnowledgeBuild { ref_id, .. } => {
+                let _ = window.emit(
+                    EVENT_KB_BUILD_STARTED,
+                    KbBuildStartedPayload {
+                        task_id: task.id.clone(),
+                        ref_id: ref_id.clone(),
+                        title: None,
+                    },
+                );
+            }
+            TaskKind::ReferenceImport {
+                reference_id,
+                file_path,
+                ..
+            } => {
+                let _ = window.emit(
+                    EVENT_IMPORT_STARTED,
+                    ImportStartedPayload {
+                        job_id: task.id.clone(),
+                        reference_id: reference_id.clone(),
+                        filename: filename_of(file_path),
+                    },
+                );
+            }
         }
     }
 
     fn emit_completed(&self, task: &TaskRecord) {
-        if let Some(window) = self.app.get_webview_window("main") {
-            let ref_id = task.kind.ref_id().map(|s| s.to_string()).unwrap_or_default();
-            // 从 checkpoint 提取 completed payload 字段
-            let (summary_id, concept_ids, entity_ids, relations) =
-                extract_completed_fields(task);
-            let _ = window.emit(
-                EVENT_KB_BUILD_COMPLETED,
-                KbBuildCompletedPayload {
-                    task_id: task.id.clone(),
-                    ref_id,
-                    summary_id,
-                    concept_ids,
-                    entity_ids,
-                    relations_established: relations,
-                },
-            );
+        let Some(window) = self.app.get_webview_window("main") else {
+            return;
+        };
+        match &task.kind {
+            TaskKind::KnowledgeBuild { ref_id, .. } => {
+                // 从 checkpoint 提取 completed payload 字段
+                let (summary_id, concept_ids, entity_ids, relations) =
+                    extract_completed_fields(task);
+                let _ = window.emit(
+                    EVENT_KB_BUILD_COMPLETED,
+                    KbBuildCompletedPayload {
+                        task_id: task.id.clone(),
+                        ref_id: ref_id.clone(),
+                        summary_id,
+                        concept_ids,
+                        entity_ids,
+                        relations_established: relations,
+                    },
+                );
+            }
+            TaskKind::ReferenceImport { .. } => {
+                // 完成事件已在 execute_reference_import 成功时携带 entry 推送，
+                // 此处不再重复 emit（避免二次读索引与重复事件）。
+            }
         }
     }
 
     fn emit_failed(&self, task: &TaskRecord, error: &str) {
-        if let Some(window) = self.app.get_webview_window("main") {
-            let ref_id = task.kind.ref_id().map(|s| s.to_string()).unwrap_or_default();
-            let _ = window.emit(
-                EVENT_KB_BUILD_FAILED,
-                KbBuildFailedPayload {
-                    task_id: task.id.clone(),
-                    ref_id,
-                    error: error.to_string(),
-                },
-            );
+        let Some(window) = self.app.get_webview_window("main") else {
+            return;
+        };
+        match &task.kind {
+            TaskKind::KnowledgeBuild { ref_id, .. } => {
+                let _ = window.emit(
+                    EVENT_KB_BUILD_FAILED,
+                    KbBuildFailedPayload {
+                        task_id: task.id.clone(),
+                        ref_id: ref_id.clone(),
+                        error: error.to_string(),
+                    },
+                );
+            }
+            TaskKind::ReferenceImport { reference_id, .. } => {
+                let _ = window.emit(
+                    EVENT_IMPORT_FAILED,
+                    ImportFailedPayload {
+                        job_id: task.id.clone(),
+                        reference_id: reference_id.clone(),
+                        error: error.to_string(),
+                    },
+                );
+            }
         }
     }
 
     fn emit_cancelled(&self, task: &TaskRecord) {
-        if let Some(window) = self.app.get_webview_window("main") {
-            let ref_id = task.kind.ref_id().map(|s| s.to_string()).unwrap_or_default();
-            let _ = window.emit(
-                EVENT_KB_BUILD_CANCELLED,
-                KbBuildCancelledPayload {
-                    task_id: task.id.clone(),
-                    ref_id,
-                },
-            );
+        let Some(window) = self.app.get_webview_window("main") else {
+            return;
+        };
+        match &task.kind {
+            TaskKind::KnowledgeBuild { ref_id, .. } => {
+                let _ = window.emit(
+                    EVENT_KB_BUILD_CANCELLED,
+                    KbBuildCancelledPayload {
+                        task_id: task.id.clone(),
+                        ref_id: ref_id.clone(),
+                    },
+                );
+            }
+            // 文献导入无独立取消事件：沿用失败事件 + 固定文案「已取消」，
+            // 与前端 CANCEL_MESSAGE 约定保持一致。
+            TaskKind::ReferenceImport { reference_id, .. } => {
+                let _ = window.emit(
+                    EVENT_IMPORT_FAILED,
+                    ImportFailedPayload {
+                        job_id: task.id.clone(),
+                        reference_id: reference_id.clone(),
+                        error: "已取消".into(),
+                    },
+                );
+            }
         }
     }
+}
+
+/// 从文件路径提取文件名（用于事件展示），失败时回退 `"unknown"`。
+fn filename_of(file_path: &str) -> String {
+    std::path::Path::new(file_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 /// 从任务 checkpoint 中提取 completed payload 所需字段。

@@ -62,6 +62,15 @@ pub enum TaskKind {
         /// 构建选项。
         options: KnowledgeBuildOptions,
     },
+    /// 文献导入任务（OCR 转 Markdown）。
+    ReferenceImport {
+        /// 源文件绝对路径（PDF / 图片）。
+        file_path: String,
+        /// 预分配的文献 ID（`ref-{uuid}`），用于幂等重跑与事件关联。
+        reference_id: String,
+        /// 是否跳过文件去重（重试 / 强制导入时置 true）。
+        force: bool,
+    },
     // 未来扩展：
     // Translation { ref_id, target_lang, ... }
     // OcrCorrection { ref_id, ... }
@@ -72,6 +81,7 @@ impl TaskKind {
     pub fn kind_name(&self) -> &'static str {
         match self {
             Self::KnowledgeBuild { .. } => "knowledge_build",
+            Self::ReferenceImport { .. } => "reference_import",
         }
     }
 
@@ -79,6 +89,7 @@ impl TaskKind {
     pub fn ref_id(&self) -> Option<&str> {
         match self {
             Self::KnowledgeBuild { ref_id, .. } => Some(ref_id),
+            Self::ReferenceImport { reference_id, .. } => Some(reference_id),
         }
     }
 }
@@ -258,6 +269,14 @@ mod tests {
         let kind = sample_kb_kind();
         assert_eq!(kind.kind_name(), "knowledge_build");
         assert_eq!(kind.ref_id(), Some("ref-abc"));
+
+        let import_kind = TaskKind::ReferenceImport {
+            file_path: "/tmp/a.pdf".into(),
+            reference_id: "ref-123".into(),
+            force: false,
+        };
+        assert_eq!(import_kind.kind_name(), "reference_import");
+        assert_eq!(import_kind.ref_id(), Some("ref-123"));
     }
 
     #[test]

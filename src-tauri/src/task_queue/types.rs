@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::knowledge_builder::types::KnowledgeBuildOptions;
 use crate::llm_config::model::SceneModelRef;
+use crate::references::import_mode::ReferenceImportMode;
 
 // ---------------------------------------------------------------------------
 // 任务状态
@@ -62,7 +63,7 @@ pub enum TaskKind {
         /// 构建选项。
         options: KnowledgeBuildOptions,
     },
-    /// 文献导入任务（OCR 转 Markdown）。
+    /// 文献导入任务（OCR / AI 校正转 Markdown）。
     ReferenceImport {
         /// 源文件绝对路径（PDF / 图片）。
         file_path: String,
@@ -70,6 +71,8 @@ pub enum TaskKind {
         reference_id: String,
         /// 是否跳过文件去重（重试 / 强制导入时置 true）。
         force: bool,
+        /// 导入模式（决定处理路径：纯 OCR / OCR+AI / 纯 AI）。
+        mode: ReferenceImportMode,
     },
     // 未来扩展：
     // Translation { ref_id, target_lang, ... }
@@ -274,6 +277,7 @@ mod tests {
             file_path: "/tmp/a.pdf".into(),
             reference_id: "ref-123".into(),
             force: false,
+            mode: ReferenceImportMode::Ocr,
         };
         assert_eq!(import_kind.kind_name(), "reference_import");
         assert_eq!(import_kind.ref_id(), Some("ref-123"));

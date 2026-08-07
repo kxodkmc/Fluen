@@ -13,6 +13,7 @@ import type {
   AiServicesConfig,
   AiServiceProvider,
   PaddleOcrConfig,
+  ReferenceImportMode,
 } from '../../../types/aiServices';
 
 /* ── PaddleOCR 默认配置 ─────────────────────────────────────────────── */
@@ -74,6 +75,11 @@ export function useAiServicesSettings() {
   /** 当前激活的 OCR 提供商 ID。 */
   const activeOcrProviderId = computed(() =>
     config.value?.active_providers?.ocr ?? null,
+  );
+
+  /** 文献导入默认模式（默认纯 OCR）。 */
+  const importMode = computed<ReferenceImportMode>(
+    () => config.value?.default_reference_import_mode ?? 'ocr',
   );
 
   /** 当前选中的提供商对象。 */
@@ -209,6 +215,13 @@ export function useAiServicesSettings() {
     }
   }
 
+  /** 设置文献导入默认模式。 */
+  async function setImportMode(mode: ReferenceImportMode): Promise<void> {
+    if (!config.value) return;
+    config.value.default_reference_import_mode = mode;
+    await persist();
+  }
+
   /* ── 持久化 ──────────────────────────────────────────────────────── */
 
   async function persist(): Promise<void> {
@@ -232,6 +245,7 @@ export function useAiServicesSettings() {
     providers,
     ocrProviders,
     activeOcrProviderId,
+    importMode,
     selectedProvider,
     selectedProviderId,
     isLoading,
@@ -246,6 +260,7 @@ export function useAiServicesSettings() {
     updateOcrOptions,
     setActiveOcrProvider,
     setActiveModel,
+    setImportMode,
     getPaddleOcrConfig,
   };
 }

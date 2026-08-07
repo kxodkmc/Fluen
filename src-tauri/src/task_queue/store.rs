@@ -393,6 +393,7 @@ mod tests {
                 file_path: "/tmp/a.pdf".into(),
                 reference_id: "ref-123".into(),
                 force: false,
+                mode: crate::references::import_mode::ReferenceImportMode::Ocr,
             })
             .unwrap();
 

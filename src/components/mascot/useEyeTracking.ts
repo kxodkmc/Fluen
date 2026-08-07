@@ -2,7 +2,7 @@
  * Mascot 模块 — 眼球鼠标追踪 composable。
  *
  * 职责：
- *   - 监听 window mousemove，计算鼠标相对于容器中心的方向
+ *   - 订阅全局鼠标位置（useMousePosition），计算鼠标相对于容器中心的方向
  *   - 通过 RAF + lerp 平滑插值，输出 SVG 用户单位偏移量
  *   - 禁用时自动回归 {0, 0} 并停止 RAF
  *
@@ -10,6 +10,8 @@
  *   - 与渲染层解耦 —— 仅输出偏移量，不操作 DOM
  *   - 按需启停 RAF —— 收敛后自动取消，避免空转
  *   - 可配置最大偏移与平滑系数
+ *   - 数据来源透明 —— 通过 useMousePosition 统一接收 window / iframe 上报的鼠标位置，
+ *     iframe 内的 mousemove 经 postMessage 转发后也能驱动眼球追踪
  *
  * @example
  * ```ts
@@ -19,7 +21,8 @@
  * ```
  */
 
-import { ref, watch, onMounted, onUnmounted, type Ref } from 'vue';
+import { ref, watch, onUnmounted, type Ref } from 'vue';
+import { useMousePosition } from '../../composables/useMousePosition';
 import type { EyeOffset } from './types';
 
 export interface EyeTrackingOptions {
@@ -49,6 +52,9 @@ export function useEyeTracking(
   options?: Partial<EyeTrackingOptions>,
 ): { eyeOffset: Ref<EyeOffset> } {
   const opts = { ...DEFAULT_OPTIONS, ...options };
+
+  /** 全局鼠标位置（来自 useMousePosition 单例，含 iframe 上报）。 */
+  const { mouseX, mouseY } = useMousePosition();
 
   /** 当前眼球偏移（供渲染层绑定）。 */
   const eyeOffset = ref<EyeOffset>({ ...ZERO_OFFSET });
@@ -84,9 +90,9 @@ export function useEyeTracking(
     rafId = requestAnimationFrame(step);
   }
 
-  /* ── mousemove → 目标偏移 ─────────────────────────────────────────── */
+  /* ── 鼠标位置变化 → 目标偏移 ──────────────────────────────────────── */
 
-  function handleMouseMove(e: MouseEvent): void {
+  function updateTarget(): void {
     const el = containerRef.value;
     if (!el) return;
 
@@ -94,8 +100,8 @@ export function useEyeTracking(
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
 
-    const dx = e.clientX - cx;
-    const dy = e.clientY - cy;
+    const dx = mouseX.value - cx;
+    const dy = mouseY.value - cy;
     const dist = Math.hypot(dx, dy);
 
     if (dist < 1) {
@@ -111,9 +117,13 @@ export function useEyeTracking(
     if (enabled.value) ensureRAF();
   }
 
+  // 订阅全局鼠标位置变化（覆盖 window mousemove 与 iframe mousemove 上报两种来源）
+  // flush: 'post' 确保 DOM 更新后再读取 bounding rect（containerRef 可能因布局变化而位移）
+  const stopWatch = watch([mouseX, mouseY], updateTarget, { flush: 'post' });
+
   /* ── 禁用时回归中心 ───────────────────────────────────────────────── */
 
-  watch(enabled, (isEnabled) => {
+  const stopEnabledWatch = watch(enabled, (isEnabled) => {
     if (!isEnabled) {
       targetX = 0;
       targetY = 0;
@@ -121,14 +131,9 @@ export function useEyeTracking(
     }
   });
 
-  /* ── 生命周期 ─────────────────────────────────────────────────────── */
-
-  onMounted(() => {
-    window.addEventListener('mousemove', handleMouseMove, { passive: true });
-  });
-
   onUnmounted(() => {
-    window.removeEventListener('mousemove', handleMouseMove);
+    stopWatch();
+    stopEnabledWatch();
     if (rafId !== null) cancelAnimationFrame(rafId);
   });
 

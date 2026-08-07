@@ -57,6 +57,16 @@ const motisChat = useMotisChat();
 provide(MOTIS_CHAT_KEY, motisChat);
 
 /* ── 拖拽调整面板宽度 ─────────────────────────────────────────────────── */
+/**
+ * 拖动期间在 body 上覆盖一个全屏透明遮罩（`main-view__resize-mask`）：
+ *   - 遮罩 `pointer-events: auto` 截获所有鼠标事件，阻止 iframe / contenteditable
+ *     抢占 mousemove（iframe 内事件不冒泡到外层 document，会导致拖拽中断）
+ *   - mousemove 事件经遮罩冒泡到 document，被 `onResizeMove` 监听器接收
+ *
+ * 这是经典做法：拖拽期间用一个全屏 overlay 屏蔽底层交互元素的鼠标捕获，
+ * 既保证 mousemove 不被 iframe 截获，也避免拖拽过程中误触其他控件。
+ */
+const isResizing = ref(false);
 let resizing: 'function' | 'ai' | null = null;
 let startX = 0;
 let startWidth = 0;
@@ -68,6 +78,7 @@ function startResize(e: MouseEvent, panel: 'function' | 'ai'): void {
   startWidth = panel === 'function'
     ? layout.functionPanelWidth.value
     : layout.aiPanelWidth.value;
+  isResizing.value = true;
   document.addEventListener('mousemove', onResizeMove);
   document.addEventListener('mouseup', stopResize);
 }
@@ -87,6 +98,7 @@ function onResizeMove(e: MouseEvent): void {
 
 function stopResize(): void {
   resizing = null;
+  isResizing.value = false;
   document.removeEventListener('mousemove', onResizeMove);
   document.removeEventListener('mouseup', stopResize);
 }
@@ -221,6 +233,9 @@ watch(
     <!-- ── 底部状态栏（跨越三面板） ──────────────────────────────────── -->
     <StatusBar />
 
+    <!-- 拖拽遮罩：阻止 iframe / contenteditable 抢占 mousemove -->
+    <div v-if="isResizing" class="main-view__resize-mask"></div>
+
     <!-- 开发辅助：打开占位标签页按钮（后续移除） -->
     <button class="main-view__dev-btn" @click="openPlaceholderTab">
       {{ t('main.dev.openTabPlaceholder') }}
@@ -237,6 +252,7 @@ watch(
 
 <style scoped>
 .main-view {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -267,6 +283,20 @@ watch(
 
 .main-view__resizer:hover {
   background: var(--fluen-accent);
+}
+
+/* ── 拖拽遮罩 ─────────────────────────────────────────────────────────── */
+/* 拖拽期间覆盖整个 main-view，截获 iframe / contenteditable 的 mousemove。
+ * 透明背景 + pointer-events:auto → 不影响视觉但拦截所有鼠标事件，
+ * 让外层 document 的 mousemove listener 正常触发。
+ * cursor: col-resize 提供与分隔条一致的拖动光标体验。 */
+.main-view__resize-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  cursor: col-resize;
+  background: transparent;
+  user-select: none;
 }
 
 /* ── 开发辅助按钮 ─────────────────────────────────────────────────────── */

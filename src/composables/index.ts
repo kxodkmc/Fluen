@@ -10,3 +10,4 @@ export { useKnowledgeBase } from './useKnowledgeBase';
 export { useWikiExplorer } from './useWikiExplorer';
 export { useLogger } from './useLogger';
 export { useRecentProjects } from './useRecentProjects';
+export { useMousePosition } from './useMousePosition';

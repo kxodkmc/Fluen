@@ -35,6 +35,7 @@ use crate::task_queue::types::{TaskKind, TaskRecord};
 
 use super::consistency;
 use super::error::ReferenceError;
+use super::import_mode::ReferenceImportMode;
 use super::importer::ReferenceImporter;
 use super::model::{
     ConsistencyReport, ReferenceEntry, ReferenceStatus,
@@ -54,12 +55,15 @@ const LOG_SCOPE: &str = "references";
 /// 由 [`TaskQueueState`] 按 FIFO 顺序串行执行（先到先导）。
 /// 立即返回全部任务记录，执行进度与结果通过 `reference:*` 事件推送。
 ///
-/// 入队前会预校验 OCR 配置可用性，配置缺失时立即报错（快速反馈），
+/// `mode` 决定导入处理路径（纯 OCR / OCR+AI / 纯 AI）。不传时使用
+/// AI 服务配置中的 `default_reference_import_mode`（设置页可配置，默认纯 OCR）。
+/// 入队前按模式能力标志预校验配置（OCR / LLM），配置缺失时立即报错（快速反馈），
 /// 避免任务排队后才发现无法执行。
 #[tauri::command]
 pub async fn references_enqueue_imports(
     project_path: String,
     file_paths: Vec<String>,
+    mode: Option<ReferenceImportMode>,
     state: State<'_, TaskQueueState>,
     llm_storage: State<'_, LlmConfigStorage>,
     ai_storage: State<'_, AiServicesConfigStorage>,
@@ -71,11 +75,16 @@ pub async fn references_enqueue_imports(
 
     let project_dir = PathBuf::from(&project_path);
 
-    // 预校验 OCR 配置（失败立即返回，快速反馈）
+    // 预校验配置（按模式能力标志，失败立即返回）
     let ai_config = ai_storage.get().inspect_err(|e| {
-        tracing::error!(scope = LOG_SCOPE, error = %e, "读取 OCR 配置失败");
+        tracing::error!(scope = LOG_SCOPE, error = %e, "读取 AI 服务配置失败");
     }).map_err(|e| ReferenceError::Other(e.to_string()))?;
-    ReferenceImporter::new(&ai_config)?;
+    let llm_config = llm_storage.load().inspect_err(|e| {
+        tracing::error!(scope = LOG_SCOPE, error = %e, "读取 LLM 配置失败");
+    }).map_err(|e| ReferenceError::Other(e.to_string()))?;
+    // 未显式传入模式时，回退到设置页配置的默认导入模式（默认纯 OCR）
+    let mode = mode.unwrap_or(ai_config.default_reference_import_mode);
+    ReferenceImporter::new(mode, &ai_config, &llm_config)?;
 
     let store = Arc::new(TaskStore::new(&project_dir));
 
@@ -85,6 +94,7 @@ pub async fn references_enqueue_imports(
             file_path,
             reference_id: ReferenceEntry::generate_id(),
             force: false,
+            mode,
         };
         let record = store
             .enqueue(kind)
@@ -94,6 +104,7 @@ pub async fn references_enqueue_imports(
             task_id = %record.id,
             reference_id = %record.kind.ref_id().unwrap_or_default(),
             project = %project_dir.display(),
+            mode = ?mode,
             "文献导入任务已入队"
         );
         records.push(record);
@@ -114,6 +125,7 @@ pub async fn references_enqueue_imports(
         scope = LOG_SCOPE,
         count = records.len(),
         project = %project_dir.display(),
+        mode = ?mode,
         "文献导入任务批量入队完成"
     );
 
@@ -176,6 +188,7 @@ pub fn delete_reference(
 /// 重试失败的导入——将文献重新入队（`force=true` 跳过文件去重）。
 ///
 /// 使用 raw 备份文件作为源，复用原文献 ID 保证索引幂等覆盖。
+/// 导入模式复用条目记录的 `import_mode`（首次导入时确定）。
 /// 返回入队的任务记录，执行进度通过 `reference:*` 事件推送。
 #[tauri::command]
 pub async fn retry_import(
@@ -201,6 +214,8 @@ pub async fn retry_import(
         )));
     }
 
+    let mode = existing.import_mode;
+
     // 重置索引状态为 Pending（任务执行时再置 Processing）
     index.update(|entries| {
         if let Some(e) = entries.iter_mut().find(|e| e.id == reference_id) {
@@ -210,17 +225,21 @@ pub async fn retry_import(
         Ok(())
     })?;
 
-    // 预校验 OCR 配置
+    // 预校验配置（按模式能力标志）
     let ai_config = ai_storage.get().inspect_err(|e| {
-        tracing::error!(scope = LOG_SCOPE, error = %e, "读取 OCR 配置失败");
+        tracing::error!(scope = LOG_SCOPE, error = %e, "读取 AI 服务配置失败");
     }).map_err(|e| ReferenceError::Other(e.to_string()))?;
-    ReferenceImporter::new(&ai_config)?;
+    let llm_config = llm_storage.load().inspect_err(|e| {
+        tracing::error!(scope = LOG_SCOPE, error = %e, "读取 LLM 配置失败");
+    }).map_err(|e| ReferenceError::Other(e.to_string()))?;
+    ReferenceImporter::new(mode, &ai_config, &llm_config)?;
 
     let raw_abs = project_dir.join(&existing.file_path);
     let kind = TaskKind::ReferenceImport {
         file_path: raw_abs.to_string_lossy().to_string(),
         reference_id,
         force: true,
+        mode,
     };
 
     let store = Arc::new(TaskStore::new(&project_dir));
@@ -233,6 +252,7 @@ pub async fn retry_import(
         task_id = %record.id,
         reference_id = %record.kind.ref_id().unwrap_or_default(),
         project = %project_dir.display(),
+        mode = ?mode,
         "重试导入任务已入队"
     );
 

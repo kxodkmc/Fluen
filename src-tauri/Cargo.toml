@@ -39,6 +39,7 @@ futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "http2", "multipart"] }
 base64 = "0.22"
 sha2 = "0.10"
+pdf_oxide = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"

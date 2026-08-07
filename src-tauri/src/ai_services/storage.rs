@@ -159,6 +159,7 @@ mod tests {
                 created_at: None,
                 updated_at: None,
             }],
+            default_reference_import_mode: crate::references::import_mode::ReferenceImportMode::Ocr,
         }
     }
 

@@ -6,7 +6,7 @@
  */
 
 import type { ProviderPreset, ThemeOption } from './types';
-import { DEEPSEEK_ICON, XIAOMIMIMO_ICON, MINIMAX_ICON, OLLAMA_ICON, STEPFUN_ICON } from './providerIcons';
+import { DEEPSEEK_ICON, XIAOMIMIMO_ICON, MINIMAX_ICON, OLLAMA_ICON, STEPFUN_ICON, ZHIPU_ICON } from './providerIcons';
 
 /* ── 主题模式选项 ────────────────────────────────────────────────────── */
 export const THEME_OPTIONS: ThemeOption[] = [
@@ -126,6 +126,30 @@ const STEPFUN_MODELS = [
   },
 ];
 
+/** 智谱预设模型：GLM-5.2 旗舰（1M 上下文，支持深度思考），GLM-4.7-Flash 免费（200K，强制思考）。 */
+const ZHIPU_MODELS = [
+  {
+    id: 'glm-5.2',
+    name: 'GLM-5.2',
+    contextWindow: 1_000_000,
+    maxOutputTokens: 4_096,
+    thinking: true,
+    vision: false,
+    audio: false,
+    video: false,
+  },
+  {
+    id: 'glm-4.7-flash',
+    name: 'GLM-4.7-Flash',
+    contextWindow: 200_000,
+    maxOutputTokens: 4_096,
+    thinking: true,
+    vision: false,
+    audio: false,
+    video: false,
+  },
+];
+
 export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     id: 'deepseek',
@@ -174,6 +198,14 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     openaiBaseUrl: 'https://api.stepfun.com/step_plan/v1',
     defaultStyle: 'OpenAI',
     models: STEPFUN_MODELS,
+  },
+  {
+    id: 'zhipu',
+    icon: ZHIPU_ICON,
+    isPreset: true,
+    openaiBaseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    defaultStyle: 'OpenAI',
+    models: ZHIPU_MODELS,
   },
   {
     id: 'openai-compatible',

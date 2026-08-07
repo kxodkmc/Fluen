@@ -44,6 +44,14 @@ pub enum ReferenceError {
     #[error(transparent)]
     Ocr(#[from] AiServiceError),
 
+    /// PDF 文本提取错误。
+    #[error("PDF 文本提取失败: {0}")]
+    PdfExtract(String),
+
+    /// AI 校正错误（LLM 调用、响应解析等）。
+    #[error("AI 校正失败: {0}")]
+    AiCorrection(String),
+
     /// 导入任务已被取消。
     #[error("导入任务已取消")]
     Cancelled,

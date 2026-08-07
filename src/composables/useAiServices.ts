@@ -20,6 +20,7 @@ const DEFAULT_CONFIG: AiServicesConfig = {
   version: '1.0.0',
   active_providers: {},
   providers: [],
+  default_reference_import_mode: 'ocr',
 };
 
 /**

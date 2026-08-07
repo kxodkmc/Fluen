@@ -22,7 +22,8 @@ use std::sync::Arc;
 
 use confluent::llmkit::{
     AnthropicProvider, AnthropicTransformer, ApiStyle, ChatClient, ChatClientConfig,
-    DualStyleProvider, OpenAiProvider, OpenAiTransformer, RequestTransformer,
+    DualStyleProvider, OpenAiProvider, OpenAiTransformer, RequestTransformer, ThinkingMode,
+    ZhipuProvider, ZhipuTransformer,
 };
 use confluent::{ConfluentRuntime, ConfluentRuntimeBuilder, ToolKit};
 
@@ -72,6 +73,10 @@ pub async fn build_runtime(
     let registry = motis_registry();
     let context_injector = Arc::new(MotisContextInjector::new(mascot, data));
 
+    // 模型支持思考时启用思考模式（如 DeepSeek / 智谱深度思考）。
+    // 由模型能力标志驱动，未来如需用户级开关可在此扩展。
+    let supports_thinking = provider.model_supports_thinking(&model_id);
+
     let mut builder = ConfluentRuntimeBuilder::new()
         .with_agent_id("motis".to_string())
         .with_model(model_id)
@@ -82,6 +87,10 @@ pub async fn build_runtime(
         .with_prompt_profile(MOTIS_PROFILE_ID)
         // 注入 Motis 上下文变量（agent_name / personality_style / mood / affinity 等）
         .with_extension(context_injector as Arc<dyn confluent::agent_runtime::RuntimeExtension>);
+
+    if supports_thinking {
+        builder = builder.with_thinking(ThinkingMode::Enabled);
+    }
 
     // 4. 按能力开关装配适配器
     if mascot.mcp_enabled {
@@ -178,6 +187,29 @@ fn build_chat_client(provider: &ProviderConfig) -> Result<ChatClient, MotisChatE
         default_style: provider.default_style,
         ..Default::default()
     };
+
+    // 深度适配提供商：按 provider.id 路由到专用 Provider，注入厂商特有请求字段。
+    // 智谱（GLM）为 OpenAI 兼容协议，但深度思考参数（thinking.type / reasoning_effort）
+    // 需要专用转换器注入；流式 reasoning_content 由 OpenAiTransformer 通用解析。
+    if provider.id == "zhipu" {
+        let endpoint = normalize_openai_endpoint(
+            provider
+                .openai_base_url
+                .as_ref()
+                .ok_or_else(|| {
+                    MotisChatError::Config(format!(
+                        "提供商 {} 未配置 openai_base_url",
+                        provider.id
+                    ))
+                })?,
+        );
+        let p = ZhipuProvider::new(http_client, api_key.clone()).with_endpoint(endpoint);
+        return Ok(ChatClient::new(
+            Arc::new(p),
+            Arc::new(ZhipuTransformer::new()),
+            config,
+        ));
+    }
 
     let has_openai = provider.openai_base_url.is_some();
     let has_anthropic = provider.anthropic_base_url.is_some();

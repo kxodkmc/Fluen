@@ -12,7 +12,8 @@ use confluent::agent_runtime::{
 };
 use confluent::llmkit::{
     AnthropicProvider, AnthropicTransformer, ApiStyle, ChatClient, ChatClientConfig,
-    DualStyleProvider, OpenAiProvider, OpenAiTransformer, RequestTransformer,
+    DualStyleProvider, OpenAiProvider, OpenAiTransformer, RequestTransformer, ThinkingMode,
+    ZhipuProvider, ZhipuTransformer,
 };
 use confluent::{ConfluentRuntime, ConfluentRuntimeBuilder};
 use serde_json::{json, Value};
@@ -235,12 +236,43 @@ pub fn build_chat_client(
     let http_client = reqwest::Client::new();
     let config = ChatClientConfig {
         default_style: provider.default_style,
+        // 非流式请求（如文献 AI 校正）输入大、输出长，默认 120s 总超时
+        // （含重试）不足，放宽到 300s。流式调用不受此字段约束。
+        request_timeout: Duration::from_secs(300),
         ..Default::default()
     };
 
     let has_openai = provider.openai_base_url.is_some();
     let has_anthropic = provider.anthropic_base_url.is_some();
     let extra_headers = build_extra_headers(provider);
+
+    // 深度适配提供商：按 provider.id 路由到专用 Provider，注入厂商特有请求字段。
+    // 智谱（GLM）为 OpenAI 兼容协议，但深度思考参数（thinking.type / reasoning_effort）
+    // 需要专用转换器注入；流式 reasoning_content 由 OpenAiTransformer 通用解析。
+    if provider.id == "zhipu" {
+        let endpoint = normalize_openai_endpoint(
+            provider
+                .openai_base_url
+                .as_ref()
+                .ok_or_else(|| {
+                    KnowledgeBuilderError::Config(format!(
+                        "提供商 {} 未配置 openai_base_url",
+                        provider.id
+                    ))
+                })?,
+        );
+        tracing::debug!(
+            provider_id = %provider.id,
+            endpoint = %endpoint,
+            "构建 Zhipu ChatClient"
+        );
+        let p = ZhipuProvider::new(http_client, api_key.clone()).with_endpoint(endpoint);
+        return Ok(ChatClient::new(
+            Arc::new(p),
+            Arc::new(ZhipuTransformer::new()),
+            config,
+        ));
+    }
 
     if has_openai && has_anthropic {
         let openai_endpoint =
@@ -469,14 +501,21 @@ pub async fn build_kb_runtime(
     let usage_observer = Arc::new(UsageObserver::new(usage_capture));
 
     tracing::debug!(model_id = %model_ref.model_id, agent_id = "knowledge-builder", "装配 ConfluentRuntime");
-    let runtime = ConfluentRuntimeBuilder::new()
+    // 模型支持思考时启用思考模式（如 DeepSeek / 智谱深度思考）。
+    let supports_thinking = provider.model_supports_thinking(&model_id);
+    let mut builder = ConfluentRuntimeBuilder::new()
         .with_agent_id("knowledge-builder")
         .with_model(model_id)
         .with_chat_client(Arc::new(chat_client))
         .with_tool_provider(kb_provider as Arc<dyn ToolProvider>)
         .with_tool_provider(plan_provider as Arc<dyn ToolProvider>)
         .with_observer(entry_observer as Arc<dyn RuntimeObserver>)
-        .with_observer(usage_observer as Arc<dyn RuntimeObserver>)
+        .with_observer(usage_observer as Arc<dyn RuntimeObserver>);
+    if supports_thinking {
+        builder = builder.with_thinking(ThinkingMode::Enabled);
+    }
+
+    let runtime = builder
         .build()
         .await
         .map_err(|e| {
@@ -531,6 +570,7 @@ mod tests {
                     provider_id: "deepseek".into(),
                     model_id: "deepseek-chat".into(),
                 }),
+                ..SceneModels::default()
             }),
             ..LlmConfig::default()
         };

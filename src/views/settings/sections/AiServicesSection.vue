@@ -14,7 +14,11 @@
 import { ref, onMounted, computed } from 'vue';
 import { useI18n } from '../../../i18n';
 import { useAiServicesSettings } from '../composables/useAiServicesSettings';
-import type { AiServiceProvider, PaddleOcrConfig } from '../../../types/aiServices';
+import type {
+  AiServiceProvider,
+  PaddleOcrConfig,
+  ReferenceImportMode,
+} from '../../../types/aiServices';
 
 const { t } = useI18n();
 const {
@@ -22,6 +26,7 @@ const {
   selectedProvider,
   selectedProviderId,
   activeOcrProviderId,
+  importMode,
   isLoading,
   isSaving,
   error,
@@ -33,6 +38,7 @@ const {
   updateOcrOptions,
   setActiveOcrProvider,
   setActiveModel,
+  setImportMode,
   getPaddleOcrConfig,
 } = useAiServicesSettings();
 
@@ -96,6 +102,34 @@ function hasApiKey(provider: AiServiceProvider): boolean {
   return !!provider.api_key;
 }
 
+/** 导入模式选项（与后端 `ReferenceImportMode` 对应）。 */
+const IMPORT_MODES: {
+  value: ReferenceImportMode;
+  labelKey: string;
+  descKey: string;
+}[] = [
+  {
+    value: 'ocr',
+    labelKey: 'settings.aiServices.importModes.ocr',
+    descKey: 'settings.aiServices.importModes.ocrDesc',
+  },
+  {
+    value: 'ocr_with_ai_correction',
+    labelKey: 'settings.aiServices.importModes.ocrWithAi',
+    descKey: 'settings.aiServices.importModes.ocrWithAiDesc',
+  },
+  {
+    value: 'ai_only',
+    labelKey: 'settings.aiServices.importModes.aiOnly',
+    descKey: 'settings.aiServices.importModes.aiOnlyDesc',
+  },
+];
+
+/** 切换文献导入默认模式。 */
+async function handleImportModeChange(mode: ReferenceImportMode): Promise<void> {
+  await setImportMode(mode);
+}
+
 /** 获取提供商的 PaddleOCR 配置（响应式计算）。 */
 const selectedPaddleConfig = computed<PaddleOcrConfig | null>(() => {
   if (!selectedProvider.value) return null;
@@ -119,6 +153,35 @@ const selectedPaddleConfig = computed<PaddleOcrConfig | null>(() => {
     </div>
 
     <template v-else-if="!isLoading">
+      <!-- ── 文献导入默认模式 ──────────────────────────────────────── -->
+      <div class="import-mode">
+        <div class="import-mode__header">
+          <h3 class="import-mode__title">{{ t('settings.aiServices.importMode') }}</h3>
+          <span v-if="isSaving" class="saving-hint">{{ t('settings.aiServices.saving') }}</span>
+        </div>
+        <p class="import-mode__hint">{{ t('settings.aiServices.importModeHint') }}</p>
+        <div class="import-mode__options">
+          <label
+            v-for="mode in IMPORT_MODES"
+            :key="mode.value"
+            class="import-mode__option"
+            :class="{ 'import-mode__option--active': importMode === mode.value }"
+          >
+            <input
+              type="radio"
+              name="import-mode"
+              :value="mode.value"
+              :checked="importMode === mode.value"
+              @change="handleImportModeChange(mode.value)"
+            />
+            <span class="import-mode__option-body">
+              <span class="import-mode__option-label">{{ t(mode.labelKey) }}</span>
+              <span class="import-mode__option-desc">{{ t(mode.descKey) }}</span>
+            </span>
+          </label>
+        </div>
+      </div>
+
       <!-- ── OCR 提供商列表 ────────────────────────────────────────── -->
       <div v-if="ocrProviders.length > 0" class="provider-list">
         <div
@@ -329,6 +392,90 @@ const selectedPaddleConfig = computed<PaddleOcrConfig | null>(() => {
   background: var(--fluen-error-bg);
   color: var(--fluen-error);
   font-size: 0.82rem;
+}
+
+/* ── 文献导入默认模式 ─────────────────────────────────────────────── */
+.import-mode {
+  max-width: 640px;
+  margin-bottom: 1.5rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--fluen-hairline);
+  border-radius: 12px;
+  background: var(--fluen-surface);
+}
+
+.import-mode__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.import-mode__title {
+  margin: 0;
+  font-family: var(--fluen-font-sans);
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--fluen-ink);
+}
+
+.import-mode__hint {
+  margin: 0.3rem 0 0.9rem;
+  font-size: 0.78rem;
+  color: var(--fluen-stone);
+}
+
+.import-mode__options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.import-mode__option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--fluen-hairline);
+  border-radius: 8px;
+  background: var(--fluen-canvas);
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.import-mode__option:hover {
+  border-color: var(--fluen-stone);
+}
+
+.import-mode__option--active {
+  border-color: var(--fluen-accent);
+  background: var(--fluen-info-bg);
+}
+
+.import-mode__option input[type="radio"] {
+  margin-top: 2px;
+  width: 15px;
+  height: 15px;
+  accent-color: var(--fluen-accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.import-mode__option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.import-mode__option-label {
+  font-family: var(--fluen-font-sans);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--fluen-charcoal);
+}
+
+.import-mode__option-desc {
+  font-size: 0.75rem;
+  color: var(--fluen-stone);
 }
 
 /* ── 提供商列表 ─────────────────────────────────────────────────────── */

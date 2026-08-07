@@ -226,6 +226,15 @@ impl ProviderConfig {
     pub fn find_model_mut(&mut self, id: &str) -> Option<&mut ModelConfig> {
         self.models.iter_mut().find(|m| m.id == id)
     }
+
+    /// 判断指定模型是否支持思考模式。
+    ///
+    /// 用于在构造 LLM 请求时决定是否启用思考参数注入（如 DeepSeek / 智谱
+    /// 的 `thinking.type`）。模型不存在时返回 `false`（安全默认，不开启思考）。
+    pub fn model_supports_thinking(&self, model_id: &str) -> bool {
+        self.find_model(model_id)
+            .is_some_and(|m| m.capabilities.thinking)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -253,9 +262,11 @@ pub struct SceneModels {
     /// 知识库构建专用模型槽位。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge_build: Option<SceneModelRef>,
+    /// 文献导入 AI 校正专用模型槽位（模式 2 / 3 使用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_import: Option<SceneModelRef>,
     // 未来扩展：
     // pub translation: Option<SceneModelRef>,
-    // pub ocr_correction: Option<SceneModelRef>,
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +408,29 @@ impl LlmConfig {
                         provider_id = %kb.provider_id,
                         model_id = %kb.model_id,
                         "scene_models.knowledge_build 引用失效（provider 或 model 不存在），拒绝回退到全局激活项"
+                    );
+                    None
+                });
+            }
+        }
+        let provider = self.active_provider()?;
+        let model = self.active_model()?;
+        Some((provider, model.id.clone()))
+    }
+
+    /// 解析文献导入 AI 校正场景模型。
+    ///
+    /// 解析顺序（与 [`resolve_knowledge_build`] 一致）：
+    /// 1. 若配置了 `scene_models.reference_import`：引用有效则用之；**引用失效则返回 `None`**。
+    /// 2. 未配置场景模型：回退到全局 `active_provider_id` / `active_model_id`。
+    pub fn resolve_reference_import(&self) -> Option<(&ProviderConfig, String)> {
+        if let Some(scene_models) = &self.scene_models {
+            if let Some(ri) = &scene_models.reference_import {
+                return self.resolve_scene(ri).or_else(|| {
+                    tracing::warn!(
+                        provider_id = %ri.provider_id,
+                        model_id = %ri.model_id,
+                        "scene_models.reference_import 引用失效（provider 或 model 不存在），拒绝回退到全局激活项"
                     );
                     None
                 });
@@ -593,6 +627,24 @@ fn provider_validate_custom_without_api_key_ok() {
     }
 
     #[test]
+    fn model_supports_thinking_true_for_reasoner() {
+        let provider = sample_provider();
+        assert!(provider.model_supports_thinking("deepseek-reasoner"));
+    }
+
+    #[test]
+    fn model_supports_thinking_false_for_chat() {
+        let provider = sample_provider();
+        assert!(!provider.model_supports_thinking("deepseek-chat"));
+    }
+
+    #[test]
+    fn model_supports_thinking_false_for_unknown_model() {
+        let provider = sample_provider();
+        assert!(!provider.model_supports_thinking("nonexistent"));
+    }
+
+    #[test]
     fn debug_masks_api_key() {
         let p = sample_provider();
         let debug_str = format!("{p:?}");
@@ -648,6 +700,7 @@ fn provider_validate_custom_without_api_key_ok() {
                     provider_id: "deepseek".into(),
                     model_id: "deepseek-reasoner".into(),
                 }),
+                ..SceneModels::default()
             }),
             ..LlmConfig::default()
         };
@@ -669,6 +722,7 @@ fn provider_validate_custom_without_api_key_ok() {
                     provider_id: "deepseek".into(),
                     model_id: "deepseek-reasoner".into(),
                 }),
+                ..SceneModels::default()
             }),
             ..LlmConfig::default()
         };
@@ -703,6 +757,7 @@ fn provider_validate_custom_without_api_key_ok() {
                     provider_id: "nonexistent".into(),
                     model_id: "gpt-4o".into(),
                 }),
+                ..SceneModels::default()
             }),
             ..LlmConfig::default()
         };

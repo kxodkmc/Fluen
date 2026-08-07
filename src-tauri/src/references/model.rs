@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::import_mode::ReferenceImportMode;
+
 // ---------------------------------------------------------------------------
 // 文献格式与状态
 // ---------------------------------------------------------------------------
@@ -102,6 +104,12 @@ pub struct ReferenceEntry {
     /// AI 摘要（预留）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_summary: Option<String>,
+    /// 作者列表（模式 2 / 3 由 AI 识别写入索引，模式 1 为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authors: Option<Vec<String>>,
+    /// 导入模式（记录该文献由何种模式导入，重试时复用）。
+    #[serde(default)]
+    pub import_mode: ReferenceImportMode,
     /// 导入状态。
     #[serde(default)]
     pub status: ReferenceStatus,
@@ -212,6 +220,8 @@ mod tests {
             added_at: "2026-07-30T12:00:00Z".into(),
             source: None,
             ai_summary: None,
+            authors: Some(vec!["Author A".into()]),
+            import_mode: ReferenceImportMode::OcrWithAiCorrection,
             status: ReferenceStatus::Completed,
             error: None,
         };
@@ -220,5 +230,28 @@ mod tests {
         assert_eq!(parsed.id, "ref-test");
         assert_eq!(parsed.format, ReferenceFormat::Pdf);
         assert_eq!(parsed.status, ReferenceStatus::Completed);
+        assert_eq!(parsed.authors, Some(vec!["Author A".to_string()]));
+        assert_eq!(parsed.import_mode, ReferenceImportMode::OcrWithAiCorrection);
+    }
+
+    #[test]
+    fn json_backward_compatible_without_new_fields() {
+        // 旧版索引文件无 authors / import_mode 字段，应能正常反序列化
+        let json = r#"{
+            "id": "ref-old",
+            "title": "Old",
+            "original_filename": "old.pdf",
+            "format": "pdf",
+            "file_hash": "h",
+            "file_path": "references/raw/ref-old.pdf",
+            "md_path": "references/md/ref-old.md",
+            "resource_dir": "references/md/resource/ref-old",
+            "added_at": "2026-01-01T00:00:00Z",
+            "status": "completed"
+        }"#;
+        let parsed: ReferenceEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.id, "ref-old");
+        assert_eq!(parsed.authors, None);
+        assert_eq!(parsed.import_mode, ReferenceImportMode::Ocr);
     }
 }

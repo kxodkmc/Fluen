@@ -226,6 +226,8 @@ mod tests {
             added_at: "2026-07-30T12:00:00Z".into(),
             source: None,
             ai_summary: None,
+            authors: None,
+            import_mode: crate::references::import_mode::ReferenceImportMode::Ocr,
             status: ReferenceStatus::Pending,
             error: None,
         }

@@ -10,6 +10,9 @@
 /** 服务类型（对应 Rust `ServiceCategory`，serde `rename_all = "snake_case"`）。 */
 export type ServiceCategory = 'ocr' | 'tts' | 'asr';
 
+/** 文献导入模式（对应 Rust `ReferenceImportMode`，serde `rename_all = "snake_case"`）。 */
+export type ReferenceImportMode = 'ocr' | 'ocr_with_ai_correction' | 'ai_only';
+
 /** 部署模式（对应 Rust `DeploymentMode`）。 */
 export type DeploymentMode = 'api' | 'local';
 
@@ -47,6 +50,8 @@ export interface AiServicesConfig {
   /** 每个服务类型的活跃提供商 ID。 */
   active_providers: Partial<Record<ServiceCategory, string>>;
   providers: AiServiceProvider[];
+  /** 文献导入默认模式（设置页可配置，默认纯 OCR）。 */
+  default_reference_import_mode: ReferenceImportMode;
 }
 
 // ---------------------------------------------------------------------------

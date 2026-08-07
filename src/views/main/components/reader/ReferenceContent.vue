@@ -35,6 +35,7 @@ import {
   type SerializedMark,
   type SelectionRect,
 } from './marks';
+import { useMousePosition } from '../../../../composables/useMousePosition';
 // KaTeX + texmath CSS（?inline → Vite 返回 CSS 字符串，注入 iframe <style>）
 // KaTeX CSS 含字体 url()，Vite 解析为绝对路径，iframe 同源可加载。
 import katexCss from 'katex/dist/katex.min.css?inline';
@@ -74,7 +75,55 @@ let marksReady = false;
 let bufferedMarks: SerializedMark[] | null = null;
 const lastMarks = ref<SerializedMark[]>([]);
 
-/** 构建完整 HTML 文档（含 CSS + body + MarksOverlay 脚本）。 */
+/* ── iframe mousemove 上报 ─────────────────────────────────────────── */
+/**
+ * iframe 是独立浏览上下文，其内部 mousemove 事件不会冒泡到父窗口，
+ * 导致 Mascot 眼球追踪、分割条拖拽等外层逻辑失效。
+ *
+ * 解决方案：在 iframe 内注入一段 mousemove 监听脚本，
+ * 用 rAF 节流后将坐标通过 postMessage 上报给外层。
+ * 外层收到后转换为父窗口坐标系，调用 useMousePosition.setMousePosition。
+ */
+const { setMousePosition } = useMousePosition();
+
+/** iframe → 父窗口：鼠标移动上报消息。 */
+interface MouseMoveForwardMessage {
+  type: 'mascot:mousemove';
+  /** iframe 视口内的 clientX。 */
+  x: number;
+  /** iframe 视口内的 clientY。 */
+  y: number;
+}
+
+/** 判断消息是否为 iframe mousemove 上报。 */
+function isMouseMoveForwardMessage(data: unknown): data is MouseMoveForwardMessage {
+  if (!data || typeof data !== 'object') return false;
+  const t = (data as { type?: unknown }).type;
+  return t === 'mascot:mousemove';
+}
+
+/** 构建 iframe 内 mousemove 上报脚本（rAF 节流）。 */
+function buildMouseMoveForwarderScript(): string {
+  // 内部脚本使用字符串拼接（非模板字面量），避免外层 ${} 插值冲突
+  return `(function(){
+"use strict";
+var rafId = null;
+var lastX = 0, lastY = 0;
+function flush() {
+  rafId = null;
+  parent.postMessage({ type: 'mascot:mousemove', x: lastX, y: lastY }, '*');
+}
+function onMove(e) {
+  lastX = e.clientX;
+  lastY = e.clientY;
+  if (rafId !== null) return;
+  rafId = requestAnimationFrame(flush);
+}
+window.addEventListener('mousemove', onMove, { passive: true });
+})();`;
+}
+
+/** 构建完整 HTML 文档（含 CSS + body + MarksOverlay + mousemove 上报脚本）。 */
 function buildDocument(html: string, options: ReaderOptions): string {
   const css = buildReaderCss(options);
   return `<!DOCTYPE html>
@@ -87,6 +136,7 @@ function buildDocument(html: string, options: ReaderOptions): string {
 <body>
 <div class="fluen-reader">${html}</div>
 <script>${buildMarksOverlayScript()}<\/script>
+<script>${buildMouseMoveForwarderScript()}<\/script>
 </body>
 </html>`;
 }
@@ -153,6 +203,18 @@ function doRenderMarks(marks: SerializedMark[]): void {
 /** 接收 iframe 内 MarksOverlay 上行的 postMessage。 */
 function onMessage(event: MessageEvent): void {
   if (event.source !== iframeRef.value?.contentWindow) return;
+
+  // iframe mousemove 上报：转换为父窗口坐标系后同步到全局鼠标位置
+  // （Mascot 眼球追踪等订阅者据此更新）
+  if (isMouseMoveForwardMessage(event.data)) {
+    const iframe = iframeRef.value;
+    if (iframe) {
+      const rect = iframe.getBoundingClientRect();
+      setMousePosition(rect.left + event.data.x, rect.top + event.data.y);
+    }
+    return;
+  }
+
   if (!isInnerMessage(event.data)) return;
   const msg = event.data;
   switch (msg.type) {

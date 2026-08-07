@@ -50,6 +50,7 @@ export default {
           ollama: 'Ollama',
           stepfun: 'StepFun',
           'stepfun-plan': 'StepFun Plan',
+          zhipu: 'Zhipu',
           openaiCompatible: 'Compatible con OpenAI',
         },
         modelTags: {
@@ -511,6 +512,16 @@ export default {
       placeholders: {
         apiKey: 'Pega tu token de API aquí',
         baseUrl: 'https://paddleocr.aistudio-app.com/api/v2/ocr/jobs',
+      },
+      importMode: 'Modo de importación',
+      importModeHint: 'Modo predeterminado para nuevas referencias (por defecto: solo OCR)',
+      importModes: {
+        ocr: 'Solo OCR',
+        ocrDesc: 'Solo reconocimiento OCR, sin IA (para escaneos / imágenes)',
+        ocrWithAi: 'OCR + corrección IA',
+        ocrWithAiDesc: 'OCR seguido de corrección de formato por IA (recomendado para escaneos)',
+        aiOnly: 'Solo IA',
+        aiOnlyDesc: 'Extrae texto del PDF y la IA corrige el formato (para PDFs nativos, rápido)',
       },
       saving: 'Guardando…',
     },

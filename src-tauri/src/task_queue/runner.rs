@@ -202,23 +202,25 @@ impl TaskRunner {
                 file_path,
                 reference_id,
                 force,
+                mode,
             } => self
-                .execute_reference_import(task, file_path, reference_id, *force, cancel)
+                .execute_reference_import(task, file_path, reference_id, *force, *mode, cancel)
                 .await,
         }
     }
 
-    /// 执行文献导入任务（OCR 转 Markdown）。
+    /// 执行文献导入任务（按模式转 Markdown）。
     ///
     /// 复用 [`ReferenceImporter`] 的完整导入管线（preflight → 去重 →
-    /// 备份 → OCR → 保存），进度通过 `reference:import_progress` 事件推送。
-    /// 重跑幂等：去重检查跳过自身条目（中断恢复 / 重试场景）。
+    /// 备份 → 按模式处理 → 收尾），进度通过 `reference:import_progress`
+    /// 事件推送。重跑幂等：去重检查跳过自身条目（中断恢复 / 重试场景）。
     async fn execute_reference_import(
         &self,
         task: &TaskRecord,
         file_path: &str,
         reference_id: &str,
         force: bool,
+        mode: crate::references::import_mode::ReferenceImportMode,
         cancel: &CancellationToken,
     ) -> Result<(), TaskQueueError> {
         tracing::info!(
@@ -226,14 +228,19 @@ impl TaskRunner {
             reference_id = %reference_id,
             file = %file_path,
             force,
+            mode = ?mode,
             "文献导入任务分发"
         );
 
         let ai_config = self
             .ai_storage
             .get()
-            .map_err(|e| TaskQueueError::Execution(format!("读取 OCR 配置失败: {e}")))?;
-        let importer = ReferenceImporter::new(&ai_config)
+            .map_err(|e| TaskQueueError::Execution(format!("读取 AI 服务配置失败: {e}")))?;
+        let llm_config = self
+            .llm_storage
+            .load()
+            .map_err(|e| TaskQueueError::Execution(format!("加载 LLM 配置失败: {e}")))?;
+        let importer = ReferenceImporter::new(mode, &ai_config, &llm_config)
             .map_err(|e| TaskQueueError::Execution(e.to_string()))?;
 
         let index = ReferenceIndex::new(&self.project_path);
@@ -247,6 +254,7 @@ impl TaskRunner {
                 &self.project_path,
                 &index,
                 reference_id,
+                mode,
                 force,
                 move |progress: ImportProgress| {
                     if let Some(ref window) = window {

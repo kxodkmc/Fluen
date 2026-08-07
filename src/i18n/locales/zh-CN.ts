@@ -50,6 +50,7 @@ export default {
           ollama: 'Ollama',
           stepfun: 'StepFun',
           'stepfun-plan': 'StepFun Plan',
+          zhipu: '智谱',
           openaiCompatible: 'OpenAI 兼容',
         },
         modelTags: {
@@ -511,6 +512,16 @@ export default {
       placeholders: {
         apiKey: '在此粘贴 API Token',
         baseUrl: 'https://paddleocr.aistudio-app.com/api/v2/ocr/jobs',
+      },
+      importMode: '文献导入模式',
+      importModeHint: '新导入的文献默认使用此模式处理，默认纯 OCR',
+      importModes: {
+        ocr: '纯 OCR',
+        ocrDesc: '仅使用 OCR 识别，不调用 AI（适用于扫描件 / 图片）',
+        ocrWithAi: 'OCR + AI 校正',
+        ocrWithAiDesc: 'OCR 识别后由 AI 校正格式并解析作者（扫描件推荐）',
+        aiOnly: '纯 AI 识别',
+        aiOnlyDesc: '直接提取 PDF 文本由 AI 校正格式（适用于原生 PDF，速度快）',
       },
       saving: '保存中…',
     },

@@ -14,6 +14,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::references::import_mode::ReferenceImportMode;
+
 use super::error::AiServiceError;
 
 // ---------------------------------------------------------------------------
@@ -224,6 +226,9 @@ pub struct AiServicesConfig {
     /// 提供商列表。
     #[serde(default)]
     pub providers: Vec<AiServiceProvider>,
+    /// 文献导入默认模式（UI 记忆用户选择，下次导入默认使用此模式）。
+    #[serde(default)]
+    pub default_reference_import_mode: ReferenceImportMode,
 }
 
 impl Default for AiServicesConfig {
@@ -232,6 +237,7 @@ impl Default for AiServicesConfig {
             version: default_version(),
             active_providers: HashMap::new(),
             providers: Vec::new(),
+            default_reference_import_mode: ReferenceImportMode::Ocr,
         }
     }
 }
@@ -407,5 +413,28 @@ mod tests {
     fn auth_scheme_header_value() {
         assert_eq!(AuthScheme::Bearer.header_value("abc"), "bearer abc");
         assert_eq!(AuthScheme::Token.header_value("abc"), "token abc");
+    }
+
+    #[test]
+    fn default_reference_import_mode_is_ocr() {
+        assert_eq!(
+            AiServicesConfig::default().default_reference_import_mode,
+            crate::references::import_mode::ReferenceImportMode::Ocr
+        );
+    }
+
+    #[test]
+    fn deserialize_old_config_without_default_mode() {
+        // 旧版配置文件无 default_reference_import_mode 字段，应能正常反序列化
+        let json = r#"{
+            "version": "1.0.0",
+            "active_providers": {},
+            "providers": []
+        }"#;
+        let parsed: AiServicesConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.default_reference_import_mode,
+            crate::references::import_mode::ReferenceImportMode::Ocr
+        );
     }
 }

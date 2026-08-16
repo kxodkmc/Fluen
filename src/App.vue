@@ -17,6 +17,7 @@ import { OnboardingView, MainView, SettingsView, KnowledgeGraphView } from './vi
 import { ThemeProvider } from './theme';
 import { useAppConfig } from './composables/useAppConfig';
 import { useI18n } from './i18n';
+import { startShortcuts, stopShortcuts } from './shortcuts';
 
 const onboarded = ref(false);
 
@@ -63,6 +64,9 @@ const { setLocale } = useI18n();
 const { loadConfig } = useAppConfig();
 
 onMounted(async () => {
+  /* ── 启动全局快捷键监听（capture 阶段统一响应，拦截 WebView2 默认行为） ── */
+  startShortcuts();
+
   isMaximized.value = await appWindow.isMaximized();
   unlistenResize = await appWindow.onResized(async () => {
     isMaximized.value = await appWindow.isMaximized();
@@ -76,6 +80,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unlistenResize?.();
+  stopShortcuts();
 });
 </script>
 

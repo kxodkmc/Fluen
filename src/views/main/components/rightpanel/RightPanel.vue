@@ -60,7 +60,7 @@ const { t } = useI18n();
 
       <!-- 学术助手面板（AIPanel 内部自管理状态） -->
       <div v-show="activeRightPanel === 'assistant'" class="right-panel__pane">
-        <AIPanel :messages="[]" />
+        <AIPanel />
       </div>
     </div>
   </div>

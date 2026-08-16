@@ -7,23 +7,33 @@
  *   编辑区（Editor）    — 双栏：左 MD 源码编辑（FluenEditor）+ 右实时 HTML 预览（FluenPreview）
  *
  * 无标签页时展示欢迎页（Welcome）。
- * 项目打开后，自动创建一个以项目标题命名的标签页，编辑区渲染 `.temp.md`。
+ * 项目打开后，自动创建一个以项目标题命名的标签页，编辑区渲染 `main.md`。
  *
  * 数据流：`FluenEditor @doc-change(md)` → 本地 `liveMd` ref → `FluenPreview :md`。
- * 外部 `tempMd` 变化（项目切换、保存归一化）通过 `watch` 同步到 `liveMd` 与编辑器。
+ * 外部 `mainMd` 变化（项目切换、保存归一化）通过 `watch` 同步到 `liveMd` 与编辑器。
  *
  * 大纲跳转由 `useOutline.jumpTo` 内部调用 `useFluenEditor().scrollToLine` 完成。
  */
-import { ref, watch, onMounted, computed } from 'vue';
+import { ref, watch, onMounted, computed, inject } from 'vue';
 import type { ContentTab } from '../types';
 import { useI18n } from '../../../i18n';
 import { useProject } from '../../../composables/useProject';
-import { FluenEditor, FluenPreview } from './editor';
+import { FluenEditor, FluenPreview, EditorToolbar, EditorLayoutSwitch, useFluenEditor } from './editor';
+import { MAIN_LAYOUT_KEY } from '../composables/useMainLayout';
 import { ReferenceReader, WikiReader } from './reader';
 import RecentProjects from './welcome/RecentProjects.vue';
 
 const { t } = useI18n();
-const { hasProject, config, tempMd } = useProject();
+const { hasProject, config, mainMd } = useProject();
+
+/* ── 编辑器视图模式（注入 MainView 共享布局实例） ─────────────────── */
+const layout = inject(MAIN_LAYOUT_KEY);
+const editorLayout = computed(() => layout?.editorLayout.value ?? 'split');
+
+// 视图切换（v-show 显隐）后让 CM6 立即重新测量，避免容器尺寸从 0 恢复时的测量延迟
+watch(editorLayout, () => {
+  useFluenEditor().requestMeasure();
+});
 
 const props = defineProps<{
   /** 已打开的标签页列表 */
@@ -62,12 +72,12 @@ onMounted(() => {
 /**
  * 实时 MD 文本——驱动右栏预览。
  *
- * 初始值取 `tempMd`；编辑器 `doc-change` 时实时更新；
- * 外部 `tempMd` 变化（项目切换、保存归一化）回写到 `liveMd`。
+ * 初始值取 `mainMd`；编辑器 `doc-change` 时实时更新；
+ * 外部 `mainMd` 变化（项目切换、保存归一化）回写到 `liveMd`。
  */
-const liveMd = ref(tempMd.value);
+const liveMd = ref(mainMd.value);
 
-watch(tempMd, (newMd) => {
+watch(mainMd, (newMd) => {
   if (liveMd.value !== newMd) {
     liveMd.value = newMd;
   }
@@ -146,14 +156,20 @@ function onDocChange(md: string): void {
         @close="$emit('close-tab', activeTab.id)"
       />
 
-      <!-- 双栏视图（有项目时）：左 MD 源码 + 右 HTML 预览 -->
+      <!-- 双栏/视图模式（有项目时）：左 MD 源码 + 右 HTML 预览，按 editorLayout 显隐 -->
       <div v-else-if="hasProject" class="content-split">
-        <FluenEditor
-          :md="tempMd"
-          class="content-split__editor"
-          @doc-change="onDocChange"
-        />
-        <FluenPreview :md="liveMd" class="content-split__preview" />
+        <!-- 源码侧：顶部工具栏 + MD 编辑器（预览模式下整体隐藏） -->
+        <div v-show="editorLayout !== 'preview'" class="content-split__source">
+          <EditorToolbar />
+          <FluenEditor
+            :md="mainMd"
+            class="content-split__editor"
+            @doc-change="onDocChange"
+          />
+        </div>
+        <FluenPreview v-show="editorLayout !== 'source'" :md="liveMd" class="content-split__preview" />
+        <!-- 视图模式切换（仅编辑视图显示，阅读器不挂载本组件） -->
+        <EditorLayoutSwitch />
       </div>
 
       <!-- 编辑器占位（有标签页但无项目内容时） -->
@@ -292,12 +308,21 @@ function onDocChange(md: string): void {
   height: 100%;
   width: 100%;
   overflow: hidden;
+  position: relative; /* 供 EditorLayoutSwitch 右上角浮动定位 */
+}
+
+/* ── 源码侧（工具栏 + 编辑器） ─────────────────────────────────────── */
+.content-split__source {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--fluen-hairline);
 }
 
 .content-split__editor {
   flex: 1;
   min-width: 0;
-  border-right: 1px solid var(--fluen-hairline);
 }
 
 .content-split__preview {

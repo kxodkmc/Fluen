@@ -23,7 +23,7 @@ import type {
   OpenProjectResult,
   ProjectErrorResponse,
   RenameHeadingRequest,
-  SaveTempMdRequest,
+  SaveDocumentRequest,
 } from '../types/project';
 import type { RecentProjectEntry } from '../types/recentProjects';
 import { useRecentProjects } from './useRecentProjects';
@@ -170,21 +170,22 @@ export function useProject() {
   }
 
   /**
-   * 保存 `.temp.md` 内容。
+   * 保存 `main.md` 内容。
    *
-   * 后端将编辑后的 `.temp.md` 全文拆分回各 `sec-{id}.md` 源文件。
-   * **安全校验**：拆分后的块数量必须与 `sections.json` 条目数一致。
+   * 后端校验（fluen-markup 无 `Severity::Error` 硬错误）后写入 `main.md`，
+   * 并拆分回各 `sec-{id}.md` 备份文件（同时更新 `sections.json`）。
+   * 校验失败时拒绝保存并返回 false。
    */
-  async function saveTempMd(content: string): Promise<boolean> {
+  async function saveDocument(content: string): Promise<boolean> {
     if (_isSaving.value || !_currentProject.value) return false;
     _isSaving.value = true;
     _error.value = null;
     try {
-      const request: SaveTempMdRequest = {
+      const request: SaveDocumentRequest = {
         project_path: _currentProject.value.project_path,
         content,
       };
-      _currentProject.value = await invoke<OpenProjectResult>('save_temp_md', { request });
+      _currentProject.value = await invoke<OpenProjectResult>('save_document', { request });
       return true;
     } catch (err) {
       _error.value = err as ProjectErrorResponse;
@@ -231,7 +232,7 @@ export function useProject() {
     hasProject: computed(() => _currentProject.value !== null),
     config: computed(() => _currentProject.value?.config ?? null),
     sections: computed(() => _currentProject.value?.sections ?? []),
-    tempMd: computed(() => _currentProject.value?.temp_md ?? ''),
+    mainMd: computed(() => _currentProject.value?.main_md ?? ''),
     warnings: computed(() => _currentProject.value?.warnings ?? []),
 
     // 操作
@@ -240,7 +241,7 @@ export function useProject() {
     createSection,
     renameHeading,
     insertHeading,
-    saveTempMd,
+    saveDocument,
     saveContent,
   };
 }

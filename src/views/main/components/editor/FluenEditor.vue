@@ -142,4 +142,9 @@ watch(
 .fluen-editor-host :deep(.cm-header) {
   font-weight: 600;
 }
+
+/* 章节标记行（<!-- @sec_id:xxx -->）：对用户不可见，仅作章节切分元数据 */
+.fluen-editor-host :deep(.fluen-sec-marker-line) {
+  display: none;
+}
 </style>

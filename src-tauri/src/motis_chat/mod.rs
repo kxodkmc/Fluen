@@ -26,6 +26,7 @@
 //! | Skills | `confluent::adapters::skills` | `MascotConfig.skills_enabled = true` |
 //! | 函数调用 | `confluent::ToolKit` | `MascotConfig.function_calling_enabled = true` |
 
+pub mod approval;
 pub mod commands;
 pub mod error;
 pub mod events;

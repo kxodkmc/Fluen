@@ -1,5 +1,5 @@
 /**
- * 大纲解析工具——从 `.temp.md` 内容中提取标题树。
+ * 大纲解析工具——从 `main.md` 内容中提取标题树。
  *
  * 解析规则：
  * - 识别 `#` ~ `######` 开头的行为 H1-H6 标题
@@ -9,7 +9,7 @@
  *
  * @example
  * ```ts
- * const nodes = parseOutline(tempMd);
+ * const nodes = parseOutline(mainMd);
  * const filtered = filterByLevel(nodes, 1, 3);
  * ```
  */
@@ -24,7 +24,7 @@ export interface OutlineNode {
   level: number;
   /** 标题纯文本。 */
   text: string;
-  /** 在 `.temp.md` 中的行号（0-based）。 */
+  /** 在 `main.md` 中的行号（0-based）。 */
   line: number;
   /** 所属章节 ID（从最近的 `<!-- @sec_id: -->` 标记继承）。 */
   sectionId: string | null;
@@ -46,7 +46,7 @@ const SEC_MARKER_RE = /<!--\s*@sec_id:(\S+)\s*-->/;
 const FENCE_RE = /^(`{3,}|~{3,})/;
 
 /**
- * 从 `.temp.md` 内容中解析出扁平的标题列表。
+ * 从 `main.md` 内容中解析出扁平的标题列表。
  *
  * 返回的列表已按行序排列，每个节点不含子节点（`children` 为空）。
  * 调方可通过 [`buildTree`] 将其组装为树形结构。

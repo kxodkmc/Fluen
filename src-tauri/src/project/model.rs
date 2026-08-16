@@ -276,8 +276,8 @@ pub struct OpenProjectResult {
     pub project_path: String,
     /// 章节列表（已按 order 排序）。
     pub sections: Vec<SectionMeta>,
-    /// 拼接后的 `.temp.md` 全文内容。
-    pub temp_md: String,
+    /// 主文档 `manuscript/main.md` 的全文内容（含 `<!-- @sec_id: -->` 标记）。
+    pub main_md: String,
     /// 软校验产生的警告列表（不阻断加载）。
     pub warnings: Vec<ProjectWarning>,
 }
@@ -335,15 +335,15 @@ pub struct InsertHeadingRequest {
     pub new_text: String,
 }
 
-/// 前端传来的 `.temp.md` 保存请求。
+/// 前端传来的主文档保存请求。
 ///
-/// 将编辑后的 `.temp.md` 全文拆分回各 `sec-{id}.md` 源文件。
-/// **安全校验**：拆分后的块数量必须与 `sections.json` 条目数一致。
+/// 将编辑后的 `main.md` 全文持久化：校验文档结构无异常后写入 `main.md`，
+/// 并拆分回各 `sec-{id}.md` 备份文件（同时更新 `sections.json`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SaveTempMdRequest {
+pub struct SaveDocumentRequest {
     /// 项目根路径。
     pub project_path: String,
-    /// 编辑后的 `.temp.md` 全文内容。
+    /// 编辑后的 `main.md` 全文内容。
     pub content: String,
 }
 
@@ -404,11 +404,11 @@ impl InsertHeadingRequest {
     }
 }
 
-impl SaveTempMdRequest {
+impl SaveDocumentRequest {
     /// 校验请求完整性。
     ///
     /// 注意：允许 `content` 为空（用户在编辑器中删除全部内容后保存是合法操作，
-    /// 后端 `save_temp_md` 会将空内容写入所有章节文件）。
+    /// 后端 `save_document` 会将空内容写入所有章节文件）。
     pub fn validate(&self) -> Result<(), ProjectError> {
         if self.project_path.trim().is_empty() {
             return Err(ProjectError::Validation("项目路径不能为空".into()));

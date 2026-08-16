@@ -6,11 +6,12 @@
 //! ## 事件流
 //!
 //! ```text
-//! motis:thought   →  思考增量（可选，依配置展示）
-//! motis:text       →  文本增量（主输出流）
-//! motis:tool-call  →  工具调用通知
-//! motis:finish     →  完成事件（携带最终结果与 token 用量）
-//! motis:error      →  错误事件（流终止时发送）
+//! motis:thought          →  思考增量（可选，依配置展示）
+//! motis:text             →  文本增量（主输出流）
+//! motis:tool-call        →  工具调用通知
+//! motis:approval-request →  工具审批请求（写操作需用户确认）
+//! motis:finish           →  完成事件（携带最终结果与 token 用量）
+//! motis:error            →  错误事件（流终止时发送）
 //! ```
 
 use serde::Serialize;
@@ -25,6 +26,9 @@ pub const EVENT_TEXT: &str = "motis:text";
 
 /// 工具调用事件——模型发起工具调用的通知。
 pub const EVENT_TOOL_CALL: &str = "motis:tool-call";
+
+/// 工具审批请求事件——声明 OnExecute 的工具（如写操作）调用前征求用户确认。
+pub const EVENT_APPROVAL_REQUEST: &str = "motis:approval-request";
 
 /// 完成事件——认知循环结束，携带最终结果与 token 用量。
 pub const EVENT_FINISH: &str = "motis:finish";
@@ -56,6 +60,19 @@ pub struct ToolCallPayload {
     /// 工具名称。
     pub name: String,
     /// 工具调用参数（JSON）。
+    pub input: serde_json::Value,
+}
+
+/// 工具审批请求 payload。
+///
+/// 前端展示后通过 `motis_chat_resolve_approval` 命令回传决策。
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalRequestPayload {
+    /// 审批请求 ID（唯一，用于回传决策）。
+    pub id: String,
+    /// 工具名称。
+    pub tool_name: String,
+    /// 工具调用参数（JSON，含 path / action / content 等）。
     pub input: serde_json::Value,
 }
 

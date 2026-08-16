@@ -1,11 +1,14 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[allow(dead_code)]
+mod ai_assistant;
 mod ai_services;
+mod agent_tools;
 #[allow(dead_code)]
 mod app_config;
 pub mod editor;
 mod builtin_providers;
 mod knowledge_builder;
+mod llm_chat;
 mod logging;
 #[allow(dead_code)]
 mod llm_config;
@@ -58,6 +61,7 @@ pub fn run() {
     let mascot_data_storage =
         mascot::storage::MascotDataStorage::new().expect("无法确定宠物数据目录");
     let motis_chat_state = motis_chat::MotisChatState::new();
+    let ai_assistant_state = ai_assistant::AiAssistantState::new();
     let editor_state = editor::commands::EditorState::new();
     let ocr_state = ai_services::commands::OcrState::new();
     let task_queue_state = TaskQueueState::new();
@@ -73,6 +77,7 @@ pub fn run() {
         .manage(mascot_config_storage)
         .manage(mascot_data_storage)
         .manage(motis_chat_state)
+        .manage(ai_assistant_state)
         .manage(editor_state)
         .manage(ocr_state)
         .manage(task_queue_state)
@@ -128,13 +133,16 @@ pub fn run() {
             mascot::commands::get_mascot_data_path,
             motis_chat::commands::motis_chat_send,
             motis_chat::commands::motis_chat_cancel,
+            motis_chat::commands::motis_chat_resolve_approval,
+            ai_assistant::commands::ai_assistant_send,
+            ai_assistant::commands::ai_assistant_cancel,
             project::commands::get_default_projects_dir,
             project::commands::create_project,
             project::commands::open_project,
             project::commands::create_section,
             project::commands::rename_heading,
             project::commands::insert_heading,
-            project::commands::save_temp_md,
+            project::commands::save_document,
             editor::commands::editor_load,
             editor::commands::editor_get_text,
             editor::commands::editor_replace_text,

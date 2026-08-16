@@ -229,10 +229,13 @@ export default {
     aiPanel: {
       agentName: 'Asistente académico',
       history: 'Historial de chat',
-      emptyTitle: 'Iniciar conversación',
-      emptyHint: 'Pregunta al asistente de IA para obtener sugerencias de escritura, análisis de literatura y más',
-      inputPlaceholder: 'Escribe un mensaje... (Enter para enviar, Shift+Enter para nueva línea)',
-      devPlaceholderReply: 'La función del asistente de IA está en desarrollo. Mantente atento.',
+      emptyTitle: 'Empezar a escribir',
+      emptyHint: 'Pide al asistente académico que redacte contenido — sigue la especificación de marcado de Fluen y las escrituras requieren tu confirmación',
+      inputPlaceholder: 'Describe tu solicitud de escritura... (Enter para enviar, Shift+Enter para nueva línea)',
+      stop: 'Detener generación',
+      toolPaper: 'Leer artículo',
+      toolManuscript: 'Redactar manuscrito',
+      toolProjectFile: 'Leer/escribir archivos',
     },
     rightPanel: {
       motis: 'Motis',
@@ -269,6 +272,16 @@ export default {
         tool5: 'Lanzando un hechizo',
         tool6: 'Trabajando intensamente',
       },
+      approval: {
+        title: 'La modificación de archivo requiere confirmación',
+        desc: 'El agente quiere modificar archivos del proyecto. Solo se escribirán tras tu confirmación:',
+        apply: 'Aplicar',
+        reject: 'Rechazar',
+        actionWrite: 'Escribir',
+        actionEdit: 'Reemplazar',
+        actionAppend: 'Añadir',
+        actionUpdate: 'Actualizar manuscrito',
+      },
     },
     content: {
       welcome: {
@@ -286,6 +299,18 @@ export default {
       },
       editorPlaceholder: 'Área del editor · {name}',
       newDocName: 'Nuevo documento.md',
+      view: {
+        label: 'Vista del editor',
+        split: 'Dividido',
+        source: 'Solo código',
+        preview: 'Solo vista',
+      },
+      toolbar: {
+        label: 'Barra de herramientas del editor',
+        bold: 'Negrita',
+        italic: 'Cursiva',
+        heading: 'Título',
+      },
     },
     status: {
       ready: 'Listo',

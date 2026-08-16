@@ -29,10 +29,10 @@
 //! │   ├── experiments/             # 实验数据
 //! │   └── questionnaires/          # 问卷数据
 //! └── manuscript/
-//!     ├── .temp.md                 # 拼接工作文件（gitignore）
+//!     ├── main.md                  # 主文档（编辑器唯一真实数据源）
 //!     ├── sections/
 //!     │   ├── sections.json        # 章节顺序索引
-//!     │   └── sec-{UUID4}.md       # 章节文件（front matter + 正文）
+//!     │   └── sec-{UUID4}.md       # 章节备份（front matter + 正文）
 //!     └── assets/                   # 章节资源
 //! ```
 //!

@@ -24,6 +24,7 @@ import { useProject } from '../../../../../composables/useProject';
 import { useI18n } from '../../../../../i18n';
 import { MAIN_LAYOUT_KEY } from '../../../composables/useMainLayout';
 import { openKnowledgeGraphWindow } from '../../../../graph';
+import { AnimatedList } from '../../../../../presets';
 import type { WikiType, QueryMatch } from '../../../../../types/knowledgeBase';
 
 const { t } = useI18n();
@@ -186,6 +187,11 @@ function openEntry(entry: DisplayEntry): void {
   });
 }
 
+/** AnimatedList 条目被选中时打开 WikiReader（item 即 displayEntries 中的条目）。 */
+function onItemSelected(item: unknown): void {
+  openEntry(item as DisplayEntry);
+}
+
 // ── 打开网状图子窗口 ──────────────────────────────────────────────────
 
 /**
@@ -335,26 +341,26 @@ watch(projectPath, () => {
         <p class="kb-panel__empty-text">{{ t('main.sidebar.knowledge.empty') }}</p>
       </div>
 
-      <!-- 条目列表 -->
-      <ul v-else class="kb-panel__list">
-        <li
-          v-for="entry in displayEntries"
-          :key="entry.id"
-          class="kb-entry"
-          :title="entry.title"
-          @click="openEntry(entry)"
-        >
-          <div class="kb-entry__title">{{ entry.title }}</div>
+      <!-- 条目列表（AnimatedList 预设：入场动画 + 渐变遮罩 + 滚动） -->
+      <AnimatedList
+        v-else
+        class="kb-panel__anim-list"
+        :items="displayEntries"
+        :enable-arrow-navigation="false"
+        @item-selected="onItemSelected"
+      >
+        <template #item="{ index }">
+          <div class="kb-entry__title" :title="displayEntries[index].title">{{ displayEntries[index].title }}</div>
           <div class="kb-entry__meta">
             <span
               class="kb-entry__type"
-              :class="'kb-entry__type--' + entry.wiki_type"
-            >{{ typeLabel(entry.wiki_type) }}</span>
-            <span v-if="entry.tags_count" class="kb-entry__tags">{{ entry.tags_count }}</span>
-            <span v-if="entry.updated" class="kb-entry__date">{{ formatDate(entry.updated) }}</span>
+              :class="'kb-entry__type--' + displayEntries[index].wiki_type"
+            >{{ typeLabel(displayEntries[index].wiki_type) }}</span>
+            <span v-if="displayEntries[index].tags_count" class="kb-entry__tags">{{ displayEntries[index].tags_count }}</span>
+            <span v-if="displayEntries[index].updated" class="kb-entry__date">{{ formatDate(displayEntries[index].updated) }}</span>
           </div>
-        </li>
-      </ul>
+        </template>
+      </AnimatedList>
     </div>
   </div>
 </template>
@@ -531,28 +537,19 @@ watch(projectPath, () => {
 /* ── 列表区 ─────────────────────────────────────────────────────────── */
 .kb-panel__body {
   flex: 1;
-  overflow-y: auto;
+  min-height: 0;
   padding: 2px 6px 14px;
 }
 
-.kb-panel__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* AnimatedList 预设适配：通过预设 CSS 变量撑满面板剩余高度与宽度，
+   滚动与渐变交给预设内部列表处理。 */
+.kb-panel__anim-list {
+  --fluen-al-width: 100%;
+  --fluen-al-max-height: 100%;
+  height: 100%;
 }
 
-/* ── 条目卡片 ───────────────────────────────────────────────────────── */
-.kb-entry {
-  padding: 8px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.14s ease;
-}
-
-.kb-entry:hover {
-  background: var(--fluen-hover);
-}
-
+/* ── 条目内容（AnimatedList 插槽内复用） ───────────────────────────── */
 .kb-entry__title {
   font-family: var(--fluen-font-sans);
   font-size: 13px;

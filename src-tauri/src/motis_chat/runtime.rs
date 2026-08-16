@@ -3,7 +3,7 @@
 //! 依据 [`MascotConfig`] + [`MascotData`] + [`LlmConfig`] 构造 [`ConfluentRuntime`]：
 //!
 //! 1. 解析 provider/model（优先 Motis 配置，回退 LLM 全局激活项）
-//! 2. 构造 [`ChatClient`]（按 provider 的 base_url 情况选择 OpenAI / Anthropic / 双风格）
+//! 2. 构造 [`ChatClient`]（LLM 连接层 [`crate::llm_chat`] 提供）
 //! 3. 装配模块化提示词系统（PromptRegistry + MotisContextInjector + PromptExtension）
 //! 4. 按能力开关装配 MCP / Skills / Toolkit 适配器
 //!
@@ -20,14 +20,11 @@
 
 use std::sync::Arc;
 
-use confluent::llmkit::{
-    AnthropicProvider, AnthropicTransformer, ApiStyle, ChatClient, ChatClientConfig,
-    DualStyleProvider, OpenAiProvider, OpenAiTransformer, RequestTransformer, ThinkingMode,
-    ZhipuProvider, ZhipuTransformer,
-};
+use confluent::llmkit::ThinkingMode;
 use confluent::{ConfluentRuntime, ConfluentRuntimeBuilder, ToolKit};
 
-use crate::llm_config::model::{LlmConfig, ProviderConfig};
+use crate::llm_chat;
+use crate::llm_config::model::LlmConfig;
 use crate::mascot::model::{MascotConfig, MascotData};
 use crate::platform::fluen_config_dir;
 
@@ -40,9 +37,6 @@ const MCP_CONFIG_FILE: &str = ".mcp.json";
 /// Skills 目录名（位于配置目录下）。
 const SKILLS_DIR_NAME: &str = "skills";
 
-/// Anthropic API 默认版本头。
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-
 /// 构建 confluent 运行时。
 ///
 /// # 参数
@@ -50,6 +44,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// - `mascot`: Motis 宠物助手配置（能力开关、provider/model 覆盖、人格）
 /// - `data`: Motis 宠物运行时数据（心情、好感度）
 /// - `llm`: LLM 全局配置（提供商与模型列表）
+/// - `project_path`: 当前打开的论文项目路径（可选）。存在时装配
+///   [`crate::agent_tools::paper::PaperContentTool`]，供智能体读取论文内容。
 ///
 /// # 流程
 ///
@@ -57,17 +53,25 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// 2. 构造 ChatClient
 /// 3. 装配模块化提示词系统（PromptRegistry + MotisContextInjector + PromptExtension）
 /// 4. 按能力开关装配 MCP / Skills / Toolkit 适配器
-/// 5. 构建并返回 ConfluentRuntime
+/// 5. 注入工具审批扩展（写操作需用户确认）
+/// 6. 构建并返回 ConfluentRuntime
 pub async fn build_runtime(
     mascot: &MascotConfig,
     data: &MascotData,
     llm: &LlmConfig,
+    project_path: Option<&str>,
+    approval_extension: Arc<dyn confluent::agent_runtime::RuntimeExtension>,
 ) -> Result<ConfluentRuntime, MotisChatError> {
     // 1. 解析 provider 与 model
-    let (provider, model_id) = resolve_provider_model(mascot, llm)?;
+    let (provider, model_id) = llm_chat::resolve_provider_model(
+        mascot.provider_id.as_deref(),
+        mascot.model_id.as_deref(),
+        llm,
+    )
+    .map_err(map_llm_chat_error)?;
 
     // 2. 构造 ChatClient
-    let chat_client = build_chat_client(provider)?;
+    let chat_client = llm_chat::build_chat_client(provider).map_err(map_llm_chat_error)?;
 
     // 3. 构造 builder——装配提示词系统
     let registry = motis_registry();
@@ -100,187 +104,47 @@ pub async fn build_runtime(
         builder = assemble_skills(builder)?;
     }
     if mascot.function_calling_enabled {
-        builder = builder.with_toolkit(ToolKit::default());
+        // 内置 ToolKit 过滤：移除 fs_write_file（任意路径写、无审批，会被用来
+        // 绕过 project_file 的用户确认）；fs_execute_command 保留但纳入审批扩展
+        let mut kit = ToolKit::new();
+        for tool in ToolKit::default().into_tools() {
+            if tool.schema().name != "fs_write_file" {
+                kit = kit.with(tool);
+            }
+        }
+        builder = builder.with_toolkit(kit);
+        // 有打开的项目时，装配项目级工具（论文内容读取 + 项目内文件读写）
+        if let Some(project_path) = project_path {
+            let paper_provider = Arc::new(
+                crate::agent_tools::paper::PaperContentToolProvider::new(
+                    project_path.to_string(),
+                ),
+            );
+            builder = builder.with_tool_provider(paper_provider);
+
+            let file_provider = Arc::new(
+                crate::agent_tools::file::ProjectFileToolProvider::new(
+                    project_path.to_string(),
+                ),
+            );
+            builder = builder.with_tool_provider(file_provider);
+        }
     }
 
-    // 5. 构建运行时
+    // 5. 注入工具审批扩展（project_file 写操作调用前弹窗确认）
+    builder = builder.with_extension(approval_extension);
+
+    // 6. 构建运行时
     let runtime = builder.build().await?;
     Ok(runtime)
 }
 
-/// 解析 provider 与 model。
-///
-/// 优先使用 [`MascotConfig`] 中的 `provider_id` / `model_id`，
-/// 回退到 [`LlmConfig`] 的全局激活项。
-fn resolve_provider_model<'a>(
-    mascot: &MascotConfig,
-    llm: &'a LlmConfig,
-) -> Result<(&'a ProviderConfig, String), MotisChatError> {
-    // 优先 Motis 配置
-    if let (Some(pid), Some(mid)) = (&mascot.provider_id, &mascot.model_id) {
-        if let Some(provider) = llm.find_provider(pid) {
-            if provider.find_model(mid).is_some() {
-                return Ok((provider, mid.clone()));
-            }
-        }
-        return Err(MotisChatError::Config(format!(
-            "Motis 配置的提供商/模型不存在: {}/{}",
-            pid, mid
-        )));
+/// 将 [`LlmChatError`](crate::llm_chat::LlmChatError) 映射为 [`MotisChatError`]。
+fn map_llm_chat_error(e: crate::llm_chat::LlmChatError) -> MotisChatError {
+    match e {
+        crate::llm_chat::LlmChatError::Config(msg) => MotisChatError::Config(msg),
+        crate::llm_chat::LlmChatError::NoProvider => MotisChatError::NoProvider,
     }
-
-    // 回退 LLM 全局激活项
-    match (llm.active_provider(), llm.active_model()) {
-        (Some(provider), Some(model)) => Ok((provider, model.id.clone())),
-        _ => Err(MotisChatError::NoProvider),
-    }
-}
-
-/// OpenAI 风格端点的路径后缀。
-const OPENAI_CHAT_PATH: &str = "/chat/completions";
-
-/// Anthropic 风格端点的路径后缀。
-const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages";
-
-/// 将 base URL 规范化为完整的 OpenAI Chat Completions 端点。
-///
-/// 用户配置（onboarding 或手动填写）中的 `openai_base_url` 可能是 base URL
-/// （如 `https://api.stepfun.com/v1`），也可能是完整端点
-/// （如 `https://api.stepfun.com/v1/chat/completions`）。
-/// 本函数确保最终 URL 以 `/chat/completions` 结尾。
-fn normalize_openai_endpoint(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with(OPENAI_CHAT_PATH) {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}{OPENAI_CHAT_PATH}")
-    }
-}
-
-/// 将 base URL 规范化为完整的 Anthropic Messages 端点。
-///
-/// 确保最终 URL 以 `/v1/messages` 结尾。
-fn normalize_anthropic_endpoint(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with(ANTHROPIC_MESSAGES_PATH) {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}{ANTHROPIC_MESSAGES_PATH}")
-    }
-}
-
-/// 构造 [`ChatClient`]。
-///
-/// 按提供商配置的 base_url 情况选择 Provider：
-/// - 同时有 `openai_base_url` 和 `anthropic_base_url` → [`DualStyleProvider`]
-/// - 仅有 `openai_base_url` → [`OpenAiProvider`]
-/// - 仅有 `anthropic_base_url` → [`AnthropicProvider`]
-///
-/// base_url 会被自动规范化为完整端点（补全 `/chat/completions` 或 `/v1/messages`）。
-fn build_chat_client(provider: &ProviderConfig) -> Result<ChatClient, MotisChatError> {
-    let api_key = provider.api_key.as_ref().ok_or_else(|| {
-        MotisChatError::Config(format!("提供商 {} 未配置 api_key", provider.id))
-    })?;
-
-    let http_client = reqwest::Client::new();
-    let config = ChatClientConfig {
-        default_style: provider.default_style,
-        ..Default::default()
-    };
-
-    // 深度适配提供商：按 provider.id 路由到专用 Provider，注入厂商特有请求字段。
-    // 智谱（GLM）为 OpenAI 兼容协议，但深度思考参数（thinking.type / reasoning_effort）
-    // 需要专用转换器注入；流式 reasoning_content 由 OpenAiTransformer 通用解析。
-    if provider.id == "zhipu" {
-        let endpoint = normalize_openai_endpoint(
-            provider
-                .openai_base_url
-                .as_ref()
-                .ok_or_else(|| {
-                    MotisChatError::Config(format!(
-                        "提供商 {} 未配置 openai_base_url",
-                        provider.id
-                    ))
-                })?,
-        );
-        let p = ZhipuProvider::new(http_client, api_key.clone()).with_endpoint(endpoint);
-        return Ok(ChatClient::new(
-            Arc::new(p),
-            Arc::new(ZhipuTransformer::new()),
-            config,
-        ));
-    }
-
-    let has_openai = provider.openai_base_url.is_some();
-    let has_anthropic = provider.anthropic_base_url.is_some();
-    let extra_headers = build_extra_headers(provider);
-
-    if has_openai && has_anthropic {
-        // 双风格 Provider
-        let openai_endpoint =
-            normalize_openai_endpoint(provider.openai_base_url.as_ref().unwrap());
-        let anthropic_endpoint =
-            normalize_anthropic_endpoint(provider.anthropic_base_url.as_ref().unwrap());
-        let dual = DualStyleProvider::new(
-            http_client,
-            api_key.clone(),
-            openai_endpoint,
-            anthropic_endpoint,
-        )
-        .with_extra_headers(extra_headers);
-
-        let transformer: Arc<dyn RequestTransformer> = match provider.default_style {
-            ApiStyle::OpenAI => Arc::new(OpenAiTransformer::new()),
-            ApiStyle::Anthropic => Arc::new(AnthropicTransformer::new()),
-        };
-
-        Ok(ChatClient::new(Arc::new(dual), transformer, config))
-    } else if has_openai {
-        // OpenAI 风格
-        let endpoint =
-            normalize_openai_endpoint(provider.openai_base_url.as_ref().unwrap());
-        let p = OpenAiProvider::new(http_client, api_key.clone())
-            .with_endpoint(endpoint);
-
-        Ok(ChatClient::new(
-            Arc::new(p),
-            Arc::new(OpenAiTransformer::new()),
-            config,
-        ))
-    } else {
-        // Anthropic 风格
-        let endpoint =
-            normalize_anthropic_endpoint(provider.anthropic_base_url.as_ref().unwrap());
-        let p = AnthropicProvider::new(http_client, api_key.clone())
-            .with_endpoint(endpoint)
-            .with_extra_headers(extra_headers);
-
-        Ok(ChatClient::new(
-            Arc::new(p),
-            Arc::new(AnthropicTransformer::new()),
-            config,
-        ))
-    }
-}
-
-/// 构建提供商的额外请求头。
-///
-/// 对 Anthropic 风格的提供商，自动补充 `anthropic-version` 默认头。
-fn build_extra_headers(provider: &ProviderConfig) -> Vec<(String, String)> {
-    let mut headers: Vec<(String, String)> = provider
-        .extra_headers
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-
-    // Anthropic 风格需要 anthropic-version 头
-    if matches!(provider.default_style, ApiStyle::Anthropic)
-        && !headers.iter().any(|(k, _)| k == "anthropic-version")
-    {
-        headers.push(("anthropic-version".into(), ANTHROPIC_VERSION.into()));
-    }
-
-    headers
 }
 
 /// 装配 MCP 适配器。

@@ -35,6 +35,10 @@ pub enum MotisChatError {
     #[error("会话已取消")]
     Cancelled,
 
+    /// 审批请求不存在（已处理、已取消或从未发起）。
+    #[error("审批请求不存在或已处理: {0}")]
+    ApprovalNotFound(String),
+
     /// Tauri 事件发送失败。
     #[error("事件发送失败: {0}")]
     Emit(String),

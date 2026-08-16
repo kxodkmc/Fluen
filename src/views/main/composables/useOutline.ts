@@ -3,8 +3,8 @@
  *
  * 数据源：
  *   - 主：订阅 `useFluenEditor().onDocChange`，捕获编辑器实时编辑（每次按键）。
- *   - 辅：`watch(useProject().tempMd)`，处理"项目打开但编辑器尚未挂载"的窗口期
- *     （`tempMd` 仅在打开/保存时更新，编辑器挂载后由 `onDocChange` 接管）。
+ *   - 辅：`watch(useProject().mainMd)`，处理"项目打开但编辑器尚未挂载"的窗口期
+ *     （`mainMd` 仅在打开/保存时更新，编辑器挂载后由 `onDocChange` 接管）。
  *
  * 管理层级筛选状态；提供跳转目标供 ContentPanel 响应；
  * 提供活动行（光标行）供 UI 高亮当前标题；
@@ -50,7 +50,7 @@ const _fullOutline = shallowRef<OutlineNode[]>([]);
 /**
  * 订阅编辑器文档变化（主数据源）。
  *
- * 编辑器挂载并 `setMd` 后会立即触发一次，覆盖 `watch(tempMd)` 的初始解析；
+ * 编辑器挂载并 `setMd` 后会立即触发一次，覆盖 `watch(mainMd)` 的初始解析；
  * 后续每次按键均触发，保证大纲与编辑器内容实时同步。
  * 返回的 unsubscribe 函数随单例生命周期保留，不显式调用。
  */
@@ -68,12 +68,12 @@ useFluenEditor().onActiveLineChange((line) => {
 // ── composable ─────────────────────────────────────────────────────
 
 export function useOutline() {
-  const { tempMd, hasProject, isSaving, renameHeading, insertHeading } = useProject();
+  const { mainMd, hasProject, isSaving, renameHeading, insertHeading } = useProject();
 
   // 辅数据源：处理"项目打开但编辑器尚未挂载"的窗口期。
-  // 编辑器挂载后 onDocChange 接管实时更新；此处仅在 tempMd 变化时补一次解析。
+  // 编辑器挂载后 onDocChange 接管实时更新；此处仅在 mainMd 变化时补一次解析。
   watch(
-    tempMd,
+    mainMd,
     (md) => {
       _fullOutline.value = md ? parseOutline(md) : [];
     },
@@ -160,7 +160,7 @@ export function useOutline() {
    *
    * 通过后端文本匹配定位标题行（`sectionId` + `level` + `oldText`），
    * 不依赖行号，避免编辑器偏移导致错位。
-   * 成功后 `tempMd` 自动变化，大纲自动重新解析。
+   * 成功后 `mainMd` 自动变化，大纲自动重新解析。
    */
   async function renameNode(node: OutlineNode, newTitle: string): Promise<boolean> {
     if (!node.sectionId) return false;
@@ -172,7 +172,7 @@ export function useOutline() {
    *
    * 在父节点的作用域末尾插入 `#{level+1} {title}`。
    * 父节点作为锚点，后端通过文本匹配定位插入位置。
-   * 成功后 `tempMd` 自动变化，大纲自动重新解析。
+   * 成功后 `mainMd` 自动变化，大纲自动重新解析。
    */
   async function insertChildHeading(parentNode: OutlineNode, title: string): Promise<boolean> {
     if (!parentNode.sectionId) return false;

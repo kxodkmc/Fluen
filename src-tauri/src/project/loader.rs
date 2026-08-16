@@ -1,15 +1,16 @@
-//! 项目加载逻辑：读取配置 → 读取章节 → 拼装 `.temp.md`。
+//! 项目加载逻辑：读取配置 → 加载主文档 `main.md` → 读取章节索引。
 //!
 //! ## 执行流程
 //!
 //! 1. **硬校验**：路径存在且是目录
 //! 2. 读取 `config.yaml` → [`ProjectConfig`]
 //! 3. 读取 `sections.json` → `Vec<`[`SectionMeta`]`>`（按 order 排序）
-//! 4. 逐个读取 `sec-{id}.md`（front matter 解析 + body 分离）
+//! 4. 加载主文档 `manuscript/main.md`：
+//!    - 存在 → 直接读取
+//!    - 不存在 → **旧版迁移**：按 order 从 `sec-{id}.md` 拼装 `main.md`，
+//!      写入后删除遗留的 `.temp.md`
 //! 5. **软校验**：目录结构 + 章节一致性 → 收集 [`ProjectWarning`]
-//! 6. 按 order 拼接 `.temp.md`
-//! 7. 写入 `manuscript/.temp.md`
-//! 8. 返回 [`OpenProjectResult`]
+//! 6. 返回 [`OpenProjectResult`]
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +21,10 @@ use super::model::{
 };
 use super::validator;
 
-/// `.temp.md` 中章节分隔标记的前缀。
+/// 主文档文件名（`manuscript/main.md`）。
+pub const MAIN_MD_NAME: &str = "main.md";
+
+/// 主文档中章节分隔标记的前缀。
 ///
 /// 完整格式：`<!-- @sec_id:{section_id} -->`，位于每个章节 H1 标题正上方。
 const SEC_MARKER_PREFIX: &str = "<!-- @sec_id:";
@@ -47,39 +51,74 @@ pub fn open_project(project_path: &str) -> Result<OpenProjectResult, ProjectErro
     let mut sections = read_sections_index(&project_dir)?;
     sections.sort_by_key(|s| s.order);
 
-    // 4. 读取各章节文件
-    let section_ids: Vec<String> = sections.iter().map(|s| s.id.clone()).collect();
-    let mut contents: Vec<SectionContent> = Vec::with_capacity(sections.len());
-    for meta in &sections {
-        contents.push(read_section_file(&project_dir, &meta.id)?);
-    }
+    // 4. 加载主文档 main.md（旧版项目自动迁移）
+    let main_md = ensure_main_md(&project_dir, &sections)?;
 
     // 5. 软校验：收集警告（不阻断）
     let mut warnings = validator::check_structure(&project_dir);
     warnings.extend(validator::check_section_consistency(
         &project_dir,
-        &section_ids,
+        &sections.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
     ));
 
-    // 6. 拼接 .temp.md
-    let temp_md = assemble_temp_md(&sections, &contents);
-
-    // 7. 写入 .temp.md
-    write_temp_md(&project_dir, &temp_md)?;
-
-    // 8. 返回结果
+    // 6. 返回结果
     Ok(OpenProjectResult {
         config,
         project_path: project_path.to_string(),
         sections,
-        temp_md,
+        main_md,
         warnings,
     })
+}
+
+/// 返回 `manuscript/main.md` 的完整路径。
+pub fn main_md_path(project_dir: &Path) -> PathBuf {
+    project_dir.join("manuscript").join(MAIN_MD_NAME)
+}
+
+/// 读取主文档内容；文件缺失时返回 `None`。
+pub fn read_main_md(project_dir: &Path) -> Result<Option<String>, ProjectError> {
+    let path = main_md_path(project_dir);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)?;
+    Ok(Some(content))
 }
 
 // ---------------------------------------------------------------------------
 // 内部辅助函数
 // ---------------------------------------------------------------------------
+
+/// 确保主文档 `main.md` 存在。
+///
+/// 已存在则直接读取；否则触发**旧版迁移**：
+/// 从 `sections.json` + 各 `sec-{id}.md` 按 order 拼装 `main.md`，
+/// 写入后删除遗留的 `manuscript/.temp.md`。
+///
+/// 公开给 [`section`](super::section) 在章节操作前复用，保证
+/// `main.md` 就绪（旧项目或 main.md 被手动删除时自动重建）。
+pub fn ensure_main_md(project_dir: &Path, sections: &[SectionMeta]) -> Result<String, ProjectError> {
+    if let Some(content) = read_main_md(project_dir)? {
+        return Ok(content);
+    }
+
+    // 旧版迁移：从章节文件拼装主文档
+    let contents = sections
+        .iter()
+        .map(|meta| read_section_file(project_dir, &meta.id))
+        .collect::<Result<Vec<SectionContent>, _>>()?;
+    let main_md = assemble_main_md(sections, &contents);
+    write_main_md(project_dir, &main_md)?;
+
+    // 删除遗留的 .temp.md（若有）
+    let legacy = project_dir.join("manuscript").join(".temp.md");
+    if legacy.is_file() {
+        std::fs::remove_file(legacy)?;
+    }
+
+    Ok(main_md)
+}
 
 /// 读取并解析 `config.yaml`。
 fn read_config(project_dir: &Path) -> Result<ProjectConfig, ProjectError> {
@@ -138,7 +177,7 @@ fn read_section_file(
     })
 }
 
-/// 按 order 拼接所有章节为 `.temp.md` 内容。
+/// 按 order 拼接所有章节为 `main.md` 内容。
 ///
 /// 格式：每个章节块前加 HTML 注释标记，章节间空行分隔。
 ///
@@ -151,7 +190,7 @@ fn read_section_file(
 /// # 相关工作
 /// 正文…
 /// ```
-fn assemble_temp_md(sections: &[SectionMeta], contents: &[SectionContent]) -> String {
+fn assemble_main_md(sections: &[SectionMeta], contents: &[SectionContent]) -> String {
     let mut parts = Vec::with_capacity(sections.len());
     for (meta, content) in sections.iter().zip(contents.iter()) {
         parts.push(format!(
@@ -162,9 +201,9 @@ fn assemble_temp_md(sections: &[SectionMeta], contents: &[SectionContent]) -> St
     parts.join("\n\n")
 }
 
-/// 将拼接内容写入 `manuscript/.temp.md`。
-fn write_temp_md(project_dir: &Path, content: &str) -> Result<(), ProjectError> {
-    let path = project_dir.join("manuscript").join(".temp.md");
+/// 将主文档内容写入 `manuscript/main.md`。
+pub fn write_main_md(project_dir: &Path, content: &str) -> Result<(), ProjectError> {
+    let path = main_md_path(project_dir);
     std::fs::write(path, content)?;
     Ok(())
 }
@@ -183,8 +222,9 @@ mod tests {
     /// 创建临时项目目录。
     fn temp_project_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fluen_loader_test_{}_{}",
+            "fluen_loader_test_{}_{:?}_{}",
             std::process::id(),
+            std::thread::current().id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -229,6 +269,9 @@ mod tests {
             "references": []
         }));
         fs::write(&json_path, serde_json::to_string_pretty(&sections).unwrap()).unwrap();
+
+        // 模拟旧版项目：无 main.md（creator 会创建空 main.md，此处移除以触发迁移拼装）
+        let _ = fs::remove_file(project_dir.join("manuscript").join("main.md"));
     }
 
     #[test]
@@ -245,12 +288,39 @@ mod tests {
         assert_eq!(result.sections.len(), 2);
         assert_eq!(result.sections[0].id, "sec-aaa11111");
         assert_eq!(result.sections[1].id, "sec-bbb22222");
-        assert!(result.temp_md.contains("<!-- @sec_id:sec-aaa11111 -->"));
-        assert!(result.temp_md.contains("# 引言"));
-        assert!(result.temp_md.contains("<!-- @sec_id:sec-bbb22222 -->"));
-        assert!(result.temp_md.contains("# 方法"));
+        assert!(result.main_md.contains("<!-- @sec_id:sec-aaa11111 -->"));
+        assert!(result.main_md.contains("# 引言"));
+        assert!(result.main_md.contains("<!-- @sec_id:sec-bbb22222 -->"));
+        assert!(result.main_md.contains("# 方法"));
         assert!(result.warnings.is_empty());
-        assert!(project_dir.join("manuscript").join(".temp.md").exists());
+        assert!(project_dir.join("manuscript").join("main.md").exists());
+
+        let _ = fs::remove_dir_all(&storage);
+    }
+
+    #[test]
+    fn open_project_legacy_temp_md_migrated() {
+        let storage = temp_project_dir();
+        let project_dir = create_test_project(&storage);
+
+        add_section(&project_dir, "sec-aaa11111", 0, "引言", "引言正文");
+        add_section(&project_dir, "sec-bbb22222", 1, "方法", "方法正文");
+
+        // 模拟旧版遗留：写入 .temp.md 且不存在 main.md
+        let legacy = project_dir.join("manuscript").join(".temp.md");
+        fs::write(&legacy, "legacy content").unwrap();
+
+        let result = open_project(project_dir.to_str().unwrap()).unwrap();
+
+        // main.md 由章节拼装生成
+        assert!(result.main_md.contains("<!-- @sec_id:sec-aaa11111 -->"));
+        assert!(result.main_md.contains("# 引言"));
+        assert!(result.main_md.contains("<!-- @sec_id:sec-bbb22222 -->"));
+        assert!(result.main_md.contains("# 方法"));
+        // main.md 已写入磁盘
+        assert!(project_dir.join("manuscript").join("main.md").exists());
+        // 遗留 .temp.md 已删除
+        assert!(!legacy.exists());
 
         let _ = fs::remove_dir_all(&storage);
     }
@@ -287,7 +357,7 @@ mod tests {
         let result = open_project(project_dir.to_str().unwrap()).unwrap();
 
         assert_eq!(result.sections.len(), 0);
-        assert_eq!(result.temp_md, "");
+        assert_eq!(result.main_md, "");
         assert!(result.warnings.is_empty());
 
         let _ = fs::remove_dir_all(&storage);
@@ -307,6 +377,9 @@ mod tests {
             "references": []
         })];
         fs::write(&json_path, serde_json::to_string_pretty(&sections).unwrap()).unwrap();
+
+        // 模拟旧版项目：移除 main.md，触发从 sections 拼装的迁移路径（读取 sec-ghost 失败）
+        let _ = fs::remove_file(project_dir.join("manuscript").join("main.md"));
 
         let result = open_project(project_dir.to_str().unwrap());
         assert!(matches!(result, Err(ProjectError::SectionFileMissing(id)) if id == "sec-ghost"));
@@ -384,19 +457,22 @@ mod tests {
         )
         .unwrap();
 
+        // 模拟旧版项目：移除 main.md，触发迁移拼装（验证 CRLF 兼容）
+        let _ = fs::remove_file(project_dir.join("manuscript").join("main.md"));
+
         let result = open_project(project_dir.to_str().unwrap()).unwrap();
 
         assert_eq!(result.sections.len(), 1);
         assert_eq!(result.sections[0].title, "CRLF测试");
         assert_eq!(result.sections[0].id, "sec-crlf0001");
-        assert!(result.temp_md.contains("# CRLF测试"));
-        assert!(result.temp_md.contains("正文内容"));
+        assert!(result.main_md.contains("# CRLF测试"));
+        assert!(result.main_md.contains("正文内容"));
 
         let _ = fs::remove_dir_all(&storage);
     }
 
     #[test]
-    fn assemble_temp_md_format() {
+    fn assemble_main_md_format() {
         let sections = vec![
             SectionMeta {
                 id: "sec-aaa".into(),
@@ -434,12 +510,12 @@ mod tests {
             },
         ];
 
-        let temp_md = assemble_temp_md(&sections, &contents);
+        let main_md = assemble_main_md(&sections, &contents);
 
         // 验证标记格式
-        assert!(temp_md.contains("<!-- @sec_id:sec-aaa -->\n# 引言"));
-        assert!(temp_md.contains("<!-- @sec_id:sec-bbb -->\n# 方法"));
+        assert!(main_md.contains("<!-- @sec_id:sec-aaa -->\n# 引言"));
+        assert!(main_md.contains("<!-- @sec_id:sec-bbb -->\n# 方法"));
         // 验证章节间有空行分隔
-        assert!(temp_md.contains("引言正文\n\n<!-- @sec_id:sec-bbb"));
+        assert!(main_md.contains("引言正文\n\n<!-- @sec_id:sec-bbb"));
     }
 }

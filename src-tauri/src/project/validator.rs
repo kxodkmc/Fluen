@@ -31,6 +31,7 @@ const REQUIRED_FILES: &[&str] = &[
     "config.yaml",
     "references/references-index.json",
     "manuscript/sections/sections.json",
+    "manuscript/main.md",
 ];
 
 /// 软校验：检查目录结构完整性，返回警告列表（不阻断）。

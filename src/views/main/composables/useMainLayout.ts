@@ -16,7 +16,7 @@
 
 import { ref, readonly, computed } from 'vue';
 import type { InjectionKey } from 'vue';
-import type { ContentTab, PanelId, RightPanelId } from '../types';
+import type { ContentTab, EditorLayoutMode, PanelId, RightPanelId } from '../types';
 import { DEFAULT_PANEL_SIZES } from '../constants';
 
 export function useMainLayout() {
@@ -32,6 +32,9 @@ export function useMainLayout() {
   /* ── 面板尺寸 ───────────────────────────────────────────────────────── */
   const functionPanelWidth = ref<number>(DEFAULT_PANEL_SIZES.functionPanel);
   const aiPanelWidth = ref<number>(DEFAULT_PANEL_SIZES.aiPanel);
+
+  /* ── 编辑器视图模式 ─────────────────────────────────────────────────── */
+  const editorLayout = ref<EditorLayoutMode>('split');
 
   /* ── 活动栏 ─────────────────────────────────────────────────────────── */
   const activeActivity = ref<string>('outline');
@@ -90,6 +93,11 @@ export function useMainLayout() {
   }
 
   /* ── 活动栏 ─────────────────────────────────────────────────────────── */
+
+  /** 切换编辑器视图模式（split 双栏 / source 仅源码 / preview 仅渲染）。 */
+  function setEditorLayout(mode: EditorLayoutMode): void {
+    editorLayout.value = mode;
+  }
 
   /** 设置当前激活的活动栏项。 */
   function setActiveActivity(id: string): void {
@@ -161,10 +169,12 @@ export function useMainLayout() {
     functionPanelWidth: readonly(functionPanelWidth),
     aiPanelWidth: readonly(aiPanelWidth),
     activeActivity: readonly(activeActivity),
+    editorLayout: readonly(editorLayout),
     tabs: readonly(tabs),
     activeTabId: readonly(activeTabId),
 
     // 面板操作
+    setEditorLayout,
     togglePanel,
     toggleFunctionPanelCollapsed,
     setFunctionPanelCollapsed,

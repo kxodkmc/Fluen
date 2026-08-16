@@ -229,10 +229,13 @@ export default {
     aiPanel: {
       agentName: '学术助手',
       history: '历史会话',
-      emptyTitle: '开始对话',
-      emptyHint: '向 AI 助手提问，获取写作建议、文献分析等帮助',
-      inputPlaceholder: '输入消息… (Enter 发送，Shift+Enter 换行)',
-      devPlaceholderReply: 'AI 助手功能开发中，敬请期待。',
+      emptyTitle: '开始写作',
+      emptyHint: '向学术助手提出写作要求，它会按 Fluen 标记规范撰写文章内容，写入前需你确认',
+      inputPlaceholder: '描述写作要求… (Enter 发送，Shift+Enter 换行)',
+      stop: '停止生成',
+      toolPaper: '读取论文',
+      toolManuscript: '撰写正文',
+      toolProjectFile: '读写文件',
     },
     rightPanel: {
       motis: 'Motis',
@@ -269,6 +272,16 @@ export default {
         tool5: '正在施展魔法',
         tool6: '努力搬砖中',
       },
+      approval: {
+        title: '文件修改需确认',
+        desc: '智能体想要修改项目文件，确认后才会真正写入：',
+        apply: '应用',
+        reject: '拒绝',
+        actionWrite: '写入',
+        actionEdit: '替换',
+        actionAppend: '追加',
+        actionUpdate: '更新正文',
+      },
     },
     content: {
       welcome: {
@@ -286,6 +299,18 @@ export default {
       },
       editorPlaceholder: '编辑器区域 · {name}',
       newDocName: '新文档.md',
+      view: {
+        label: '编辑器视图',
+        split: '双栏',
+        source: '仅源码',
+        preview: '仅渲染',
+      },
+      toolbar: {
+        label: '编辑工具栏',
+        bold: '加粗',
+        italic: '斜体',
+        heading: '标题',
+      },
     },
     status: {
       ready: '就绪',

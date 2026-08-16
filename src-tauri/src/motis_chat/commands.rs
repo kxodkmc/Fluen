@@ -26,7 +26,7 @@
 //! | `motis:error` | `{ message: string }` | 错误 |
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use confluent::agent_runtime::AgentEvent;
 use futures::StreamExt;
@@ -38,6 +38,7 @@ use uuid::Uuid;
 use crate::llm_config::storage::ConfigStorage;
 use crate::mascot::storage::{MascotConfigStorage, MascotDataStorage};
 
+use super::approval::{ApprovalMap, ApprovalOutcome, ToolApprovalExtension};
 use super::error::MotisChatError;
 use super::events::{
     ErrorPayload, FinishPayload, TextPayload, ThoughtPayload, ToolCallPayload, EVENT_ERROR,
@@ -54,13 +55,16 @@ pub struct HistoryMessage {
     pub content: String,
 }
 
-/// Motis 聊天全局状态：维护活跃的取消令牌映射。
+/// Motis 聊天全局状态：维护活跃的取消令牌映射与待审批请求映射。
 ///
 /// 通过 `Mutex<HashMap<run_id, CancellationToken>>` 管理当前活跃的会话，
-/// 供 `motis_chat_cancel` 取消当前运行。
+/// 供 `motis_chat_cancel` 取消当前运行；`approvals` 为工具审批请求的
+/// 决策通道（审批 handler 写入，`motis_chat_resolve_approval` 读取）。
 pub struct MotisChatState {
     /// 活跃的取消令牌映射（key: run_id）。
     tokens: Mutex<HashMap<String, CancellationToken>>,
+    /// 待审批请求的决策通道映射（key: approval_id）。
+    approvals: Arc<ApprovalMap>,
 }
 
 impl MotisChatState {
@@ -68,7 +72,34 @@ impl MotisChatState {
     pub fn new() -> Self {
         Self {
             tokens: Mutex::new(HashMap::new()),
+            approvals: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// 返回审批通道的共享句柄（供 [`MotisApprovalHandler`] 写入）。
+    pub fn approvals_handle(&self) -> Arc<ApprovalMap> {
+        self.approvals.clone()
+    }
+
+    /// 回传审批决策：移除并发送决策到等待中的审批请求。
+    ///
+    /// 请求不存在（已处理 / 已取消 / 从未发起）时返回 [`MotisChatError::ApprovalNotFound`]。
+    pub fn resolve_approval(
+        &self,
+        approval_id: &str,
+        approved: bool,
+        reason: Option<String>,
+    ) -> Result<(), MotisChatError> {
+        let mut map = self
+            .approvals
+            .lock()
+            .expect("approval map poisoned during resolve");
+        let tx = map
+            .remove(approval_id)
+            .ok_or_else(|| MotisChatError::ApprovalNotFound(approval_id.to_string()))?;
+        // receiver 已关闭（请求已取消/超时）时静默忽略
+        let _ = tx.send(ApprovalOutcome { approved, reason });
+        Ok(())
     }
 
     /// 注册取消令牌。
@@ -118,6 +149,7 @@ impl Default for MotisChatState {
 pub async fn motis_chat_send(
     message: String,
     history: Vec<HistoryMessage>,
+    project_path: Option<String>,
     window: Window,
     mascot_storage: State<'_, MascotConfigStorage>,
     mascot_data_storage: State<'_, MascotDataStorage>,
@@ -135,8 +167,20 @@ pub async fn motis_chat_send(
         .load()
         .map_err(|e| MotisChatError::LlmConfig(e.to_string()))?;
 
-    // 2. 构建运行时（含提示词系统）
-    let runtime = build_runtime(&mascot_config, &mascot_data, &llm_config).await?;
+    // 2. 构建运行时（含提示词系统 + 论文内容工具 + 工具审批扩展）
+    let approval_extension = Arc::new(ToolApprovalExtension::new(
+        window.clone(),
+        chat_state.approvals_handle(),
+        super::events::EVENT_APPROVAL_REQUEST,
+    ));
+    let runtime = build_runtime(
+        &mascot_config,
+        &mascot_data,
+        &llm_config,
+        project_path.as_deref(),
+        approval_extension,
+    )
+    .await?;
 
     // 3. 构造输入（历史 + 当前消息，人格由系统提示词处理）
     let input = build_input(&message, &history);
@@ -181,6 +225,20 @@ pub async fn motis_chat_send(
 pub fn motis_chat_cancel(chat_state: State<'_, MotisChatState>) -> Result<(), MotisChatError> {
     chat_state.cancel_active();
     Ok(())
+}
+
+/// 回传工具审批决策（前端确认弹窗按钮触发）。
+///
+/// 审批请求由 `motis:approval-request` 事件推送；用户点击「应用」/「拒绝」后
+/// 调用本命令，决策通过 oneshot 通道送达挂起的工具调用。
+#[tauri::command]
+pub fn motis_chat_resolve_approval(
+    approval_id: String,
+    approved: bool,
+    reason: Option<String>,
+    chat_state: State<'_, MotisChatState>,
+) -> Result<(), MotisChatError> {
+    chat_state.resolve_approval(&approval_id, approved, reason)
 }
 
 /// 构造 confluent 输入。

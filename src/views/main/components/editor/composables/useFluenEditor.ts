@@ -8,7 +8,7 @@
  *   - 暴露大纲联动钩子（`scrollToLine` / `onActiveLineChange` / `onDocChange`）
  *
  * CM6 是编辑器内容的唯一数据源（source of truth），保存后端返回的归一化
- * `temp_md` 会回写进编辑器以同步行尾等差异。预览为只读派生产物，由独立的
+ * `main_md` 会回写进编辑器以同步行尾等差异。预览为只读派生产物，由独立的
  * `FluenPreview` 组件订阅 `onDocChange` 渲染。
  *
  * @example
@@ -24,6 +24,7 @@ import { ref, readonly } from 'vue';
 import { EditorView } from '@codemirror/view';
 import { undo, redo, undoDepth, redoDepth } from '@codemirror/commands';
 import { createEditorState, createEditorView, type EditorCallbacks } from '../codemirror/setup';
+import { applyMarkdownFormat, type MarkdownFormatKind, type HeadingLevel } from '../codemirror/formatting';
 import { useProject } from '../../../../../composables/useProject';
 
 // ── 模块级状态（单例） ──────────────────────────────────────────────
@@ -143,26 +144,58 @@ function redoEd(): void {
   if (_view) redo(_view);
 }
 
+/**
+ * 切换 Markdown 格式（加粗 / 斜体 / 标题）。
+ *
+ * 委托给纯函数层 {@link applyMarkdownFormat} 计算文档变更与选区，
+ * 再通过 CM6 dispatch 应用，并保持选区方向、聚焦编辑器。
+ * 工具栏按钮与后续快捷键共用此入口。
+ *
+ * @param kind  格式类型。
+ * @param level 标题级别（1-6）；仅 kind === 'heading' 时生效，默认 1。
+ */
+function toggleFormat(kind: MarkdownFormatKind, level: HeadingLevel = 1): void {
+  if (!_view) return;
+  const sel = _view.state.selection.main;
+  const from = Math.min(sel.anchor, sel.head);
+  const to = Math.max(sel.anchor, sel.head);
+  const result = applyMarkdownFormat(_view.state.doc.toString(), from, to, kind, level);
+  const reversed = sel.head < sel.anchor;
+  _view.dispatch({
+    changes: result.changes,
+    // 保持原选区方向（反向框选时 anchor/head 互换）
+    selection: reversed
+      ? { anchor: result.selection.head, head: result.selection.anchor }
+      : result.selection,
+    scrollIntoView: true,
+  });
+  _view.focus();
+}
+
 // ── 保存 ───────────────────────────────────────────────────────────
 
 /**
  * 保存当前文档。
  *
  * 调用 `useProject().saveContent(md)` 进行原子保存；成功后后端返回的
- * `temp_md` 可能与原文不同（行尾归一化等），此时回写编辑器以保持同步。
+ * `main_md` 可能与原文不同（行尾归一化等），此时回写编辑器以保持同步。
  * 回写通过 `setMd` 重建状态，会丢失 undo 历史（Phase 1 取舍）。
+ *
+ * 防重入：保存进行中（`_isSaving` 为 true）再次调用直接返回 false。
+ * 全局快捷键（capture 阶段）与 CM6 内部 keymap 都可能触发保存，
+ * 双通道并发时靠该检查避免重复 IPC。
  *
  * @returns 保存是否成功。
  */
 async function save(): Promise<boolean> {
-  if (!_view) return false;
+  if (!_view || _isSaving.value) return false;
   const md = getMd();
   const project = useProject();
   _isSaving.value = true;
   try {
     const success = await project.saveContent(md);
     if (success) {
-      const normalized = project.tempMd.value;
+      const normalized = project.mainMd.value;
       if (normalized && normalized !== md) {
         // 后端归一化了内容（如行尾），同步编辑器。
         setMd(normalized);
@@ -195,6 +228,16 @@ function scrollToLine(line: number): void {
     scrollIntoView: true,
   });
   _view.focus();
+}
+
+/**
+ * 请求 CM6 立即重新测量布局。
+ *
+ * 编辑器容器经 `v-show` 在隐藏/显示间切换（如视图模式切换）后，
+ * 尺寸可能从 0 恢复，调用本方法让 CM6 立刻重测而非依赖 ResizeObserver 异步触发。
+ */
+function requestMeasure(): void {
+  _view?.requestMeasure();
 }
 
 /**
@@ -236,12 +279,14 @@ export function useFluenEditor() {
     // 编辑
     undo: undoEd,
     redo: redoEd,
+    toggleFormat,
 
     // 保存
     save,
 
     // 大纲联动
     scrollToLine,
+    requestMeasure,
     onActiveLineChange,
     onDocChange,
   };

@@ -20,6 +20,7 @@ import {
 
 import { ftagExtension } from './ftagSyntax';
 import { footnoteExtension } from './footnoteSyntax';
+import { hideSectionMarkers } from './markerDecoration';
 
 /**
  * CM6 update listener 转发的回调集合。composable 订阅这些回调以同步响应式状态。
@@ -50,8 +51,12 @@ export function createEditorState(doc: string, callbacks: EditorCallbacks): Edit
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       // 启用 f- 标签与脚注语法扩展（语法高亮，非装饰渲染）
       markdown({ extensions: [ftagExtension, footnoteExtension] }),
+      // 隐藏章节标记行（<!-- @sec_id:xxx -->），对用户不可见但保留在文档中
+      hideSectionMarkers,
       keymap.of([
-        // Ctrl/Cmd+S → save（return true 阻止浏览器默认行为）
+        // Ctrl/Cmd+S → save（return true 阻止浏览器默认行为）。
+        // 注：全局快捷键模块（src/shortcuts）在 document capture 阶段已接管 Mod-s，
+        // 此处的绑定成为编辑器内兜底通道（save 本身有防重入，双通道不会重复保存）。
         { key: 'Mod-s', run: () => { callbacks.onSave(); return true; } },
         // 显式注册 undo/redo，确保绑定优先于 defaultKeymap 中可能冲突的默认项
         { key: 'Mod-z', run: undo },

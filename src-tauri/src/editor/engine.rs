@@ -180,7 +180,7 @@ impl EditorEngine {
         render_to_html(content, &self.config.render_options)
     }
 
-    /// 保存到 .temp.md（委托 project 模块）。
+    /// 保存到 main.md（委托 project 模块）。
     ///
     /// 成功后 dirty 置为 false。
     pub fn save(&mut self) -> Result<()> {
@@ -189,23 +189,23 @@ impl EditorEngine {
             .clone()
             .ok_or(EditorError::NoProjectBound)?;
 
-        let request = crate::project::model::SaveTempMdRequest {
+        let request = crate::project::model::SaveDocumentRequest {
             project_path,
             content: self.source_md.clone(),
         };
 
-        crate::project::section::save_temp_md(request)
+        crate::project::section::save_document(request)
             .map_err(|e| EditorError::ProjectError(e.to_string()))?;
 
         self.dirty = false;
         Ok(())
     }
 
-    /// 保存指定内容到 .temp.md 并拆分回各章节文件（委托 project 模块）。
+    /// 保存指定内容到 main.md 并拆分回各章节备份文件（委托 project 模块）。
     ///
     /// 与 [`save`](Self::save) 的区别：接受外部 `content` 而非使用 source_md，
-    /// 并返回重新加载后的 [`OpenProjectResult`]（含最新章节列表与 temp_md）。
-    /// 成功后 source_md 更新为返回的 temp_md，dirty 置为 false。
+    /// 并返回重新加载后的 [`OpenProjectResult`]（含最新章节列表与 main_md）。
+    /// 成功后 source_md 更新为返回的 main_md，dirty 置为 false。
     pub fn save_content(
         &mut self,
         content: String,
@@ -215,27 +215,27 @@ impl EditorEngine {
             .clone()
             .ok_or(EditorError::NoProjectBound)?;
 
-        let request = crate::project::model::SaveTempMdRequest {
+        let request = crate::project::model::SaveDocumentRequest {
             project_path,
             content,
         };
 
-        let result = crate::project::section::save_temp_md(request)
+        let result = crate::project::section::save_document(request)
             .map_err(|e| EditorError::ProjectError(e.to_string()))?;
 
-        self.source_md = result.temp_md.clone();
+        self.source_md = result.main_md.clone();
         self.dirty = false;
         Ok(result)
     }
 
-    /// 从项目加载 .temp.md（委托 project 模块）。
+    /// 从项目加载 main.md（委托 project 模块）。
     ///
     /// 加载后 dirty=false，历史栈清空。
     pub fn load_project(&mut self, project_path: &str) -> Result<()> {
         let result = crate::project::loader::open_project(project_path)
             .map_err(|e| EditorError::ProjectError(e.to_string()))?;
 
-        self.source_md = result.temp_md;
+        self.source_md = result.main_md;
         self.project_path = Some(project_path.to_string());
         self.dirty = false;
         self.history.clear();
@@ -323,8 +323,9 @@ mod tests {
     /// 辅助：创建唯一临时目录（遵循项目测试约定：temp_dir + pid + nanos）。
     fn temp_project_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fluen_engine_test_{}_{}",
+            "fluen_engine_test_{}_{:?}_{}",
             std::process::id(),
+            std::thread::current().id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -366,6 +367,9 @@ mod tests {
             "references": []
         }));
         fs::write(&json_path, serde_json::to_string_pretty(&sections).unwrap()).unwrap();
+
+        // 模拟旧版项目：无 main.md（creator 会创建空 main.md，此处移除以触发迁移拼装）
+        let _ = fs::remove_file(project_dir.join("manuscript").join("main.md"));
     }
 
     // 1. new 创建空引擎
@@ -714,9 +718,9 @@ mod tests {
 
     // ── save_content ──
 
-    // save_content 写入 .temp.md 并拆分回章节文件
+    // save_content 写入 main.md 并拆分回章节备份文件
     #[test]
-    fn save_content_writes_temp_md_and_sections() {
+    fn save_content_writes_main_md_and_sections() {
         let storage = temp_project_dir();
         let project_dir = create_test_project(&storage);
         add_section(&project_dir, "sec-aaa11111", 0, "引言", "# 引言\n\n引言正文");
@@ -729,19 +733,19 @@ mod tests {
         let modified = engine.get_text().replace("# 引言", "# 绪论");
         let result = engine.save_content(modified.clone()).unwrap();
 
-        // 返回的 temp_md 含修改后内容
-        assert!(result.temp_md.contains("# 绪论"));
-        assert!(!result.temp_md.contains("# 引言"));
+        // 返回的 main_md 含修改后内容
+        assert!(result.main_md.contains("# 绪论"));
+        assert!(!result.main_md.contains("# 引言"));
         // 章节标题已更新
         assert_eq!(result.sections[0].title, "绪论");
 
-        // .temp.md 文件存在且含修改内容
-        let temp_path = project_dir.join("manuscript").join(".temp.md");
-        assert!(temp_path.exists());
-        let temp_file = fs::read_to_string(&temp_path).unwrap();
-        assert!(temp_file.contains("# 绪论"));
+        // main.md 文件存在且含修改内容
+        let main_path = project_dir.join("manuscript").join("main.md");
+        assert!(main_path.exists());
+        let main_file = fs::read_to_string(&main_path).unwrap();
+        assert!(main_file.contains("# 绪论"));
 
-        // sec 文件已更新
+        // sec 备份文件已更新
         let sec_file = fs::read_to_string(
             project_dir.join("manuscript").join("sections").join("sec-aaa11111.md"),
         )
@@ -749,9 +753,9 @@ mod tests {
         assert!(sec_file.contains("# 绪论"));
         assert!(!sec_file.contains("# 引言"));
 
-        // 引擎状态：dirty=false，source_md 同步为返回的 temp_md
+        // 引擎状态：dirty=false，source_md 同步为返回的 main_md
         assert!(!engine.is_dirty());
-        assert_eq!(engine.get_text(), result.temp_md);
+        assert_eq!(engine.get_text(), result.main_md);
 
         let _ = fs::remove_dir_all(&storage);
     }

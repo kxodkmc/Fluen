@@ -8,6 +8,14 @@
 /** 布局面板标识（从左到右三段）。 */
 export type PanelId = 'function' | 'content' | 'ai';
 
+/**
+ * 编辑器视图模式。
+ * - `split`：双栏（左 MD 源码 + 右 HTML 预览）
+ * - `source`：仅显示 MD 源码
+ * - `preview`：仅显示 HTML 预览
+ */
+export type EditorLayoutMode = 'split' | 'source' | 'preview';
+
 /** 活动栏项目 — 左侧功能区中的导航条目。 */
 export interface ActivityItem {
   /** 唯一标识 */

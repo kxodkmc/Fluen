@@ -1,9 +1,9 @@
 <script lang="ts">
 export interface AnimatedListProps {
   /** An array of items to display in the scrollable list. */
-  items?: string[];
+  items?: unknown[];
   /** Callback function triggered when an item is selected. Receives the selected item and its index. */
-  onItemSelect?: (item: string, index: number) => void;
+  onItemSelect?: (item: unknown, index: number) => void;
   /** Toggle to display the top and bottom gradient overlays. */
   showGradients?: boolean;
   /** Toggle to enable keyboard navigation via arrow and tab keys. */
@@ -20,13 +20,19 @@ export interface AnimatedListProps {
 
 export type AnimatedListEmits = {
   /** Emitted whenever an item is selected (item, index). */
-  (e: 'itemSelected', item: string, index: number): void;
+  (e: 'itemSelected', item: unknown, index: number): void;
 };
 </script>
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue';
 import AnimatedListItem from './AnimatedListItem.vue';
+
+/* Slot: `item` — custom per-item content (scoped with `{ item, index }`).
+   Falls back to the plain-text rendering when the slot is not provided. */
+defineSlots<{
+  item?: (props: { item: unknown; index: number }) => unknown;
+}>();
 
 /* ------------------------------------------------------------------ *
  * Utils
@@ -97,7 +103,7 @@ const bottomGradientOpacity = ref(1);
  * Selection handlers
  * ------------------------------------------------------------------ */
 
-const selectItem = (item: string, index: number): void => {
+const selectItem = (item: unknown, index: number): void => {
   selectedIndex.value = index;
   props.onItemSelect?.(item, index);
   emit('itemSelected', item, index);
@@ -107,7 +113,7 @@ const handleItemMouseEnter = (index: number): void => {
   selectedIndex.value = index;
 };
 
-const handleItemClick = (item: string, index: number): void => {
+const handleItemClick = (item: unknown, index: number): void => {
   selectItem(item, index);
 };
 
@@ -228,7 +234,9 @@ onUnmounted(() => {
         @click="handleItemClick(item, index)"
       >
         <div :class="cn('al-item-content', { 'al-item-content--selected': selectedIndex === index }, itemClassName)">
-          <p class="al-item-text">{{ item }}</p>
+          <slot name="item" :item="item" :index="index">
+            <p class="al-item-text">{{ String(item) }}</p>
+          </slot>
         </div>
       </AnimatedListItem>
     </div>
@@ -255,14 +263,18 @@ onUnmounted(() => {
 
 .al-root {
   position: relative;
-  width: 500px;
+  /* Host can override via --fluen-al-width (e.g. 100% to fill a panel). */
+  width: var(--fluen-al-width, 500px);
   max-width: 100%;
 }
 
 /* ── Scroll container ─────────────────────────────────────────────── */
 
 .al-list {
-  max-height: 400px;
+  /* Host can override via --fluen-al-max-height (e.g. 100% to fill a panel).
+     border-box 让 max-height 包含内边距，避免滚动容器超出宿主高度被裁剪。 */
+  box-sizing: border-box;
+  max-height: var(--fluen-al-max-height, 400px);
   overflow-y: auto;
   padding: 1rem;
   scrollbar-color: var(--fluen-hairline, rgba(128, 128, 128, 0.5)) transparent;

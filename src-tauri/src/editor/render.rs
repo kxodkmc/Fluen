@@ -65,4 +65,15 @@ e^{i\pi} + 1 = 0
         // 空 MD 应返回有效（可能为空）HTML
         assert!(html.is_empty() || html.contains("<"));
     }
+
+    #[test]
+    fn render_hides_section_marker_comment() {
+        // 章节标记是 HTML 注释，预览中不应出现可见文本
+        let md = "<!-- @sec_id:sec-abc12345 -->\n# 标题\n\n正文";
+        let html = render_to_html(md, &Options::default()).unwrap();
+        assert!(html.contains("标题"));
+        assert!(html.contains("正文"));
+        assert!(!html.contains("@sec_id"));
+        assert!(!html.contains("sec-abc12345"));
+    }
 }

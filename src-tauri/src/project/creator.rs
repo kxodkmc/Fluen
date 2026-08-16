@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use super::error::ProjectError;
+use super::loader;
 use super::model::{CreateProjectRequest, ProjectConfig};
 
 /// 创建文章项目——在指定路径下生成完整文件结构。
@@ -50,6 +51,7 @@ pub fn create_project(request: CreateProjectRequest) -> Result<String, ProjectEr
     write_config_yaml(&project_dir, &request)?;
     write_references_index(&project_dir)?;
     write_sections_json(&project_dir)?;
+    write_main_md(&project_dir)?;
 
     Ok(project_dir.to_string_lossy().to_string())
 }
@@ -120,6 +122,15 @@ fn write_sections_json(project_dir: &Path) -> Result<(), ProjectError> {
     Ok(())
 }
 
+/// 写入 `manuscript/main.md`（初始为空主文档，编辑器唯一真实数据源）。
+fn write_main_md(project_dir: &Path) -> Result<(), ProjectError> {
+    std::fs::write(
+        project_dir.join("manuscript").join(loader::MAIN_MD_NAME),
+        "",
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -132,8 +143,9 @@ mod tests {
 
     fn temp_project_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fluen_creator_test_{}_{}",
+            "fluen_creator_test_{}_{:?}_{}",
             std::process::id(),
+            std::thread::current().id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -172,6 +184,7 @@ mod tests {
         assert!(project_dir.join("data/questionnaires").is_dir());
         assert!(project_dir.join("manuscript/sections/sections.json").exists());
         assert!(project_dir.join("manuscript/assets").is_dir());
+        assert!(project_dir.join("manuscript/main.md").exists());
 
         // 验证 config.yaml 内容
         let yaml_content = fs::read_to_string(project_dir.join("config.yaml")).unwrap();

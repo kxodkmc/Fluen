@@ -41,7 +41,7 @@ impl From<EditorError> for EditorErrorResponse {
 
 // ── Commands ──
 
-/// 加载项目 .temp.md 到引擎。
+/// 加载项目 main.md 到引擎。
 #[tauri::command]
 pub fn editor_load(
     state: tauri::State<EditorState>,
@@ -145,7 +145,7 @@ pub fn editor_render_html(
     }
 }
 
-/// 保存到 .temp.md。
+/// 保存到 main.md。
 #[tauri::command]
 pub fn editor_save(state: tauri::State<EditorState>) -> Result<(), EditorErrorResponse> {
     let mut guard = state.0.lock();
@@ -155,10 +155,10 @@ pub fn editor_save(state: tauri::State<EditorState>) -> Result<(), EditorErrorRe
     }
 }
 
-/// 保存指定内容到 .temp.md 并拆分回各章节文件。
+/// 保存指定内容到 main.md 并拆分回各章节备份文件。
 ///
 /// 若引擎未初始化或绑定的项目路径与 `project_path` 不一致，先重新加载项目。
-/// 返回重新加载后的 [`OpenProjectResult`]（含最新章节列表与 temp_md）。
+/// 返回重新加载后的 [`OpenProjectResult`]（含最新章节列表与 main_md）。
 #[tauri::command]
 pub fn editor_save_content(
     state: tauri::State<EditorState>,
@@ -312,8 +312,9 @@ mod tests {
     /// 创建唯一临时目录（遵循项目测试约定：temp_dir + pid + nanos）。
     fn temp_project_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "fluen_cmd_test_{}_{}",
+            "fluen_cmd_test_{}_{:?}_{}",
             std::process::id(),
+            std::thread::current().id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

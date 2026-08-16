@@ -24,6 +24,7 @@ import { MOTIS_CHAT_KEY } from './symbols';
 import MotisChatHeader from './MotisChatHeader.vue';
 import MotisChatMessageList from './MotisChatMessageList.vue';
 import MotisChatInput from './MotisChatInput.vue';
+import ApprovalDialog from '../ApprovalDialog.vue';
 
 defineEmits<{
   (e: 'close'): void;
@@ -34,7 +35,8 @@ defineEmits<{
 const motisChat = inject(MOTIS_CHAT_KEY, () => useMotisChat(), true);
 
 /* ── 解构状态与方法（顶层绑定 → 模板中自动解包 ref） ────────────────── */
-const { messages, isGenerating, draftMessage, send, cancel } = motisChat;
+const { messages, isGenerating, pendingApprovals, draftMessage, send, cancel, resolveApproval } =
+  motisChat;
 
 /** 草稿消息双向绑定（v-model 需要 computed 包装 ref）。 */
 const draft = computed({
@@ -63,6 +65,12 @@ function handleSend(): void {
     <!-- 预留扩展区（未来记忆功能、自动任务等） -->
     <slot name="extension" />
 
+    <!-- 工具写操作确认弹窗（浮动层，共享组件） -->
+    <ApprovalDialog
+      :approvals="pendingApprovals"
+      @resolve="(id, approved) => void resolveApproval(id, approved)"
+    />
+
     <!-- 输入区 -->
     <MotisChatInput
       v-model="draft"
@@ -80,5 +88,6 @@ function handleSend(): void {
   height: 100%;
   background: var(--fluen-surface);
   overflow: hidden;
+  position: relative;
 }
 </style>

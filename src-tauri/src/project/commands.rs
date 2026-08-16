@@ -18,8 +18,8 @@
 //! const result = await invoke<OpenProjectResult>('rename_heading', { request: req });
 //! // 插入子标题
 //! const result = await invoke<OpenProjectResult>('insert_heading', { request: req });
-//! // 保存 .temp.md
-//! const result = await invoke<OpenProjectResult>('save_temp_md', { request: req });
+//! // 保存 main.md
+//! const result = await invoke<OpenProjectResult>('save_document', { request: req });
 //! ```
 
 use super::creator;
@@ -27,7 +27,7 @@ use super::error::ProjectErrorResponse;
 use super::loader;
 use super::model::{
     CreateProjectRequest, CreateSectionRequest, InsertHeadingRequest, OpenProjectResult,
-    RenameHeadingRequest, SaveTempMdRequest,
+    RenameHeadingRequest, SaveDocumentRequest,
 };
 use super::section;
 use crate::platform;
@@ -50,7 +50,7 @@ pub fn create_project(request: CreateProjectRequest) -> Result<String, ProjectEr
 
 /// 打开文章项目——委托给 [`loader`](super::loader) 模块。
 ///
-/// 读取项目配置、校验目录结构、加载所有章节并拼装 `.temp.md`。
+/// 读取项目配置、校验目录结构、加载主文档 `main.md` 与章节索引。
 /// 返回 [`OpenProjectResult`]，包含完整的项目数据与软校验警告。
 #[tauri::command]
 pub fn open_project(project_path: String) -> Result<OpenProjectResult, ProjectErrorResponse> {
@@ -70,7 +70,7 @@ pub fn create_section(
 
 /// 重命名标题（任意层级）——委托给 [`section`](super::section) 模块。
 ///
-/// 通过 `section_id` + `level` + `old_text` 在章节文件中文本匹配定位标题行，
+/// 通过 `section_id` + `level` + `old_text` 在 `main.md` 的章节块内文本匹配定位标题行，
 /// 替换为 `new_text`。不依赖行号。
 #[tauri::command]
 pub fn rename_heading(
@@ -81,7 +81,7 @@ pub fn rename_heading(
 
 /// 插入子标题——委托给 [`section`](super::section) 模块。
 ///
-/// 在指定章节正文末尾追加 `#{new_level} {new_text}`。
+/// 在 `main.md` 指定章节块的锚点标题作用域末尾追加 `#{new_level} {new_text}`。
 #[tauri::command]
 pub fn insert_heading(
     request: InsertHeadingRequest,
@@ -89,13 +89,13 @@ pub fn insert_heading(
     section::insert_heading(request).map_err(Into::into)
 }
 
-/// 保存 `.temp.md` 内容——委托给 [`section`](super::section) 模块。
+/// 保存主文档 `main.md` 内容——委托给 [`section`](super::section) 模块。
 ///
-/// 将编辑后的 `.temp.md` 全文拆分回各 `sec-{id}.md` 源文件。
-/// **安全校验**：拆分后的块数量必须与 `sections.json` 条目数一致。
+/// 校验（fluen-markup 无 `Severity::Error` 硬错误）后写入 `main.md`，
+/// 并拆分回各 `sec-{id}.md` 备份文件（同时更新 `sections.json`）。
 #[tauri::command]
-pub fn save_temp_md(
-    request: SaveTempMdRequest,
+pub fn save_document(
+    request: SaveDocumentRequest,
 ) -> Result<OpenProjectResult, ProjectErrorResponse> {
-    section::save_temp_md(request).map_err(Into::into)
+    section::save_document(request).map_err(Into::into)
 }

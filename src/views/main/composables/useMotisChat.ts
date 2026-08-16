@@ -28,6 +28,7 @@ import { ref, readonly, onScopeDispose, getCurrentScope } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useMascotConfig } from '../../../composables/useMascotConfig';
+import { useProject } from '../../../composables/useProject';
 import { useI18n } from '../../../i18n';
 import type { MascotConfig } from '../../../types/mascot';
 import type { ChatMessage } from '../types';
@@ -65,6 +66,20 @@ interface ErrorPayload {
   message: string;
 }
 
+/** 工具审批请求 payload（与后端 events.rs 对齐）。 */
+interface ApprovalRequestPayload {
+  id: string;
+  tool_name: string;
+  input: unknown;
+}
+
+/** 待审批的工具写操作（前端确认弹窗条目）。 */
+export interface PendingApproval {
+  id: string;
+  toolName: string;
+  /** 输入参数（含 path / action / content 等）。 */
+  input: Record<string, unknown>;
+}
 /** 默认 MascotConfig（加载失败或非 Tauri 环境时兜底）。 */
 const DEFAULT_CONFIG: MascotConfig = {
   version: '1.0.0',
@@ -99,12 +114,16 @@ function generateId(): string {
 export function useMotisChat() {
   const { loadConfig } = useMascotConfig();
   const { t } = useI18n();
+  /** 当前打开的论文项目（发送消息时读取 project_path，供论文内容工具使用）。 */
+  const { currentProject } = useProject();
 
   /* ── 对外状态 ─────────────────────────────────────────────────────── */
   const messages = ref<ChatMessage[]>([]);
   const isGenerating = ref(false);
   const statusBubble = ref<string | null>(null);
   const currentRunId = ref<string | null>(null);
+  /** 待审批的工具写操作列表（用户确认后才会真正写入）。 */
+  const pendingApprovals = ref<PendingApproval[]>([]);
   /** 草稿消息（供搜索栏 @Motis 预填，可双向绑定）。 */
   const draftMessage = ref('');
 
@@ -174,6 +193,31 @@ export function useMotisChat() {
   /* ── 事件处理 ─────────────────────────────────────────────────────── */
 
   /** 处理思考增量 — 依 show_thinking_content 决定是否追加为 thinking 消息。 */
+  /** 收到审批请求：加入待确认列表，由用户点击「应用 / 拒绝」决定是否生效。 */
+  function onApprovalRequest(payload: ApprovalRequestPayload): void {
+    pendingApprovals.value.push({
+      id: payload.id,
+      toolName: payload.tool_name,
+      input: (payload.input ?? {}) as Record<string, unknown>,
+    });
+  }
+
+  /**
+   * 回传审批决策：批准（应用）或拒绝。
+   *
+   * 成功后该条从待确认列表移除；后端据此放行或拦截对应工具调用。
+   */
+  async function resolveApproval(id: string, approved: boolean): Promise<void> {
+    if (isTauriEnvironment()) {
+      try {
+        await invoke('motis_chat_resolve_approval', { approvalId: id, approved });
+      } catch (err) {
+        console.error('[useMotisChat] 回传审批决策失败:', err);
+      }
+    }
+    pendingApprovals.value = pendingApprovals.value.filter((a) => a.id !== id);
+  }
+
   function onThought(payload: ThoughtPayload): void {
     // 始终维护思考状态气泡（若当前无气泡则填入思考文案）
     if (statusBubble.value === null) {
@@ -297,6 +341,7 @@ export function useMotisChat() {
       listen<ThoughtPayload>('motis:thought', (e) => onThought(e.payload)),
       listen<TextPayload>('motis:text', (e) => onText(e.payload)),
       listen<ToolCallPayload>('motis:tool-call', (e) => onToolCall(e.payload)),
+      listen<ApprovalRequestPayload>('motis:approval-request', (e) => onApprovalRequest(e.payload)),
       listen<FinishPayload>('motis:finish', (e) => onFinish(e.payload)),
       listen<ErrorPayload>('motis:error', (e) => onError(e.payload)),
     ]);
@@ -351,7 +396,8 @@ export function useMotisChat() {
       timestamp: Date.now(),
     });
 
-    // 5. 设置生成状态与思考气泡
+    // 5. 设置生成状态与思考气泡（新一轮开始时清空遗留的待审批项）
+    pendingApprovals.value = [];
     isGenerating.value = true;
     currentRunId.value = generateId();
     currentTextId = null;
@@ -368,7 +414,12 @@ export function useMotisChat() {
     }
 
     try {
-      await invoke('motis_chat_send', { message: text, history });
+      // 携带当前打开的论文项目路径（供智能体读取论文内容的工具使用）
+      await invoke('motis_chat_send', {
+        message: text,
+        history,
+        projectPath: currentProject.value?.project_path ?? null,
+      });
     } catch (err) {
       // invoke 抛错时（命令层异常），补一条错误消息
       const msg = err instanceof Error ? err.message : String(err);
@@ -386,6 +437,8 @@ export function useMotisChat() {
         console.error('[useMotisChat] 取消失败:', err);
       }
     }
+    // 取消后清理遗留的待审批项（对应审批请求已被后端终止）
+    pendingApprovals.value = [];
     // 标记当前消息被中断并重置状态
     closeStreamingMessages(true);
     statusBubble.value = null;
@@ -426,6 +479,7 @@ export function useMotisChat() {
     isGenerating: readonly(isGenerating),
     statusBubble: readonly(statusBubble),
     currentRunId: readonly(currentRunId),
+    pendingApprovals: readonly(pendingApprovals),
     // 草稿消息（可双向绑定）
     draftMessage,
 
@@ -434,6 +488,7 @@ export function useMotisChat() {
     cancel,
     proactiveMessage,
     setDraftMessage,
+    resolveApproval,
   };
 }
 

@@ -60,7 +60,7 @@ export interface OpenProjectResult {
   config: ProjectConfig;
   project_path: string;
   sections: SectionMeta[];
-  temp_md: string;
+  main_md: string;
   warnings: ProjectWarning[];
 }
 
@@ -108,8 +108,8 @@ export interface InsertHeadingRequest {
   new_text: string;
 }
 
-/** `save_temp_md` 命令的请求参数。 */
-export interface SaveTempMdRequest {
+/** `save_document` 命令的请求参数。 */
+export interface SaveDocumentRequest {
   project_path: string;
   content: string;
 }

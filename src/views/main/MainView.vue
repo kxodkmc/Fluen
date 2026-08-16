@@ -18,7 +18,7 @@
  * 项目状态由 `useProject` composable（单例）管理。
  * 各面板组件通过 props / emits 与容器交互。
  */
-import { ref, watch, provide } from 'vue';
+import { ref, watch, provide, onMounted, onBeforeUnmount } from 'vue';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import TitleBar from './components/TitleBar.vue';
@@ -32,9 +32,11 @@ import { useMainLayout, MAIN_LAYOUT_KEY } from './composables/useMainLayout';
 import { useMotisChat } from './composables/useMotisChat';
 import { MOTIS_CHAT_KEY } from './components/motis';
 import { useProject } from '../../composables/useProject';
+import { useFluenEditor } from './components/editor/composables/useFluenEditor';
+import { registerCommand, unregisterCommand, bindShortcut, unbindShortcut } from '../../shortcuts';
 import { PANEL_CONSTRAINTS } from './constants';
 import { useI18n } from '../../i18n';
-import type { ContentTab } from './types';
+import type { ContentTab, EditorLayoutMode } from './types';
 
 const { t } = useI18n();
 
@@ -55,6 +57,48 @@ useProjectStatus();
 // 确保 MotisPanel、TitleBar(Mascot) 等子组件共享同一份对话状态。
 const motisChat = useMotisChat();
 provide(MOTIS_CHAT_KEY, motisChat);
+
+/* ── 全局快捷键：保存文档 ─────────────────────────────────────────────── */
+// 主界面按 Ctrl/Cmd+S 保存当前文档。由全局 capture 监听统一接管：
+// 焦点在编辑器内外均生效，并拦截 WebView2 的默认行为（不再被“占用”）。
+// 卸载时仅注销命令（绑定保留）——离开主界面（设置页等）后 Ctrl+S 不再
+// 触发保存，但全局监听仍会消费该键位以阻止 WebView2 默认行为。
+const SAVE_DOCUMENT_COMMAND = 'save-document';
+
+/** 编辑器视图模式 → 快捷键映射（Mod+1/2/3）。 */
+const EDITOR_LAYOUT_SHORTCUTS: ReadonlyArray<readonly [EditorLayoutMode, string]> = [
+  ['source', 'Mod-1'],
+  ['split', 'Mod-2'],
+  ['preview', 'Mod-3'],
+];
+
+/** 视图模式命令 id：`editor-layout-{mode}`。 */
+function layoutCommandId(mode: EditorLayoutMode): string {
+  return `editor-layout-${mode}`;
+}
+
+onMounted(() => {
+  registerCommand(SAVE_DOCUMENT_COMMAND, () => {
+    void useFluenEditor().save();
+  });
+  bindShortcut('Mod-s', SAVE_DOCUMENT_COMMAND);
+
+  // 编辑器视图切换（Mod+1 仅源码 / Mod+2 双栏 / Mod+3 仅渲染）
+  for (const [mode, key] of EDITOR_LAYOUT_SHORTCUTS) {
+    registerCommand(layoutCommandId(mode), () => layout.setEditorLayout(mode));
+    bindShortcut(key, layoutCommandId(mode));
+  }
+});
+
+onBeforeUnmount(() => {
+  unregisterCommand(SAVE_DOCUMENT_COMMAND);
+  // Mod-s 绑定保留（拦截 WebView2 默认保存行为）；
+  // 视图切换的数字键无默认行为需拦截，离开主界面应解绑，避免静默吞键。
+  for (const [mode, key] of EDITOR_LAYOUT_SHORTCUTS) {
+    unbindShortcut(key, layoutCommandId(mode));
+    unregisterCommand(layoutCommandId(mode));
+  }
+});
 
 /* ── 拖拽调整面板宽度 ─────────────────────────────────────────────────── */
 /**
@@ -162,21 +206,30 @@ function handleProjectCreated(projectPath: string): void {
 }
 
 /* ── 项目打开后自动创建标签页 ─────────────────────────────────────────── */
+// 仅在“项目从无到有打开”时触发（hasProject false→true）。
+// 注意：不能监听 config —— editor_save_content 保存成功后会重新加载整个项目，
+// 使 config 引用变化。若监听 config，每次保存都会走到这里，
+// 而 setActiveActivity('outline') 在大纲已激活时会执行 toggle → 侧边栏被意外折叠。
 watch(
-  [hasProject, config],
-  ([opened, cfg]) => {
-    if (opened && cfg) {
+  hasProject,
+  (opened, wasOpened) => {
+    if (opened && !wasOpened && config.value) {
       // 创建或激活项目标签页
-      const tabId = `project-${cfg.title}`;
+      const tabId = `project-${config.value.title}`;
       layout.openTab({
         id: tabId,
-        title: cfg.title,
+        title: config.value.title,
         type: 'editor',
         icon: 'M4 4h12v16H4V4zm2 4h8m-8 4h8m-8 4h5M18 8v12a2 2 0 0 1-2 2',
       });
 
-      // 自动切换到大纲面板
-      layout.setActiveActivity('outline');
+      // 自动切换到大纲面板。已在大纲时改为“确保展开”，
+      // 避免 setActiveActivity 的 toggle 语义（点击已激活项=折叠）把侧边栏收起。
+      if (layout.activeActivity.value !== 'outline') {
+        layout.setActiveActivity('outline');
+      } else if (layout.functionPanelCollapsed.value) {
+        layout.setFunctionPanelCollapsed(false);
+      }
     }
   },
   { immediate: true },

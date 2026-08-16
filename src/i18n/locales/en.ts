@@ -229,10 +229,13 @@ export default {
     aiPanel: {
       agentName: 'Academic Assistant',
       history: 'Chat History',
-      emptyTitle: 'Start a Conversation',
-      emptyHint: 'Ask the AI assistant for writing suggestions, literature analysis, and more',
-      inputPlaceholder: 'Type a message... (Enter to send, Shift+Enter for newline)',
-      devPlaceholderReply: 'AI assistant feature is under development. Stay tuned.',
+      emptyTitle: 'Start Writing',
+      emptyHint: 'Ask the academic assistant to write content — it follows the Fluen markup spec, and writes need your confirmation',
+      inputPlaceholder: 'Describe your writing request... (Enter to send, Shift+Enter for newline)',
+      stop: 'Stop generating',
+      toolPaper: 'Read paper',
+      toolManuscript: 'Write manuscript',
+      toolProjectFile: 'Read/write files',
     },
     rightPanel: {
       motis: 'Motis',
@@ -269,6 +272,16 @@ export default {
         tool5: 'Casting a spell',
         tool6: 'Busy working',
       },
+      approval: {
+        title: 'File change needs confirmation',
+        desc: 'The agent wants to modify project files. It will only be written after you confirm:',
+        apply: 'Apply',
+        reject: 'Reject',
+        actionWrite: 'Write',
+        actionEdit: 'Replace',
+        actionAppend: 'Append',
+        actionUpdate: 'Update manuscript',
+      },
     },
     content: {
       welcome: {
@@ -286,6 +299,18 @@ export default {
       },
       editorPlaceholder: 'Editor area · {name}',
       newDocName: 'New Document.md',
+      view: {
+        label: 'Editor view',
+        split: 'Split',
+        source: 'Source',
+        preview: 'Preview',
+      },
+      toolbar: {
+        label: 'Editor toolbar',
+        bold: 'Bold',
+        italic: 'Italic',
+        heading: 'Heading',
+      },
     },
     status: {
       ready: 'Ready',

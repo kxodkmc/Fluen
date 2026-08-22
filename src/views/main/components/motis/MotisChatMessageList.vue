@@ -2,22 +2,26 @@
 /**
  * MotisChatMessageList — Motis 对话消息列表。
  *
- * 萌系圆润样式：
- *   - 用户消息：右对齐，brand-coral 背景
- *   - 助手消息：左对齐，canvas 背景 + hairline 边框
- *   - 思考消息：MotisThinkingIndicator
- *   - 工具调用：MotisToolCallBubble
+ * 布局参照「活动分组」风格：
+ *   - 用户消息：右对齐气泡
+ *   - 助手文本：左对齐 Markdown 气泡
+ *   - 连续的思考/工具调用：合并为可折叠时间线块（MotisActivityGroup）
  *   - 状态消息：居中提示
  *
  * 自动滚动到底部（watch messages 长度）。
- * 生成中且最后一条非流式文本时，追加思考指示器。
+ * 生成中且末尾无流式文本、无活动组时，追加尾部思考指示器。
  */
 import { ref, watch, nextTick, computed } from 'vue';
 import MarkdownIt from 'markdown-it';
 import type { ChatMessage } from '../../types';
 import { useI18n } from '../../../../i18n';
 import MotisThinkingIndicator from './MotisThinkingIndicator.vue';
-import MotisToolCallBubble from './MotisToolCallBubble.vue';
+import MotisActivityGroup from './MotisActivityGroup.vue';
+
+/** 渲染块 — 单条普通消息或一个活动分组。 */
+type RenderBlock =
+  | { type: 'msg'; key: string; msg: ChatMessage }
+  | { type: 'activity'; key: string; items: ChatMessage[] };
 
 const props = defineProps<{
   /** 消息列表。 */
@@ -77,13 +81,43 @@ watch(
 );
 
 /* ── 尾部思考指示器 ───────────────────────────────────────────────────── */
-/** 是否需要显示尾部思考指示器（生成中且最后一条非流式文本）。 */
+/** 是否需要显示尾部思考指示器（生成中且末尾无流式文本、无活动组）。 */
 const showTrailingThinking = computed(() => {
   if (!props.isGenerating) return false;
   const last = props.messages[props.messages.length - 1];
   if (!last) return true;
   // 最后一条是流式文本时不显示（文本正在输出）
-  return !(last.kind === 'text' && last.isStreaming);
+  if (last.kind === 'text' && last.isStreaming) return false;
+  // 末尾是思考/工具调用时由活动组自身展示进行中状态
+  if (last.kind === 'thinking' || last.kind === 'tool_call') return false;
+  return true;
+});
+
+/* ── 活动分组 ─────────────────────────────────────────────────────────── */
+/**
+ * 将消息折叠为渲染块：连续的 thinking / tool_call 合并为一个活动分组，
+ * 文本与状态消息保持单条渲染。分组的 key 取组内首条消息 id。
+ */
+const blocks = computed<RenderBlock[]>(() => {
+  const out: RenderBlock[] = [];
+  let activity: ChatMessage[] | null = null;
+  const flush = () => {
+    if (activity && activity.length > 0) {
+      out.push({ type: 'activity', key: activity[0].id, items: activity });
+    }
+    activity = null;
+  };
+  for (const msg of props.messages) {
+    if (msg.kind === 'thinking' || msg.kind === 'tool_call') {
+      if (activity === null) activity = [];
+      activity.push(msg);
+    } else {
+      flush();
+      out.push({ type: 'msg', key: msg.id, msg });
+    }
+  }
+  flush();
+  return out;
 });
 </script>
 
@@ -104,46 +138,51 @@ const showTrailingThinking = computed(() => {
 
     <!-- 消息列表 -->
     <template v-else>
-      <template v-for="msg in messages" :key="msg.id">
-        <!-- 文本消息 -->
-        <div
-          v-if="msg.kind === 'text'"
-          class="motis-msg"
-          :class="`motis-msg--${msg.role}`"
-        >
-          <div class="motis-msg__bubble">
-            <!-- 用户消息：纯文本；助手消息：Markdown 渲染 -->
-            <div v-if="msg.role === 'assistant'" class="motis-msg__markdown" v-html="renderMd(msg.content)" />
-            <template v-else>
-              <span class="motis-msg__text">{{ msg.content }}</span><span v-if="msg.isStreaming" class="motis-msg__cursor" />
-            </template>
-            <span v-if="msg.role === 'assistant' && msg.isStreaming" class="motis-msg__cursor motis-msg__cursor--after" />
-            <!-- 中断标记 -->
-            <span v-if="msg.interrupted" class="motis-msg__interrupted">
-              {{ t('main.motisPanel.interrupted') }}
-            </span>
+      <template v-for="(block, index) in blocks" :key="block.key">
+        <!-- 活动分组（连续思考/工具调用的时间线块） -->
+        <MotisActivityGroup
+          v-if="block.type === 'activity'"
+          :items="block.items"
+          :active="isGenerating && index === blocks.length - 1"
+        />
+
+        <!-- 单条消息 -->
+        <template v-else>
+          <!-- 文本消息 -->
+          <div
+            v-if="block.msg.kind === 'text'"
+            class="motis-msg"
+            :class="`motis-msg--${block.msg.role}`"
+          >
+            <div class="motis-msg__bubble">
+              <!-- 用户消息：纯文本；助手消息：Markdown 渲染 -->
+              <div
+                v-if="block.msg.role === 'assistant'"
+                class="motis-msg__markdown"
+                v-html="renderMd(block.msg.content)"
+              />
+              <template v-else>
+                <span class="motis-msg__text">{{ block.msg.content }}</span><span
+                  v-if="block.msg.isStreaming"
+                  class="motis-msg__cursor"
+                />
+              </template>
+              <span
+                v-if="block.msg.role === 'assistant' && block.msg.isStreaming"
+                class="motis-msg__cursor motis-msg__cursor--after"
+              />
+              <!-- 中断标记 -->
+              <span v-if="block.msg.interrupted" class="motis-msg__interrupted">
+                {{ t('main.motisPanel.interrupted') }}
+              </span>
+            </div>
           </div>
-        </div>
 
-        <!-- 思考消息 -->
-        <MotisThinkingIndicator
-          v-else-if="msg.kind === 'thinking'"
-          :content="msg.content"
-          :active="msg.isStreaming !== false"
-        />
-
-        <!-- 工具调用消息 -->
-        <MotisToolCallBubble
-          v-else-if="msg.kind === 'tool_call'"
-          :tool-name="msg.toolName"
-          :input="msg.toolInput"
-          :result="msg.toolResult"
-        />
-
-        <!-- 状态消息（错误/提示） -->
-        <div v-else-if="msg.kind === 'status'" class="motis-msg-list__status">
-          {{ msg.content }}
-        </div>
+          <!-- 状态消息（错误/提示） -->
+          <div v-else-if="block.msg.kind === 'status'" class="motis-msg-list__status">
+            {{ block.msg.content }}
+          </div>
+        </template>
       </template>
 
       <!-- 尾部思考指示器 -->

@@ -1,38 +1,24 @@
 <script setup lang="ts">
 /**
- * OutlinePanel — 文章大纲面板（Word 风格）。
+ * OutlinePanel — 文章大纲面板（壳）。
  *
- * 功能：
- *   - 展示 `main.md` 的 1-6 级标题树
- *   - 按层级差异化字号/字重（H1 最大最粗，H6 最小最细）
- *   - 节点支持折叠/展开（仅含子节点的节点显示折叠按钮）
- *   - 标题栏提供「全部折叠」「全部展开」「新建章节」操作
- *   - 点击标题跳转到编辑器对应位置
- *   - 节点 hover 显示 ✎（重命名）和 +（新建子标题）
- *   - 无项目时展示空状态占位
+ * 职责：标题栏（全部折叠 / 全部展开 / 新建章节）、空态与"新建章节"输入框。
+ * 大纲列表的渲染与结构操作交给 `OutlineTree` / `OutlineRow`，数据与折叠/编辑状态
+ * 由 `useOutline`（模块门面）统一提供。
  *
- * 数据来源：`useOutline` composable（单例），自动监听项目变化。
- * 树形渲染通过 `OutlineNodeItem` 递归组件实现，支持无限层级。
+ * 新建章节仍走后端（需生成 `sec-*.md`），外层加 dirty 守卫：编辑器脏时先保存再创建，
+ * 避免返回的 `main_md` 覆盖未保存缓冲。
  */
 import { ref, nextTick } from 'vue';
-import { useOutline } from '../../../composables/useOutline';
+import { useOutline } from '../../../composables/outline';
 import { useProject } from '../../../../../composables/useProject';
+import { useFluenEditor } from '../../editor/composables/useFluenEditor';
 import { useI18n } from '../../../../../i18n';
-import OutlineNodeItem from './OutlineNodeItem.vue';
-import type { OutlineNode } from '../../../composables/outlineParser';
+import OutlineTree from './OutlineTree.vue';
+import { CollapseAll, ExpandAll, Plus, ListIcon } from './icons';
 
 const { t } = useI18n();
-const {
-  outline,
-  hasOutline,
-  hasProject,
-  isSaving,
-  jumpTo,
-  renameNode,
-  insertChildHeading,
-  expandAll,
-  collapseAll,
-} = useOutline();
+const { outline, hasOutline, hasProject, isSaving, expandAll, collapseAll, jumpTo } = useOutline();
 const { createSection } = useProject();
 
 // ── 新建章节状态 ────────────────────────────────────────────────────
@@ -44,8 +30,6 @@ const _addSectionValue = ref('');
 /** 新建章节输入框引用。 */
 const _addSectionInputRef = ref<HTMLInputElement | null>(null);
 
-// ── 新建章节 ────────────────────────────────────────────────────────
-
 /** 显示新建章节输入框。 */
 async function showAddSection(): Promise<void> {
   _showAddSection.value = true;
@@ -54,30 +38,20 @@ async function showAddSection(): Promise<void> {
   _addSectionInputRef.value?.focus();
 }
 
-/** 确认新建章节。 */
+/** 确认新建章节：编辑器脏时先保存，成功后再创建，防止覆盖未保存内容。 */
 async function confirmAddSection(): Promise<void> {
   const trimmed = _addSectionValue.value.trim();
-  if (trimmed) {
-    await createSection(trimmed);
-  }
   _showAddSection.value = false;
+  if (!trimmed) return;
+
+  const editor = useFluenEditor();
+  if (editor.isDirty.value && !(await editor.save())) return;
+  await createSection(trimmed);
 }
 
 /** 取消新建章节。 */
 function cancelAddSection(): void {
   _showAddSection.value = false;
-}
-
-// ── 节点操作 ────────────────────────────────────────────────────────
-
-/** 处理节点重命名。 */
-async function handleRename(node: OutlineNode, newTitle: string): Promise<void> {
-  await renameNode(node, newTitle);
-}
-
-/** 处理新建子标题。 */
-async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
-  await insertChildHeading(node, title);
 }
 </script>
 
@@ -93,10 +67,7 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
           :title="t('main.sidebar.outline.collapseAll')"
           @click="collapseAll"
         >
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 8l7 7 7-7" />
-            <path d="M5 4h14" />
-          </svg>
+          <CollapseAll :size="14" />
         </button>
         <button
           v-if="hasOutline"
@@ -104,10 +75,7 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
           :title="t('main.sidebar.outline.expandAll')"
           @click="expandAll"
         >
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 16l7-7 7 7" />
-            <path d="M5 4h14" />
-          </svg>
+          <ExpandAll :size="14" />
         </button>
         <button
           class="outline-panel__add-btn"
@@ -116,9 +84,7 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
           :title="t('main.sidebar.outline.addSection')"
           @click="showAddSection"
         >
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
+          <Plus :size="14" :stroke-width="2.2" />
         </button>
       </div>
     </div>
@@ -138,25 +104,16 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
       />
     </div>
 
-    <!-- ── 大纲列表（递归渲染） ──────────────────────────────────────── -->
-    <ul v-if="hasOutline" class="outline-panel__body">
-      <OutlineNodeItem
-        v-for="node in outline"
-        :key="`${node.sectionId ?? ''}-${node.line}`"
-        :node="node"
-        @navigate="jumpTo"
-        @rename="handleRename"
-        @add-child="handleAddChild"
-      />
-    </ul>
+    <!-- ── 大纲列表（扁平渲染） ─────────────────────────────────────── -->
+    <div v-if="hasOutline" class="outline-panel__body">
+      <OutlineTree :headings="outline" @navigate="jumpTo" />
+    </div>
 
     <!-- ── 空状态 ────────────────────────────────────────────────────── -->
     <div v-else class="outline-panel__empty">
-      <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
-        <path d="M4 6h16M4 12h12M4 18h8" />
-      </svg>
+      <ListIcon :size="32" />
       <p class="outline-panel__empty-text">
-        {{ t('main.sidebar.outline.noProject') }}
+        {{ hasProject ? t('main.sidebar.outline.empty') : t('main.sidebar.outline.noProject') }}
       </p>
     </div>
   </div>
@@ -267,7 +224,6 @@ async function handleAddChild(node: OutlineNode, title: string): Promise<void> {
 .outline-panel__body {
   flex: 1;
   overflow-y: auto;
-  list-style: none;
   padding: 2px 6px 14px;
   margin: 0;
 }

@@ -142,11 +142,10 @@ function onDocChange(md: string): void {
         @open-article="$emit('open-article')"
       />
 
-      <!-- 文献阅读器 -->
+      <!-- 文献阅读器（关闭由标签页负责） -->
       <ReferenceReader
         v-else-if="activeTab?.type === 'reference' && activeTab.referenceId"
         :reference-id="activeTab.referenceId"
-        @close="$emit('close-tab', activeTab.id)"
       />
 
       <!-- 知识库条目阅读器 -->

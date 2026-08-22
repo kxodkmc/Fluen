@@ -48,6 +48,8 @@ export interface ReferenceEntry {
   source?: string | null;
   /** AI 摘要（预留）。 */
   ai_summary?: string | null;
+  /** 作者列表（AI 校正解析，未解析时为空/缺省）。 */
+  authors?: string[];
   /** 导入状态。 */
   status: ReferenceStatus;
   /** 失败原因（`status === 'failed'` 时有值）。 */

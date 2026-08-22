@@ -160,6 +160,7 @@ mod tests {
                 updated_at: None,
             }],
             default_reference_import_mode: crate::references::import_mode::ReferenceImportMode::Ocr,
+            reference_import_timeout_secs: 240,
         }
     }
 

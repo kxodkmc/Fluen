@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /**
- * MotisThinkingIndicator — Motis 思考指示器。
+ * MotisThinkingIndicator — Motis 尾部思考指示器（扁平行样式）。
  *
- * - `active=true`（思考进行中）：显示"思考中…"文字 + 点点点动画。
- * - `active=false`（思考已结束）：不再显示动画，改显示"已思考"，
+ * 与活动时间线行保持一致的紧凑布局：图标 + 文案 + 点点动画。
+ *   - `active=true`（思考进行中）：显示"思考中…"文字 + 点点点动画。
+ *   - `active=false`（思考已结束）：不再显示动画，改显示"已思考"，
  *   点击展开按钮可查看折叠的思考增量内容。
  * - 当 show_thinking_content 配置为 true 且传入 content 时，展示可折叠的思考内容。
  *
@@ -48,10 +49,28 @@ function toggleExpanded(): void {
 
 <template>
   <div class="motis-thinking">
-    <!-- 思考中动画（仅思考进行中显示） -->
-    <div v-if="isActive" class="motis-thinking__indicator">
-      <span class="motis-thinking__text">{{ t('main.motisPanel.thinking') }}</span>
-      <span class="motis-thinking__dots">
+    <!-- 扁平行：图标 + 文案 + 点点动画 -->
+    <div class="motis-thinking__row">
+      <span class="motis-thinking__icon">
+        <svg
+          viewBox="0 0 24 24"
+          width="11"
+          height="11"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path
+            d="M12 3l1.9 5.7a2 2 0 0 0 1.4 1.4L21 12l-5.7 1.9a2 2 0 0 0-1.4 1.4L12 21l-1.9-5.7a2 2 0 0 0-1.4-1.4L3 12l5.7-1.9a2 2 0 0 0 1.4-1.4L12 3Z"
+          />
+        </svg>
+      </span>
+      <span class="motis-thinking__text">{{
+        isActive ? t('main.motisPanel.thinking') : t('main.motisPanel.thinkingDone')
+      }}</span>
+      <span v-if="isActive" class="motis-thinking__dots">
         <span class="motis-thinking__dot" />
         <span class="motis-thinking__dot" />
         <span class="motis-thinking__dot" />
@@ -64,34 +83,15 @@ function toggleExpanded(): void {
       >
         <svg
           viewBox="0 0 24 24"
-          width="12"
-          height="12"
+          width="10"
+          height="10"
           fill="none"
           stroke="currentColor"
           stroke-width="2"
           stroke-linecap="round"
           :class="{ 'motis-thinking__chevron--expanded': expanded }"
         >
-          <path d="m6 9 6 6 6-6" />
-        </svg>
-      </button>
-    </div>
-
-    <!-- 思考已结束：仅保留展开按钮与折叠内容，不显示动画 -->
-    <div v-else-if="showThinkingContent && content" class="motis-thinking__indicator motis-thinking__indicator--done">
-      <span class="motis-thinking__text">{{ t('main.motisPanel.thinkingDone') }}</span>
-      <button class="motis-thinking__toggle" @click="toggleExpanded">
-        <svg
-          viewBox="0 0 24 24"
-          width="12"
-          height="12"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          :class="{ 'motis-thinking__chevron--expanded': expanded }"
-        >
-          <path d="m6 9 6 6 6-6" />
+          <path d="m9 6 6 6-6 6" />
         </svg>
       </button>
     </div>
@@ -108,31 +108,32 @@ function toggleExpanded(): void {
   align-self: flex-start;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  max-width: 90%;
+  max-width: 94%;
+  font-family: var(--fluen-font-sans);
 }
 
-.motis-thinking__indicator {
+.motis-thinking__row {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 14px;
-  border-radius: 14px;
-  border-bottom-left-radius: 4px;
-  background: var(--fluen-canvas);
-  border: 1px solid var(--fluen-hairline);
-  font-family: var(--fluen-font-sans);
-  font-size: 12px;
-  color: var(--fluen-slate);
+  min-height: 22px;
+  padding: 2px 0;
 }
 
-/* 思考已结束：弱化样式，不再暗示进行中 */
-.motis-thinking__indicator--done {
-  background: transparent;
-  border: none;
-  padding: 2px 6px;
+.motis-thinking__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 4px;
   color: var(--fluen-stone);
-  gap: 4px;
+}
+
+.motis-thinking__text {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--fluen-slate);
 }
 
 .motis-thinking__dots {
@@ -141,8 +142,8 @@ function toggleExpanded(): void {
 }
 
 .motis-thinking__dot {
-  width: 5px;
-  height: 5px;
+  width: 4px;
+  height: 4px;
   border-radius: 50%;
   background: var(--fluen-stone);
   animation: motis-thinking-bounce 1.4s infinite ease-in-out;
@@ -157,8 +158,16 @@ function toggleExpanded(): void {
 }
 
 @keyframes motis-thinking-bounce {
-  0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
-  30% { opacity: 1; transform: scale(1); }
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  30% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .motis-thinking__toggle {
@@ -167,7 +176,6 @@ function toggleExpanded(): void {
   justify-content: center;
   width: 18px;
   height: 18px;
-  margin-left: 2px;
   border: none;
   background: transparent;
   color: var(--fluen-stone);
@@ -181,19 +189,19 @@ function toggleExpanded(): void {
 }
 
 .motis-thinking__toggle svg {
-  transition: transform 0.2s ease;
+  transition: transform 0.15s ease;
 }
 
 .motis-thinking__chevron--expanded {
-  transform: rotate(180deg);
+  transform: rotate(90deg);
 }
 
 .motis-thinking__content {
-  padding: 8px 12px;
-  border-radius: 14px;
+  margin: 2px 0 4px 23px;
+  padding: 6px 10px;
+  border-radius: 8px;
   background: var(--fluen-surface);
   border: 1px solid var(--fluen-hairline);
-  font-family: var(--fluen-font-sans);
   font-size: 12px;
   line-height: 1.6;
   color: var(--fluen-slate);

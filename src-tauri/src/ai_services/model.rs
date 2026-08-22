@@ -227,8 +227,14 @@ pub struct AiServicesConfig {
     #[serde(default)]
     pub providers: Vec<AiServiceProvider>,
     /// 文献导入默认模式（UI 记忆用户选择，下次导入默认使用此模式）。
-    #[serde(default)]
+    ///
+    /// serde 回退到产品默认「OCR + AI 校正」，与枚举自身的 `Default`（供旧索引
+    /// 条目回退，保持纯 OCR）是两套语义，不可混用。
+    #[serde(default = "default_reference_import_mode")]
     pub default_reference_import_mode: ReferenceImportMode,
+    /// 文献导入时 AI 校正的最大响应时间（秒）。
+    #[serde(default = "default_reference_import_timeout")]
+    pub reference_import_timeout_secs: u64,
 }
 
 impl Default for AiServicesConfig {
@@ -237,7 +243,8 @@ impl Default for AiServicesConfig {
             version: default_version(),
             active_providers: HashMap::new(),
             providers: Vec::new(),
-            default_reference_import_mode: ReferenceImportMode::Ocr,
+            default_reference_import_mode: default_reference_import_mode(),
+            reference_import_timeout_secs: default_reference_import_timeout(),
         }
     }
 }
@@ -288,6 +295,19 @@ fn default_true() -> bool {
 
 fn default_version() -> String {
     "1.0.0".to_string()
+}
+
+/// 文献导入 AI 校正默认超时（秒）——4 分钟。
+fn default_reference_import_timeout() -> u64 {
+    240
+}
+
+/// 文献导入产品默认模式——OCR + AI 校正（质量优先，图片保留 + 格式校正 + 作者解析）。
+///
+/// 注意：枚举 [`ReferenceImportMode`] 自身的 `Default` 仍为纯 OCR，
+/// 那是供旧版索引条目（`ReferenceEntry`）缺字段时回退用的，二者语义不同。
+fn default_reference_import_mode() -> ReferenceImportMode {
+    ReferenceImportMode::OcrWithAiCorrection
 }
 
 // ---------------------------------------------------------------------------
@@ -416,11 +436,21 @@ mod tests {
     }
 
     #[test]
-    fn default_reference_import_mode_is_ocr() {
+    fn default_reference_import_mode_is_ocr_with_ai() {
         assert_eq!(
             AiServicesConfig::default().default_reference_import_mode,
+            crate::references::import_mode::ReferenceImportMode::OcrWithAiCorrection
+        );
+        // 枚举自身的 Default 保持纯 OCR（供旧索引条目回退），二者不可混淆
+        assert_eq!(
+            crate::references::import_mode::ReferenceImportMode::default(),
             crate::references::import_mode::ReferenceImportMode::Ocr
         );
+    }
+
+    #[test]
+    fn default_reference_import_timeout_is_240() {
+        assert_eq!(AiServicesConfig::default().reference_import_timeout_secs, 240);
     }
 
     #[test]
@@ -432,9 +462,12 @@ mod tests {
             "providers": []
         }"#;
         let parsed: AiServicesConfig = serde_json::from_str(json).unwrap();
+        // 旧配置缺字段时回退到产品默认「OCR + AI 校正」
         assert_eq!(
             parsed.default_reference_import_mode,
-            crate::references::import_mode::ReferenceImportMode::Ocr
+            crate::references::import_mode::ReferenceImportMode::OcrWithAiCorrection
         );
+        // 旧版配置无超时字段时回退到默认 240
+        assert_eq!(parsed.reference_import_timeout_secs, 240);
     }
 }

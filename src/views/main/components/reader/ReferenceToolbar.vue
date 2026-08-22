@@ -5,51 +5,23 @@
       <span class="toolbar-title" :title="title">{{ title }}</span>
     </div>
 
-    <!-- 右侧：控制按钮 -->
+    <!-- 右侧：控制 -->
     <div class="toolbar-section toolbar-controls">
-      <!-- 主题切换 -->
-      <button
-        class="toolbar-btn"
-        :class="{ active: options.themeMode === 'dark' }"
-        :title="t('reader.toolbar.themeToggle')"
-        @click="emit('theme-mode-change', options.themeMode === 'dark' ? 'light' : 'dark')"
-      >
-        <span class="btn-icon">{{ options.themeMode === 'dark' ? '☀' : '☾' }}</span>
-      </button>
-
       <!-- 字号 -->
-      <div class="control-group">
-        <span class="control-label">{{ t('reader.toolbar.fontSize') }}</span>
-        <div class="btn-group">
-          <button
-            v-for="opt in fontSizeOptions"
-            :key="opt.value"
-            class="toolbar-btn toolbar-btn-sm"
-            :class="{ active: options.fontSize === opt.value }"
-            :title="opt.label"
-            @click="emit('font-size-change', opt.value)"
-          >
-            {{ opt.icon }}
-          </button>
-        </div>
-      </div>
+      <ToolbarMenu
+        :label="t('reader.toolbar.fontSize')"
+        :options="fontSizeOptions"
+        :model-value="options.fontSize"
+        @update:model-value="emit('font-size-change', $event)"
+      />
 
-      <!-- 行高 -->
-      <div class="control-group">
-        <span class="control-label">{{ t('reader.toolbar.lineHeight') }}</span>
-        <div class="btn-group">
-          <button
-            v-for="opt in lineHeightOptions"
-            :key="opt.value"
-            class="toolbar-btn toolbar-btn-sm"
-            :class="{ active: options.lineHeight === opt.value }"
-            :title="opt.label"
-            @click="emit('line-height-change', opt.value)"
-          >
-            {{ opt.icon }}
-          </button>
-        </div>
-      </div>
+      <!-- 行距 -->
+      <ToolbarMenu
+        :label="t('reader.toolbar.lineHeight')"
+        :options="lineHeightOptions"
+        :model-value="options.lineHeight"
+        @update:model-value="emit('line-height-change', $event)"
+      />
 
       <!-- 标记 -->
       <button
@@ -58,16 +30,7 @@
         :title="t('reader.toolbar.marks')"
         @click="emit('marks-toggle')"
       >
-        <span class="btn-icon">✎</span>
-      </button>
-
-      <!-- 关闭 -->
-      <button
-        class="toolbar-btn"
-        :title="t('reader.toolbar.close')"
-        @click="emit('close')"
-      >
-        <span class="btn-icon">×</span>
+        <Pencil :size="14" />
       </button>
     </div>
   </div>
@@ -77,7 +40,8 @@
 /**
  * ReferenceToolbar —— 文献阅读器工具栏。
  *
- * 提供主题切换、字号/行高调整、关闭等控制。
+ * 左侧文献标题，右侧字号/行距下拉与标记开关。
+ * 深浅色跟随应用主题，不提供切换；关闭由标签页负责。
  * 所有操作通过 emit 上抛，不直接修改状态。
  */
 
@@ -87,8 +51,9 @@ import type {
   ReaderFontSize,
   ReaderLineHeight,
   ReaderOptions,
-  ReaderThemeMode,
 } from '../../../../types/reader';
+import { Pencil } from '../functionpanel/panels/icons';
+import ToolbarMenu from './ToolbarMenu.vue';
 
 defineProps<{
   /** 文献标题。 */
@@ -100,26 +65,24 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  'theme-mode-change': [mode: ReaderThemeMode];
   'font-size-change': [size: ReaderFontSize];
   'line-height-change': [lh: ReaderLineHeight];
   'marks-toggle': [];
-  close: [];
 }>();
 
 const { t } = useI18n();
 
 const fontSizeOptions = computed(() => [
-  { value: 14 as ReaderFontSize, icon: 'S', label: t('reader.toolbar.fontSizeSmall') },
-  { value: 16 as ReaderFontSize, icon: 'M', label: t('reader.toolbar.fontSizeMedium') },
-  { value: 18 as ReaderFontSize, icon: 'L', label: t('reader.toolbar.fontSizeLarge') },
-  { value: 20 as ReaderFontSize, icon: 'XL', label: t('reader.toolbar.fontSizeXLarge') },
+  { value: 14 as ReaderFontSize, label: t('reader.toolbar.fontSizeSmall') },
+  { value: 16 as ReaderFontSize, label: t('reader.toolbar.fontSizeMedium') },
+  { value: 18 as ReaderFontSize, label: t('reader.toolbar.fontSizeLarge') },
+  { value: 20 as ReaderFontSize, label: t('reader.toolbar.fontSizeXLarge') },
 ]);
 
 const lineHeightOptions = computed(() => [
-  { value: 1.5 as ReaderLineHeight, icon: '☱', label: t('reader.toolbar.lineHeightCompact') },
-  { value: 1.7 as ReaderLineHeight, icon: '☲', label: t('reader.toolbar.lineHeightComfortable') },
-  { value: 1.9 as ReaderLineHeight, icon: '☳', label: t('reader.toolbar.lineHeightLoose') },
+  { value: 1.5 as ReaderLineHeight, label: t('reader.toolbar.lineHeightCompact') },
+  { value: 1.7 as ReaderLineHeight, label: t('reader.toolbar.lineHeightComfortable') },
+  { value: 1.9 as ReaderLineHeight, label: t('reader.toolbar.lineHeightLoose') },
 ]);
 </script>
 
@@ -129,17 +92,17 @@ const lineHeightOptions = computed(() => [
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  height: 48px;
-  padding: 0 16px;
-  background: var(--app-bg, #ffffff);
-  border-bottom: 1px solid var(--app-border, #e5e7eb);
+  height: 44px;
+  padding: 0 12px;
+  background: var(--fluen-canvas);
+  border-bottom: 1px solid var(--fluen-hairline);
   flex-shrink: 0;
 }
 
 .toolbar-section {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .toolbar-title-section {
@@ -148,9 +111,9 @@ const lineHeightOptions = computed(() => [
 }
 
 .toolbar-title {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  color: var(--app-text, #1a1a2e);
+  color: var(--fluen-ink);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -160,58 +123,27 @@ const lineHeightOptions = computed(() => [
   flex-shrink: 0;
 }
 
-.control-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.control-label {
-  font-size: 11px;
-  color: var(--app-text-muted, #6b7280);
-  white-space: nowrap;
-}
-
-.btn-group {
-  display: flex;
-  gap: 2px;
-}
-
+/* 标记开关：幽灵按钮，激活时仅文字变强调色 */
 .toolbar-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 32px;
-  height: 32px;
-  padding: 0 8px;
-  border: 1px solid var(--app-border, #e5e7eb);
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
   border-radius: 6px;
-  background: var(--app-bg, #ffffff);
-  color: var(--app-text-muted, #6b7280);
-  font-size: 13px;
+  color: var(--fluen-stone);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: color 0.14s ease;
 }
 
 .toolbar-btn:hover {
-  border-color: var(--app-primary, #2563eb);
-  color: var(--app-primary, #2563eb);
+  color: var(--fluen-ink);
 }
 
 .toolbar-btn.active {
-  background: var(--app-primary, #2563eb);
-  border-color: var(--app-primary, #2563eb);
-  color: #ffffff;
-}
-
-.toolbar-btn-sm {
-  min-width: 28px;
-  height: 28px;
-  font-size: 12px;
-}
-
-.btn-icon {
-  font-size: 16px;
-  line-height: 1;
+  color: var(--fluen-accent);
 }
 </style>

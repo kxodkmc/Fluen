@@ -18,12 +18,12 @@
  *
  * 扩展方式：在 constants.ts 中添加新的 section 注册项即可。
  */
-import { ref, computed, provide, onMounted, onUnmounted } from 'vue';
+import { ref, computed, reactive, provide, onMounted, onUnmounted } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useI18n } from '../../i18n';
 import { SETTINGS_SECTIONS, DEFAULT_SETTINGS_SECTION } from './constants';
 import { SETTINGS_NAVIGATE_KEY } from './types';
-import type { SettingsSectionId } from './types';
+import type { SettingsSection, SettingsSectionId } from './types';
 
 defineEmits<{
   /** 返回主界面。 */
@@ -35,12 +35,56 @@ const { t } = useI18n();
 /* ── 激活分区 ───────────────────────────────────────────────────────── */
 const activeSectionId = ref(DEFAULT_SETTINGS_SECTION);
 
-const activeSection = computed(() =>
-  SETTINGS_SECTIONS.find((s) => s.id === activeSectionId.value) ?? SETTINGS_SECTIONS[0],
+/** 已展开的分组分区 ID 集合。 */
+const expandedGroups = reactive(new Set<string>());
+
+/** 递归查找分区（含分组子项）。 */
+function findSection(id: string): SettingsSection | null {
+  for (const s of SETTINGS_SECTIONS) {
+    if (s.id === id) return s;
+    const child = s.children?.find((c) => c.id === id);
+    if (child) return child;
+  }
+  return null;
+}
+
+/** 返回包含指定子分区的父分组。 */
+function parentGroupOf(id: string): SettingsSection | null {
+  return SETTINGS_SECTIONS.find((s) => s.children?.some((c) => c.id === id)) ?? null;
+}
+
+const activeSection = computed(
+  () => findSection(activeSectionId.value) ?? SETTINGS_SECTIONS[0],
 );
+
+function isGroupOpen(section: SettingsSection): boolean {
+  return expandedGroups.has(section.id);
+}
+
+/** 展开 / 折叠分组。展开时若未激活其子项则默认选中第一个。 */
+function toggleGroup(section: SettingsSection): void {
+  if (isGroupOpen(section)) {
+    expandedGroups.delete(section.id);
+  } else {
+    expandedGroups.add(section.id);
+    const activeInside = section.children?.some((c) => c.id === activeSectionId.value);
+    if (!activeInside && section.children?.length) {
+      activeSectionId.value = section.children[0].id;
+    }
+  }
+}
+
+/** 选中分组子分区（自动展开父分组）。 */
+function selectChild(child: SettingsSection): void {
+  const parent = parentGroupOf(child.id);
+  if (parent) expandedGroups.add(parent.id);
+  activeSectionId.value = child.id;
+}
 
 /* ── 分区导航（提供给子分区组件使用） ───────────────────────────────── */
 function navigateToSection(id: SettingsSectionId): void {
+  const parent = parentGroupOf(id);
+  if (parent) expandedGroups.add(parent.id);
   activeSectionId.value = id;
 }
 provide(SETTINGS_NAVIGATE_KEY, navigateToSection);
@@ -116,27 +160,78 @@ function handleClose(): void {
     <div class="settings-body">
       <!-- 侧边栏导航 -->
       <nav class="settings-sidebar">
-        <button
-          v-for="section in SETTINGS_SECTIONS"
-          :key="section.id"
-          class="settings-sidebar__item"
-          :class="{ 'settings-sidebar__item--active': activeSectionId === section.id }"
-          @click="activeSectionId = section.id"
-        >
-          <svg
-            class="settings-sidebar__icon"
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            v-html="section.icon"
-          />
-          <span class="settings-sidebar__label">{{ t(section.labelKey) }}</span>
-        </button>
+        <template v-for="section in SETTINGS_SECTIONS" :key="section.id">
+          <!-- 分组（可折叠） -->
+          <div v-if="section.children?.length" class="settings-sidebar__group">
+            <button
+              class="settings-sidebar__item settings-sidebar__group-toggle"
+              @click="toggleGroup(section)"
+            >
+              <svg
+                class="settings-sidebar__icon"
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                v-html="section.icon"
+              />
+              <span class="settings-sidebar__label">{{ t(section.labelKey) }}</span>
+              <svg
+                class="settings-sidebar__chevron"
+                :class="{ 'settings-sidebar__chevron--open': isGroupOpen(section) }"
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </button>
+            <Transition name="nav-expand">
+              <div v-if="isGroupOpen(section)" class="settings-sidebar__children">
+                <button
+                  v-for="child in section.children"
+                  :key="child.id"
+                  class="settings-sidebar__item settings-sidebar__child"
+                  :class="{ 'settings-sidebar__item--active': activeSectionId === child.id }"
+                  @click="selectChild(child)"
+                >
+                  <span class="settings-sidebar__label">{{ t(child.labelKey) }}</span>
+                </button>
+              </div>
+            </Transition>
+          </div>
+
+          <!-- 普通分区 -->
+          <button
+            v-else
+            class="settings-sidebar__item"
+            :class="{ 'settings-sidebar__item--active': activeSectionId === section.id }"
+            @click="activeSectionId = section.id"
+          >
+            <svg
+              class="settings-sidebar__icon"
+              viewBox="0 0 24 24"
+              width="18"
+              height="18"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              v-html="section.icon"
+            />
+            <span class="settings-sidebar__label">{{ t(section.labelKey) }}</span>
+          </button>
+        </template>
       </nav>
 
       <!-- 内容区 -->
@@ -294,12 +389,83 @@ function handleClose(): void {
   color: var(--fluen-accent);
 }
 
+/* ── 分组 ───────────────────────────────────────────────────────────── */
+.settings-sidebar__group {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 分组标题（父项）：加粗、更深色，与普通分区/子项区分 */
+.settings-sidebar__group-toggle {
+  justify-content: flex-start;
+  font-weight: 500;
+  color: var(--fluen-ink);
+}
+
+.settings-sidebar__chevron {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--fluen-slate);
+  transition: transform 0.2s ease;
+}
+
+.settings-sidebar__chevron--open {
+  transform: rotate(180deg);
+}
+
+/* 子项容器：明确缩进 + 左侧引导线，直观体现层级嵌套 */
+.settings-sidebar__children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: 13px;
+  padding-left: 12px;
+  border-left: 1px solid var(--fluen-hairline);
+  border-left-color: color-mix(in srgb, var(--fluen-stone) 40%, transparent);
+}
+
+/* 子项：更浅文字色 + 更小字号，进一步弱化次要层级 */
+.settings-sidebar__child {
+  font-size: 0.78rem;
+  padding: 7px 10px;
+  color: var(--fluen-steel);
+}
+
+.settings-sidebar__child:hover {
+  color: var(--fluen-ink);
+}
+
+.settings-sidebar__item--active.settings-sidebar__child {
+  color: var(--fluen-accent);
+  background: var(--fluen-info-bg);
+  font-weight: 500;
+  box-shadow: none;
+}
+
 /* ── 内容区 ─────────────────────────────────────────────────────────── */
 .settings-content {
   flex: 1;
   padding: 32px 40px;
   overflow-y: auto;
   background: var(--fluen-canvas);
+}
+
+/* ── 分组展开动画 ───────────────────────────────────────────────────── */
+.nav-expand-enter-active,
+.nav-expand-leave-active {
+  transition: opacity 0.2s ease, max-height 0.2s ease;
+  overflow: hidden;
+}
+
+.nav-expand-enter-from,
+.nav-expand-leave-to {
+  opacity: 0;
+  max-height: 0;
+}
+
+.nav-expand-enter-to,
+.nav-expand-leave-from {
+  max-height: 200px;
 }
 
 /* ── 响应式：窄屏 ───────────────────────────────────────────────────── */

@@ -25,8 +25,9 @@
  * iframe 提供独立浏览上下文，彻底隔离样式污染。
  */
 
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { ReaderOptions } from '../../../../types/reader';
+import { useTheme } from '../../../../theme';
 import { buildReaderCss } from './readerTheme';
 import {
   buildMarksOverlayScript,
@@ -54,7 +55,7 @@ interface SelectionCreatePayload {
 const props = defineProps<{
   /** 渲染后的 HTML 片段（不含 html/head/body 包裹）。 */
   html: string;
-  /** 阅读器选项（主题/字号/行高）。 */
+  /** 阅读器选项（字号/行高）。 */
   options: ReaderOptions;
   /** iframe title（无障碍标签）。 */
   title?: string;
@@ -69,6 +70,10 @@ const emit = defineEmits<{
 const iframeRef = ref<HTMLIFrameElement | null>(null);
 let iframeReady = false;
 let htmlDebounce: ReturnType<typeof setTimeout> | null = null;
+
+// 深色状态跟随应用主题（useTheme 全局单例），阅读器不单独切换
+const { currentMode } = useTheme();
+const isDark = computed(() => currentMode.value === 'dark');
 
 // marks 状态：iframe 是否就绪 + 待刷新缓冲 + 最近一次下发的 marks
 let marksReady = false;
@@ -125,7 +130,7 @@ window.addEventListener('mousemove', onMove, { passive: true });
 
 /** 构建完整 HTML 文档（含 CSS + body + MarksOverlay + mousemove 上报脚本）。 */
 function buildDocument(html: string, options: ReaderOptions): string {
-  const css = buildReaderCss(options);
+  const css = buildReaderCss(options, isDark.value);
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -188,7 +193,7 @@ function updateCss(options: ReaderOptions): void {
   if (!doc) return;
   const style = doc.getElementById('reader-style');
   if (style) {
-    style.textContent = buildReaderCss(options);
+    style.textContent = buildReaderCss(options, isDark.value);
   } else {
     // iframe 尚未初始化完成，回退到整体重写
     writeDocument(props.html, options);
@@ -268,6 +273,11 @@ watch(
   },
   { deep: true },
 );
+
+// 应用主题切换：仅更新 CSS（深浅色跟随系统）
+watch(isDark, () => {
+  updateCss(props.options);
+});
 
 // 暴露给父组件的 marks 操作接口
 defineExpose({

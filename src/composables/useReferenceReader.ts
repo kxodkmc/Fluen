@@ -25,7 +25,6 @@ import {
   type ReaderFontSize,
   type ReaderLineHeight,
   type ReaderOptions,
-  type ReaderThemeMode,
 } from '../types/reader';
 import { useProject } from './useProject';
 
@@ -129,10 +128,6 @@ export function useReferenceReader() {
 
   // ── 主题选项 ──
 
-  function setThemeMode(mode: ReaderThemeMode): void {
-    _state.options.themeMode = mode;
-  }
-
   function setFontSize(size: ReaderFontSize): void {
     _state.options.fontSize = size;
   }
@@ -145,7 +140,6 @@ export function useReferenceReader() {
     state: readonly(_state),
     loadReference,
     clear,
-    setThemeMode,
     setFontSize,
     setLineHeight,
   };

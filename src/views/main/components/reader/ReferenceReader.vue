@@ -18,11 +18,9 @@
         :title="state.content.meta.title"
         :options="state.options"
         :marks-active="showMarksPanel"
-        @theme-mode-change="setThemeMode"
         @font-size-change="setFontSize"
         @line-height-change="setLineHeight"
         @marks-toggle="toggleMarksPanel"
-        @close="emit('close')"
       />
       <div class="reader-body">
         <ReferenceContent
@@ -102,12 +100,8 @@ const props = defineProps<{
   referenceId: string;
 }>();
 
-const emit = defineEmits<{
-  close: [];
-}>();
-
 const { t } = useI18n();
-const { state, loadReference, clear, setThemeMode, setFontSize, setLineHeight } =
+const { state, loadReference, clear, setFontSize, setLineHeight } =
   useReferenceReader();
 const { state: marksState, loadMarks, createMark, clear: marksClear } =
   useReferenceMarks();

@@ -1,8 +1,8 @@
 /**
  * 阅读器主题 CSS 生成器。
  *
- * 根据 ReaderOptions 生成完整 CSS，注入到 iframe 的 <style> 中。
- * 深色/浅色模式通过 CSS 变量切换，遵循 DESIGN.md 设计令牌。
+ * 根据阅读器选项与当前深色状态生成完整 CSS，注入到 iframe 的 <style> 中。
+ * 深色/浅色跟随应用主题（useTheme），不单独切换。
  *
  * @module reader/readerTheme
  */
@@ -12,11 +12,11 @@ import type { ReaderOptions } from '../../../../types/reader';
 /**
  * 生成阅读器完整 CSS。
  *
- * @param options 主题模式、字号、行高
+ * @param options 字号、行高
+ * @param isDark 是否深色（跟随应用主题 `useTheme().currentMode`）
  * @returns 完整 CSS 字符串（含 :root 变量 + .fluen-reader 正文样式）
  */
-export function buildReaderCss(options: ReaderOptions): string {
-  const isDark = options.themeMode === 'dark';
+export function buildReaderCss(options: ReaderOptions, isDark: boolean): string {
   const palette = isDark ? DARK_PALETTE : LIGHT_PALETTE;
 
   return `

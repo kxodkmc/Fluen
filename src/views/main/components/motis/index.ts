@@ -12,8 +12,8 @@
  *   MotisPanel
  *   ├── MotisChatHeader
  *   ├── MotisChatMessageList
- *   │   ├── MotisThinkingIndicator
- *   │   └── MotisToolCallBubble
+ *   │   ├── MotisActivityGroup（连续思考/工具调用的可折叠时间线）
+ *   │   └── MotisThinkingIndicator（尾部思考指示器）
  *   └── MotisChatInput
  */
 
@@ -21,6 +21,6 @@ export { default as MotisPanel } from './MotisPanel.vue';
 export { default as MotisChatHeader } from './MotisChatHeader.vue';
 export { default as MotisChatMessageList } from './MotisChatMessageList.vue';
 export { default as MotisChatInput } from './MotisChatInput.vue';
+export { default as MotisActivityGroup } from './MotisActivityGroup.vue';
 export { default as MotisThinkingIndicator } from './MotisThinkingIndicator.vue';
-export { default as MotisToolCallBubble } from './MotisToolCallBubble.vue';
 export { MOTIS_CHAT_KEY } from './symbols';

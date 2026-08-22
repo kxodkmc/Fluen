@@ -77,9 +77,14 @@ export function useAiServicesSettings() {
     config.value?.active_providers?.ocr ?? null,
   );
 
-  /** 文献导入默认模式（默认纯 OCR）。 */
+  /** 文献导入默认模式（默认「OCR + AI 校正」）。 */
   const importMode = computed<ReferenceImportMode>(
-    () => config.value?.default_reference_import_mode ?? 'ocr',
+    () => config.value?.default_reference_import_mode ?? 'ocr_with_ai_correction',
+  );
+
+  /** 文献导入 AI 校正最大响应时间（秒，默认 240）。 */
+  const referenceImportTimeoutSecs = computed<number>(
+    () => config.value?.reference_import_timeout_secs ?? 240,
   );
 
   /** 当前选中的提供商对象。 */
@@ -222,6 +227,15 @@ export function useAiServicesSettings() {
     await persist();
   }
 
+  /** 设置文献导入 AI 校正最大响应时间（秒）。 */
+  async function setReferenceImportTimeoutSecs(secs: number): Promise<void> {
+    if (!config.value) return;
+    // 防止非法值（负数 / 非有限）落盘，最低 1 秒
+    config.value.reference_import_timeout_secs =
+      Number.isFinite(secs) && secs >= 1 ? Math.floor(secs) : 240;
+    await persist();
+  }
+
   /* ── 持久化 ──────────────────────────────────────────────────────── */
 
   async function persist(): Promise<void> {
@@ -246,6 +260,7 @@ export function useAiServicesSettings() {
     ocrProviders,
     activeOcrProviderId,
     importMode,
+    referenceImportTimeoutSecs,
     selectedProvider,
     selectedProviderId,
     isLoading,
@@ -261,6 +276,7 @@ export function useAiServicesSettings() {
     setActiveOcrProvider,
     setActiveModel,
     setImportMode,
+    setReferenceImportTimeoutSecs,
     getPaddleOcrConfig,
   };
 }

@@ -43,6 +43,9 @@ pub enum ReferenceImportMode {
     AiOnly,
 }
 
+/// 枚举默认值保持纯 OCR：仅供旧版索引条目（`ReferenceEntry`）缺字段时回退，
+/// 避免把历史上按纯 OCR 导入的文献错误标注为其他模式。
+/// 新导入的产品默认「OCR + AI 校正」由 AI 服务配置的 serde 默认函数提供。
 impl Default for ReferenceImportMode {
     fn default() -> Self {
         Self::Ocr

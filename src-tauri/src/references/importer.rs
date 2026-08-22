@@ -99,7 +99,12 @@ impl ReferenceImporter {
         };
 
         let ai_corrector = if mode.requires_ai() {
-            Some(AiCorrector::from_llm_config(llm_config)?)
+            // 使用用户可配置的「AI 最大响应时间」（秒）作为 LLM 请求超时
+            let timeout_secs = ai_config.reference_import_timeout_secs;
+            Some(AiCorrector::from_llm_config_with_timeout(
+                llm_config,
+                timeout_secs,
+            )?)
         } else {
             None
         };
@@ -261,9 +266,18 @@ impl ReferenceImporter {
         }
 
         // Phase 5: 完成收尾——提取标题与作者，更新索引
-        let title = extract_title(&final_md, &entry.original_filename);
-        let (frontmatter, _) = ReferenceFrontmatter::split_from_markdown(&final_md);
+        // 先剥离 AI 可能给整篇加的 ```markdown 围栏，再解析 frontmatter
+        let unwrapped = crate::references::frontmatter::strip_enclosing_fence(&final_md);
+        let title = extract_title(&unwrapped, &entry.original_filename);
+        let (frontmatter, body) = ReferenceFrontmatter::split_from_markdown(&unwrapped);
         let authors = frontmatter.authors_for_index();
+
+        // 归一化落盘：AI 可能用 ```yaml / ```markdown 代码块包裹，这里以标准 `---` 形式重写，
+        // 既保证 frontmatter 可被再次解析，也不让包裹代码块以源码形式展示在正文里。
+        let normalized_md = frontmatter.prepend_to_body(body);
+        if normalized_md != final_md {
+            write_markdown_file(&md_abs, &normalized_md)?;
+        }
 
         let final_entry = ReferenceEntry {
             title,

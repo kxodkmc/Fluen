@@ -56,23 +56,43 @@ impl ReferenceFrontmatter {
 
     /// 从 Markdown 文本解析 frontmatter。
     ///
-    /// 若文本不以 `---\n` 开头或无闭合 `---`，返回空 frontmatter（正文即全部文本）。
+    /// 兼容两种来源：
+    /// - 标准：文本以 `---\n` 开头（内部为 YAML）
+    /// - AI 输出：文本以 ` ```yaml ` / ` ``` ` 代码块围栏开头，内部再包一层 `---` frontmatter
+    ///
+    /// 若均无法识别，返回空 frontmatter（正文即全部文本）。
     ///
     /// 返回 `(frontmatter, body)`：`body` 为去除 frontmatter 后的正文。
     pub fn split_from_markdown(md: &str) -> (Self, &str) {
-        if !md.starts_with(Self::FM_START) {
+        // 1. 标准 frontmatter（以 `---` 开头）
+        if let Some((fm, body)) = Self::split_open_fm(md) {
+            return (fm, body);
+        }
+        // 2. AI 用 ```yaml 围栏包裹的 frontmatter：剥离外层围栏后再次解析
+        let (inner, was_fenced) = Self::strip_open_yaml_fence(md);
+        if was_fenced {
+            if let Some((fm, body)) = Self::split_open_fm(inner) {
+                let body = Self::strip_closing_fence(body);
+                return (fm, body);
+            }
+            // 围栏内无 frontmatter（例如整篇就是代码块），按原始文本返回
             return (Self::default(), md);
+        }
+        (Self::default(), md)
+    }
+
+    /// 解析以 `---\n` 开头的标准 frontmatter；不满足时返回 `None`。
+    fn split_open_fm(md: &str) -> Option<(Self, &str)> {
+        if !md.starts_with(Self::FM_START) {
+            return None;
         }
         // 跳过起始 "---\n"，查找结束 "---"
         let after_start = &md[Self::FM_START.len()..];
-        let Some(end_idx) = after_start.find("\n---") else {
-            return (Self::default(), md);
-        };
+        let end_idx = after_start.find("\n---")?;
         let yaml_part = &after_start[..end_idx];
         // 跳过 "\n---" 及随后的换行
         let body_start = end_idx + "\n---".len();
         let body = if body_start < after_start.len() {
-            // 跳过 "---" 后的一个换行（若有）
             let rest = &after_start[body_start..];
             if let Some(stripped) = rest.strip_prefix('\n') {
                 stripped
@@ -90,7 +110,34 @@ impl ReferenceFrontmatter {
                 Self::default()
             }
         };
-        (frontmatter, body)
+        Some((frontmatter, body))
+    }
+
+    /// 若文本以 ` ```yaml ` 或 ` ``` ` 围栏开头，剥离首行围栏并返回内部内容。
+    ///
+    /// 返回 `(content, was_fenced)`。
+    fn strip_open_yaml_fence(md: &str) -> (&str, bool) {
+        let inner = md
+            .strip_prefix("```yaml\n")
+            .or_else(|| md.strip_prefix("```yaml\r\n"))
+            .or_else(|| md.strip_prefix("```\n"))
+            .or_else(|| md.strip_prefix("```\r\n"));
+        match inner {
+            Some(inner) => (inner, true),
+            None => (md, false),
+        }
+    }
+
+    /// 去掉 body 首行的闭合围栏（` ``` `）。
+    fn strip_closing_fence(body: &str) -> &str {
+        if let Some(rest) = body
+            .strip_prefix("```\n")
+            .or_else(|| body.strip_prefix("```\r\n"))
+        {
+            rest.strip_prefix('\n').unwrap_or(rest)
+        } else {
+            body
+        }
     }
 
     /// 将 frontmatter 序列化并拼接到正文头部。
@@ -138,6 +185,30 @@ pub fn parse_ai_output(md: &str) -> Result<(ReferenceFrontmatter, &str), Referen
     Ok(ReferenceFrontmatter::split_from_markdown(md))
 }
 
+/// 剥离 AI 可能给整篇 Markdown 加的围栏（` ```markdown ` / ` ``` ` 等）。
+///
+/// LLM 常把完整 Markdown 包进代码块围栏，导致正文无法正常渲染。此函数在整篇被
+/// 单一围栏包裹时移除首部与尾部的围栏行；若非包裹形式则原样返回。
+pub fn strip_enclosing_fence(md: &str) -> String {
+    let trimmed = md.trim();
+    if !trimmed.starts_with("```") {
+        return md.to_string();
+    }
+    let lines: Vec<&str> = trimmed.lines().collect();
+    let mut start = 0;
+    while start < lines.len() && lines[start].trim_start().starts_with("```") {
+        start += 1;
+    }
+    let mut end = lines.len();
+    while end > start && (lines[end - 1].trim() == "```" || lines[end - 1].trim().is_empty()) {
+        end -= 1;
+    }
+    if start == 0 && end == lines.len() {
+        return md.to_string();
+    }
+    lines[start..end].join("\n")
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -163,6 +234,28 @@ mod tests {
         let (fm, body) = ReferenceFrontmatter::split_from_markdown(md);
         assert_eq!(fm, ReferenceFrontmatter::default());
         assert_eq!(body, md);
+    }
+
+    #[test]
+    fn split_fenced_yaml_frontmatter() {
+        // AI 有时用 ```yaml 代码块包裹 frontmatter
+        let md = "```yaml\n---\ntitle: 测试标题\nauthors:\n  - 张三\n  - 李四\njournal: 测试期刊\nyear: '2025'\n---\n```\n\n# 正文\n内容";
+        let (fm, body) = ReferenceFrontmatter::split_from_markdown(md);
+        assert_eq!(fm.title.as_deref(), Some("测试标题"));
+        assert_eq!(fm.authors, vec!["张三", "李四"]);
+        assert_eq!(body, "# 正文\n内容");
+    }
+
+    #[test]
+    fn strip_enclosing_fence_unwraps_full_document() {
+        let md = "```markdown\n## 标题\n\n正文内容\n```";
+        assert_eq!(strip_enclosing_fence(md), "## 标题\n\n正文内容");
+    }
+
+    #[test]
+    fn strip_enclosing_fence_passthrough_normal() {
+        let md = "# 标题\n正文内容\n```rust\nlet x = 1;\n```";
+        assert_eq!(strip_enclosing_fence(md), md);
     }
 
     #[test]

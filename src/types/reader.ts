@@ -111,25 +111,20 @@ export interface BlockMap {
 // 阅读器渲染选项
 // ---------------------------------------------------------------------------
 
-/** 阅读器主题模式。 */
-export type ReaderThemeMode = 'light' | 'dark';
-
 /** 阅读器字号（px）。 */
 export type ReaderFontSize = 14 | 16 | 18 | 20;
 
 /** 阅读器行高倍数。 */
 export type ReaderLineHeight = 1.5 | 1.7 | 1.9;
 
-/** 阅读器渲染选项。 */
+/** 阅读器渲染选项（深浅色跟随应用主题，不单独设置）。 */
 export interface ReaderOptions {
-  themeMode: ReaderThemeMode;
   fontSize: ReaderFontSize;
   lineHeight: ReaderLineHeight;
 }
 
 /** 默认阅读器选项。 */
 export const DEFAULT_READER_OPTIONS: ReaderOptions = {
-  themeMode: 'light',
   fontSize: 16,
   lineHeight: 1.7,
 };

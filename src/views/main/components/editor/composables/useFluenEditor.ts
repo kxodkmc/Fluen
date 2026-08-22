@@ -22,6 +22,7 @@
 
 import { ref, readonly } from 'vue';
 import { EditorView } from '@codemirror/view';
+import type { ChangeSpec } from '@codemirror/state';
 import { undo, redo, undoDepth, redoDepth } from '@codemirror/commands';
 import { createEditorState, createEditorView, type EditorCallbacks } from '../codemirror/setup';
 import { applyMarkdownFormat, type MarkdownFormatKind, type HeadingLevel } from '../codemirror/formatting';
@@ -130,6 +131,21 @@ function setMd(md: string): void {
   _savedMd = md;
   _isDirty.value = false;
   _updateHistoryFlags();
+}
+
+/**
+ * 以本地事务方式应用编辑片段（供大纲结构操作等调用）。
+ *
+ * dispatch 进入 CM6 事件循环，更新会经 `onDocChange` 触发大纲等下游一致更新；
+ * 同时进入 history，支持 Ctrl+Z 撤销。未挂载时返回 false。
+ *
+ * @param changes 来自 `headingOps` 等纯函数层计算的编辑片段。
+ * @returns 是否成功 dispatch。
+ */
+function dispatchChanges(changes: ChangeSpec[]): boolean {
+  if (!_view) return false;
+  _view.dispatch({ changes });
+  return true;
 }
 
 // ── 编辑命令 ───────────────────────────────────────────────────────
@@ -280,6 +296,7 @@ export function useFluenEditor() {
     undo: undoEd,
     redo: redoEd,
     toggleFormat,
+    dispatchChanges,
 
     // 保存
     save,

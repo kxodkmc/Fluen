@@ -15,12 +15,23 @@ export interface SettingsSection {
   labelKey: string;
   /** SVG path 内容（用于侧边栏图标）。 */
   icon: string;
-  /** 该分区的 Vue 组件。 */
-  component: Component;
+  /** 该分区的 Vue 组件（叶子分区必有；分组不需要）。 */
+  component?: Component;
+  /** 子分区列表（存在时该分区作为可折叠分组渲染）。 */
+  children?: SettingsSection[];
 }
 
 /** 设置页面导航目标（从 TitleBar 下拉菜单触发）。 */
-export type SettingsSectionId = 'general' | 'appearance' | 'language' | 'llmConfig' | 'motis' | 'aiServices';
+export type SettingsSectionId =
+  | 'general'
+  | 'appearance'
+  | 'language'
+  | 'llmConfig'
+  | 'motis'
+  | 'literature'
+  | 'ocrService'
+  | 'oldAiServices'
+  | 'logging';
 
 /**
  * 分区导航注入 key。

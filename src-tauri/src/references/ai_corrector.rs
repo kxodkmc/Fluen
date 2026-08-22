@@ -44,7 +44,7 @@ pub struct AiCorrector {
 }
 
 impl AiCorrector {
-    /// 从 LLM 配置创建校正器。
+    /// 从 LLM 配置创建校正器，使用默认请求超时。
     ///
     /// 解析 `scene_models.reference_import` 场景模型（未配置则回退到全局激活项），
     /// 构建对应的 LLMProvider。
@@ -52,16 +52,29 @@ impl AiCorrector {
     /// # 错误
     /// - [`ReferenceError::AiCorrection`]：未配置 LLM 提供商 / 场景模型引用失效 / api_key 缺失
     pub fn from_llm_config(llm: &LlmConfig) -> Result<Self, ReferenceError> {
+        Self::from_llm_config_with_timeout(llm, llm_chat::DEFAULT_REQUEST_TIMEOUT.as_secs())
+    }
+
+    /// 从 LLM 配置创建校正器，并指定请求超时时间（秒）。
+    ///
+    /// `timeout_secs` 为用户可配置的「AI 最大响应时间」。过小的值会导致
+    /// 长文档校正被客户端提前超时中断。
+    pub fn from_llm_config_with_timeout(
+        llm: &LlmConfig,
+        timeout_secs: u64,
+    ) -> Result<Self, ReferenceError> {
         let (provider, model_id) = llm.resolve_reference_import().ok_or_else(|| {
             let msg = "未配置 LLM 提供商，请在设置中配置 AI 校正模型".to_string();
             tracing::error!(scope = "references", error = %msg, "创建 AI 校正器失败");
             ReferenceError::AiCorrection(msg)
         })?;
 
-        let llm_provider = llm_chat::build_llm_provider(provider, &model_id).map_err(|e| {
-            tracing::error!(scope = "references", error = %e, "构建 LLMProvider 失败");
-            ReferenceError::AiCorrection(e.to_string())
-        })?;
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let llm_provider =
+            llm_chat::build_llm_provider_with_timeout(provider, &model_id, timeout).map_err(|e| {
+                tracing::error!(scope = "references", error = %e, "构建 LLMProvider 失败");
+                ReferenceError::AiCorrection(e.to_string())
+            })?;
 
         tracing::info!(
             scope = "references",
@@ -175,7 +188,7 @@ const RULES_OCR_WITH_AI: &str = concat!(
     "2. **图片标签保留不变**：文本中出现的 HTML 图片标签（如 `<div style=\"text-align: center;\"><img src=\"...\" alt=\"Image\" .../></div>` 及其下方的图注 `<div style=\"text-align: center;\">图X ...</div>`）必须原样保留，不得修改路径、属性或图注文字。\n",
     "3. **冲突以 PDF 文本为准**：当 OCR 结果与 PDF 文本在文字内容上存在冲突（如 OCR 识别错误、多余空格、错字），以 PDF 文本为准。\n",
     "4. **保留分页**：不同页面之间用 `---` 分隔。\n",
-    "5. **输出完整 Markdown**：直接输出校正后的完整 Markdown，不要添加任何解释说明。\n",
+    "5. **输出完整 Markdown**：直接输出校正后的裸 Markdown 文本，不要添加任何解释说明，严禁使用 ```、```markdown、```yaml 等代码块围栏包裹全文或 frontmatter。\n",
 );
 
 /// 混合模式（OCR + AI 校正）输入说明。
@@ -193,7 +206,7 @@ const RULES_AI_ONLY: &str = concat!(
     "\n## 校正规则\n",
     "1. **只做格式纠错**：校正标题层级（# 一级标题、## 二级标题等）、列表、表格、段落分隔、引用格式。不得增删、改写正文内容。\n",
     "2. **保留分页**：不同页面之间用 `---` 分隔。\n",
-    "3. **输出完整 Markdown**：直接输出校正后的完整 Markdown，不要添加任何解释说明。\n",
+    "3. **输出完整 Markdown**：直接输出校正后的裸 Markdown 文本，不要添加任何解释说明，严禁使用 ```、```markdown、```yaml 等代码块围栏包裹全文或 frontmatter。\n",
 );
 
 /// 纯 AI 模式（AiOnly）输入说明。
@@ -209,7 +222,7 @@ const RULES_OCR_ONLY: &str = concat!(
     "1. **只做格式纠错**：校正标题层级（# 一级标题、## 二级标题等）、列表、表格、段落分隔、引用格式。不得增删、改写正文内容。\n",
     "2. **图片标签保留不变**：文本中出现的 HTML 图片标签（如 `<div style=\"text-align: center;\"><img src=\"...\" alt=\"Image\" .../></div>` 及其下方的图注 `<div style=\"text-align: center;\">图X ...</div>`）必须原样保留，不得修改路径、属性或图注文字。\n",
     "3. **保留分页**：不同页面之间用 `---` 分隔。\n",
-    "4. **输出完整 Markdown**：直接输出校正后的完整 Markdown，不要添加任何解释说明。\n",
+    "4. **输出完整 Markdown**：直接输出校正后的裸 Markdown 文本，不要添加任何解释说明，严禁使用 ```、```markdown、```yaml 等代码块围栏包裹全文或 frontmatter。\n",
 );
 
 /// 纯 OCR 模式输入说明。
@@ -221,28 +234,30 @@ const INPUT_OCR_ONLY: &str = concat!(
 /// Frontmatter 与输出格式说明（三种模式共用）。
 const OUTPUT_TAIL: &str = concat!(
     "\n## Frontmatter\n",
-    "在 Markdown 文件最开头输出 YAML frontmatter，包含以下字段（从正文识别，无法识别则省略该字段）：\n",
-    "```yaml\n",
+    "在输出内容【最开头】直接以 YAML 输出文献元数据（不可用任何代码块围栏包裹，第一行就是 `---`）：\n",
+    "\ntitle: 文献标题\n",
+    "authors:\n",
+    "  - 作者1\n",
+    "  - 作者2\n",
+    "journal: 期刊名（若可识别）\n",
+    "year: 发表年份（若可识别，用引号包裹字符串，如 '2026'）\n",
+    "\n",
+    "紧接着单独一行写 `---` 结束 frontmatter，再另起一行输出正文。\n",
+    "\n",
+    "## 输出格式（必须严格遵守）\n",
+    "1. **严禁使用任何代码块围栏**（```、```markdown、```yaml 等三反引号）包裹整篇正文或 frontmatter——全文必须是裸 Markdown 文本。\n",
+    "2. 不要输出任何说明、注释或 ``` 围栏，直接输出 Markdown 内容本身。\n",
+    "3. frontmatter 必须以 `---` 开头、以 `---` 结尾，正文标题用 Markdown 标题（#）而非 YAML。\n",
+    "\n",
+    "输出结构如下（第一行即 `---`，不要在其前加任何内容）：\n",
     "---\n",
     "title: 文献标题\n",
     "authors:\n",
     "  - 作者1\n",
     "  - 作者2\n",
-    "journal: 期刊名（若可识别）\n",
-    "year: '发表年份'（若可识别，用引号包裹）\n",
-    "---\n",
-    "```\n",
-    "\n",
-    "## 输出格式\n",
-    "```\n",
-    "---\n",
-    "title: ...\n",
-    "authors:\n",
-    "  - ...\n",
     "---\n",
     "# 文献标题（正文首个一级标题）\n",
     "正文内容...\n",
-    "```",
 );
 
 /// 构建系统提示词——按模式严格区分校正规则与输入说明。
@@ -265,18 +280,18 @@ fn build_user_content(
         ReferenceImportMode::OcrWithAiCorrection => {
             let ocr = ocr_md.unwrap_or("");
             format!(
-                "【OCR 结果】\n{ocr}\n\n【PDF 文本】\n{pdf_text}\n\n请综合以上内容，输出校正后的标准 Markdown（含 frontmatter）。"
+                "【OCR 结果】\n{ocr}\n\n【PDF 文本】\n{pdf_text}\n\n请综合以上内容，直接输出校正后的裸 Markdown（含 frontmatter），严禁用任何 ``` 代码块围栏包裹。"
             )
         }
         ReferenceImportMode::AiOnly => {
             format!(
-                "【PDF 文本】\n{pdf_text}\n\n请根据以上内容，输出校正后的标准 Markdown（含 frontmatter）。"
+                "【PDF 文本】\n{pdf_text}\n\n请根据以上内容，直接输出校正后的裸 Markdown（含 frontmatter），严禁用任何 ``` 代码块围栏包裹。"
             )
         }
         ReferenceImportMode::Ocr => {
             // 不应到达此处，兜底处理
             let ocr = ocr_md.unwrap_or(pdf_text);
-            format!("【OCR 结果】\n{ocr}\n\n请校正格式，输出标准 Markdown。")
+            format!("【OCR 结果】\n{ocr}\n\n请校正格式，直接输出裸 Markdown，严禁用任何 ``` 代码块围栏包裹。")
         }
     }
 }
@@ -308,6 +323,14 @@ mod tests {
         let p3 = build_system_prompt(ReferenceImportMode::AiOnly);
         assert!(p3.contains("纯 AI 识别"));
         assert!(!p3.contains("OCR 结果"));
+    }
+
+    #[test]
+    fn system_prompt_forbids_code_fence_wrapping() {
+        let prompt = build_system_prompt(ReferenceImportMode::AiOnly);
+        assert!(prompt.contains("严禁使用"));
+        // 格式示例不再用 ```yaml / ``` 围栏包裹 frontmatter，避免 AI 模仿
+        assert!(!prompt.contains("```yaml\n---"));
     }
 
     #[test]

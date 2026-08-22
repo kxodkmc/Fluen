@@ -16,6 +16,8 @@ import AppearanceSection from './sections/AppearanceSection.vue';
 import LanguageSection from './sections/LanguageSection.vue';
 import LlmConfigSection from './sections/LlmConfigSection.vue';
 import MotisSection from './sections/MotisSection.vue';
+import LiteratureSection from './sections/LiteratureSection.vue';
+import OcrServiceSection from './sections/OcrServiceSection.vue';
 import AiServicesSection from './sections/AiServicesSection.vue';
 import LoggingSection from './sections/LoggingSection.vue';
 
@@ -46,14 +48,33 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     component: LlmConfigSection,
   },
   {
-    id: 'motis',
-    labelKey: 'settings.sections.motis',
-    icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-3.5 6a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm7 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zM12 17.5c-2.33 0-4.31-1.46-5.11-3.5h10.22c-.8 2.04-2.78 3.5-5.11 3.5z',
-    component: MotisSection,
-  },
-  {
     id: 'aiServices',
     labelKey: 'settings.sections.aiServices',
+    icon: 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10',
+    children: [
+      {
+        id: 'literature',
+        labelKey: 'settings.sections.literature',
+        icon: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z M4 19.5v0A2.5 2.5 0 0 0 6.5 22H20v-5',
+        component: LiteratureSection,
+      },
+      {
+        id: 'ocrService',
+        labelKey: 'settings.sections.ocrService',
+        icon: 'M3 7a2 2 0 0 1 2-2h2l2-2h6l2 2h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M15 9h.01',
+        component: OcrServiceSection,
+      },
+      {
+        id: 'motis',
+        labelKey: 'settings.sections.motis',
+        icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z',
+        component: MotisSection,
+      },
+    ],
+  },
+  {
+    id: 'oldAiServices',
+    labelKey: 'settings.sections.oldAiServices',
     icon: 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10',
     component: AiServicesSection,
   },

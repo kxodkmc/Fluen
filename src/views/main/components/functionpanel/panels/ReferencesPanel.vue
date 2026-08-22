@@ -541,9 +541,9 @@ function badgeClass(tone: BadgeTone): string {
             {{ entry.original_filename }}
           </span>
 
-          <!-- 第二行：作者/信息（占位，尚未实现） -->
-          <span class="ref-item__author-info">
-            {{ t('main.sidebar.references.authorInfoPlaceholder') }}
+          <!-- 第二行：作者信息（未解析时显示占位） -->
+          <span class="ref-item__author-info" :title="entry.authors?.length ? entry.authors.join('、') : ''">
+            {{ entry.authors?.length ? entry.authors.join('、') : t('main.sidebar.references.authorInfoPlaceholder') }}
           </span>
 
           <!-- 第三行：状态徽标（可扩展） -->

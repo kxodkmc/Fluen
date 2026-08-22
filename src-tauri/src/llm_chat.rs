@@ -31,7 +31,10 @@ pub enum LlmChatError {
 }
 
 /// Anthropic API 默认版本头。
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_VERSION: &str = "2023-06-06";
+
+/// LLM 请求默认超时——4 分钟（长文档 / 深度思考场景需要更大余量）。
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// 智谱 thinking 注入字段路径（OpenAI 兼容协议的深度思考参数）。
 const ZHIPU_THINKING_FIELD: &str = "thinking.type";
@@ -145,9 +148,21 @@ fn resolve_model_spec(provider: &ProviderConfig, model_id: &str) -> (usize, usiz
 /// - 额外请求头逐条注入
 ///
 /// 返回 `Arc<dyn LLMProvider>`，可直接用于构造 referee `Engine`。
+///
+/// 使用默认超时（4 分钟）。需要自定义超时的调用方使用
+/// [`build_llm_provider_with_timeout`]。
 pub fn build_llm_provider(
     provider: &ProviderConfig,
     model_id: &str,
+) -> Result<Arc<dyn LLMProvider>, LlmChatError> {
+    build_llm_provider_with_timeout(provider, model_id, DEFAULT_REQUEST_TIMEOUT)
+}
+
+/// 与 [`build_llm_provider`] 相同，但额外指定请求超时时间。
+pub fn build_llm_provider_with_timeout(
+    provider: &ProviderConfig,
+    model_id: &str,
+    timeout: Duration,
 ) -> Result<Arc<dyn LLMProvider>, LlmChatError> {
     let api_key = provider.api_key.as_ref().ok_or_else(|| {
         tracing::error!(provider_id = %provider.id, "构建 LLM Provider 失败：未配置 api_key");
@@ -187,7 +202,7 @@ pub fn build_llm_provider(
     let mut config = GenericConfig::new(api_key.clone(), base_url, model_id)
         .with_extra_headers(extra_headers)
         .with_model_spec(context_window, max_output)
-        .with_timeout(Duration::from_secs(120))
+        .with_timeout(timeout)
         .with_retry(RetryPolicy::default());
 
     // 智谱（GLM）：注入 thinking.type 字段（OpenAI 兼容协议，深度思考参数需专用转换器注入）

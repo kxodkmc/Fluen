@@ -163,7 +163,8 @@ export function renderMarkdown(
   mdText: string,
   assetMap: Map<string, string>,
 ): RenderResult {
-  const normalized = normalizeMathDelimiters(mdText);
+  const unwrapped = unwrapEnclosingFence(mdText);
+  const normalized = normalizeMathDelimiters(unwrapped);
   const env: RenderEnv = { assetMap };
   const tokens = md.parse(normalized, env);
   const blockMap = buildBlockMap(tokens);
@@ -183,10 +184,11 @@ export function renderMarkdown(
  * 在渲染前调用，批量发给后端解析为 data URL。
  */
 export function collectImageSrcs(mdText: string): string[] {
-  const tokens = md.parse(mdText, {});
+  const unwrapped = unwrapEnclosingFence(mdText);
+  const tokens = md.parse(unwrapped, {});
   const paths = new Set<string>();
   collectImageSrcsFromTokens(tokens, paths);
-  collectImageSrcsFromHtml(mdText, paths);
+  collectImageSrcsFromHtml(unwrapped, paths);
   return [...paths];
 }
 
@@ -452,4 +454,30 @@ function isRemoteUrl(s: string): boolean {
     s.startsWith('blob:') ||
     s.startsWith('file://')
   );
+}
+
+/**
+ * 剥离 AI 校正时可能产生的“整篇包裹”代码块围栏。
+ *
+ * LLM 常把完整 Markdown 包进 ` ```markdown ` / ` ``` ` 围栏（或 ` ```yaml `），
+ * 导致阅读器把整篇渲染成一个高亮代码块。此函数在整篇被单一围栏包裹时，
+ * 移除首部围栏行与末尾闭合围栏行，还原成可正常渲染的 Markdown。
+ */
+function unwrapEnclosingFence(mdText: string): string {
+  const trimmed = mdText.trim();
+  // 首行必须是一个围栏起始（``` 后可带语言标识）
+  if (!/^```[^\n]*\r?\n/.test(trimmed)) return mdText;
+
+  const lines = trimmed.split('\n');
+  // 移除开头的围栏行（含 ```markdown / ```yaml 等）
+  let start = 0;
+  while (start < lines.length && /^```/.test(lines[start].trim())) start++;
+  // 移除结尾的闭合围栏 ``` 行（及可能的重复/空行）
+  let end = lines.length;
+  while (end > start && (lines[end - 1].trim() === '```' || lines[end - 1].trim() === '')) {
+    end--;
+  }
+  // 仅在确实去掉了首尾围栏时才重写，避免干扰正常的代码块
+  if (start === 0 && end === lines.length) return mdText;
+  return lines.slice(start, end).join('\n');
 }

@@ -63,6 +63,10 @@ export interface ChatMessage {
   kind: ChatMessageKind;
   /** 工具名称（kind='tool_call' 时使用）。 */
   toolName?: string;
+  /** 工具调用输入参数（kind='tool_call' 时携带，用于前端展示）。 */
+  toolInput?: unknown;
+  /** 工具调用执行结果（kind='tool_call' 时由 motis:tool-result 填充）。 */
+  toolResult?: unknown;
   /** 是否正在流式生成（增量追加中）。 */
   isStreaming?: boolean;
   /** 是否被中断（取消或出错时标记）。 */

@@ -31,25 +31,27 @@
 //!
 //! 审批请求的决策回传复用 `motis_chat_resolve_approval` 命令
 //! （审批通道与 Motis 共享同一共享存储，approval_id 全局唯一）。
+//!
+//! ## 会话模型
+//!
+//! 与 Motis 一致：前端是对话的事实源（每轮传入完整 history）。每轮：
+//! 新建 `SessionId` → `restore_session_history` 恢复上下文 → `chat_stream`
+//! 启动流式回合 → [`chat_bridge`] 消费流并 emit 事件。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use confluent::agent_runtime::AgentEvent;
-use futures::StreamExt;
-use serde::Deserialize;
-use tauri::{Emitter, State, Window};
-use tokio_util::sync::CancellationToken;
+use referee_ai::session::SessionId;
+use tauri::{State, Window};
 use uuid::Uuid;
 
+use crate::chat_bridge::{self, start_chat_session, to_referee_messages, ChatEvents, HistoryMessage};
 use crate::llm_config::storage::ConfigStorage;
-use crate::motis_chat::approval::ToolApprovalExtension;
-use crate::motis_chat::commands::HistoryMessage;
-use crate::motis_chat::events::{
-    ErrorPayload, FinishPayload, TextPayload, ThoughtPayload, ToolCallPayload,
-};
+use crate::motis_chat::approval::MotisApprover;
+use crate::motis_chat::commands::MotisChatState;
 
 use super::error::AiAssistantError;
+use super::prompt;
 use super::runtime::build_runtime;
 
 /// 思考增量事件。
@@ -65,39 +67,52 @@ pub const EVENT_FINISH: &str = "ai-assistant:finish";
 /// 错误事件。
 pub const EVENT_ERROR: &str = "ai-assistant:error";
 
-/// 学术助手全局状态：维护活跃会话的取消令牌映射。
+/// 学术助手事件集（`ai-assistant:*` 前缀）。
+const EVENTS: ChatEvents = ChatEvents {
+    thought: EVENT_THOUGHT,
+    text: EVENT_TEXT,
+    tool_call: EVENT_TOOL_CALL,
+    finish: EVENT_FINISH,
+    error: EVENT_ERROR,
+};
+
+/// 学术助手全局状态：维护活跃回合句柄映射。
+///
+/// 审批决策通道由 [`MotisChatState`] 持有（两智能体共享，
+/// approval_id 全局唯一），本状态仅管理回合取消。
 pub struct AiAssistantState {
-    /// 活跃的取消令牌映射（key: run_id）。
-    tokens: Mutex<HashMap<String, CancellationToken>>,
+    /// 活跃的回合句柄映射（key: run_id）。
+    handles: Mutex<HashMap<String, referee_ai::engine::ChatHandle>>,
 }
 
 impl AiAssistantState {
     /// 创建新的状态实例。
     pub fn new() -> Self {
         Self {
-            tokens: Mutex::new(HashMap::new()),
+            handles: Mutex::new(HashMap::new()),
         }
     }
 
-    /// 注册取消令牌。
-    fn register(&self, run_id: String, token: CancellationToken) {
-        let mut map = self.tokens.lock().unwrap();
-        map.insert(run_id, token);
+    /// 注册回合句柄。
+    fn register(&self, run_id: String, handle: referee_ai::engine::ChatHandle) {
+        let mut map = self.handles.lock().unwrap();
+        map.insert(run_id, handle);
     }
 
-    /// 注销取消令牌。
+    /// 注销回合句柄。
     fn unregister(&self, run_id: &str) {
-        let mut map = self.tokens.lock().unwrap();
+        let mut map = self.handles.lock().unwrap();
         map.remove(run_id);
     }
 
     /// 取消当前活跃的会话。
+    ///
+    /// 取消第一个找到的活跃回合并移除。返回是否成功取消。
     fn cancel_active(&self) -> bool {
-        let mut map = self.tokens.lock().unwrap();
+        let mut map = self.handles.lock().unwrap();
         if let Some(key) = map.keys().next().cloned() {
-            if let Some(token) = map.remove(&key) {
-                token.cancel();
-                return true;
+            if let Some(handle) = map.remove(&key) {
+                return handle.cancel();
             }
         }
         false
@@ -111,6 +126,14 @@ impl Default for AiAssistantState {
 }
 
 /// 发送写作请求并流式接收回复。
+///
+/// # 流程
+///
+/// 1. 加载 LlmConfig（学术助手直接用全局激活项）
+/// 2. 构建 referee 运行时（论文写作工具 + 审批包装）
+/// 3. 回放历史 + 启动流式回合
+/// 4. [`chat_bridge`] 消费流并 emit 到前端
+/// 5. 完成后清理回合句柄
 #[tauri::command]
 pub async fn ai_assistant_send(
     message: String,
@@ -119,55 +142,40 @@ pub async fn ai_assistant_send(
     window: Window,
     llm_storage: State<'_, ConfigStorage>,
     assistant_state: State<'_, AiAssistantState>,
-    motis_chat_state: State<'_, crate::motis_chat::MotisChatState>,
+    motis_chat_state: State<'_, MotisChatState>,
 ) -> Result<(), AiAssistantError> {
     // 1. 加载 LLM 全局配置
     let llm_config = llm_storage
         .load()
         .map_err(|e| AiAssistantError::LlmConfig(e.to_string()))?;
 
-    // 2. 构建运行时（学术写作提示词 + 论文工具 + 审批扩展）
+    // 2. 构建运行时（学术写作工具集 + 审批包装）
     //    审批决策通道与 Motis 共享（approval_id 全局唯一）
-    let approval_extension = Arc::new(ToolApprovalExtension::new(
+    let approver = Arc::new(MotisApprover::new(
         window.clone(),
         motis_chat_state.approvals_handle(),
         EVENT_APPROVAL_REQUEST,
     ));
-    let runtime = build_runtime(&llm_config, project_path.as_deref(), approval_extension).await?;
+    let (thinking_enabled, runtime) =
+        build_runtime(&llm_config, project_path.as_deref(), approver)?;
 
-    // 3. 构造输入（历史 + 当前消息）
-    let input = build_input(&message, &history);
+    // 3. 回放历史 + 启动流式回合
+    let session_id = SessionId::new_v4();
+    let system_prompt = prompt::build_system_prompt();
+    let handle = start_chat_session(
+        &runtime,
+        session_id,
+        to_referee_messages(&history),
+        message,
+        system_prompt,
+        thinking_enabled,
+    )
+    .map_err(AiAssistantError::Runtime)?;
 
-    // 4. 启动流式执行
-    let (stream, cancel_token) = runtime.run_stream(input);
-
-    // 5. 注册取消令牌
+    // 4. 注册句柄并消费流
     let run_id = Uuid::new_v4().to_string();
-    assistant_state.register(run_id.clone(), cancel_token);
-
-    // 6. 消费事件流并 emit 到前端
-    let mut stream = stream;
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(event) => {
-                if emit_agent_event(&window, event).is_err() {
-                    // emit 失败（窗口可能已关闭），终止流
-                    break;
-                }
-            }
-            Err(e) => {
-                let _ = window.emit(
-                    EVENT_ERROR,
-                    ErrorPayload {
-                        message: e.to_string(),
-                    },
-                );
-                break;
-            }
-        }
-    }
-
-    // 7. 清理取消令牌
+    assistant_state.register(run_id.clone(), handle.clone());
+    chat_bridge::consume_stream(handle, &window, &EVENTS).await;
     assistant_state.unregister(&run_id);
 
     Ok(())
@@ -182,88 +190,16 @@ pub fn ai_assistant_cancel(
     Ok(())
 }
 
-/// 构造 confluent 输入。
-///
-/// 将历史记录与当前消息格式化为单条用户消息。
-fn build_input(message: &str, history: &[HistoryMessage]) -> serde_json::Value {
-    let mut parts: Vec<String> = Vec::new();
-
-    for msg in history {
-        let role = match msg.role.as_str() {
-            "user" => "用户",
-            "assistant" => "助手",
-            other => other,
-        };
-        parts.push(format!("{}: {}", role, msg.content));
-    }
-
-    parts.push(format!("用户: {}", message));
-
-    serde_json::Value::String(parts.join("\n"))
-}
-
-/// 将 [`AgentEvent`] 转换为 Tauri 事件并 emit 到前端。
-fn emit_agent_event(window: &Window, event: AgentEvent) -> Result<(), tauri::Error> {
-    match event {
-        AgentEvent::ThoughtDelta(delta) => {
-            window.emit(EVENT_THOUGHT, ThoughtPayload { delta })?;
-        }
-        AgentEvent::TextDelta(delta) => {
-            window.emit(EVENT_TEXT, TextPayload { delta })?;
-        }
-        AgentEvent::ToolCallRequest(tool_call) => {
-            window.emit(
-                EVENT_TOOL_CALL,
-                ToolCallPayload {
-                    id: tool_call.id,
-                    name: tool_call.name,
-                    input: tool_call.input,
-                },
-            )?;
-        }
-        AgentEvent::Finish { result, usage } => {
-            window.emit(
-                EVENT_FINISH,
-                FinishPayload {
-                    result,
-                    total_tokens: usage.total_tokens,
-                },
-            )?;
-        }
-        AgentEvent::Yield => {
-            // 主动让出，无需通知前端
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn build_input_joins_history_and_message() {
-        let history = vec![
-            HistoryMessage {
-                role: "user".into(),
-                content: "先写引言".into(),
-            },
-            HistoryMessage {
-                role: "assistant".into(),
-                content: "好的".into(),
-            },
-        ];
-        let input = build_input("现在写方法", &history);
-        let text = input.as_str().unwrap();
-        assert!(text.contains("用户: 先写引言"));
-        assert!(text.contains("助手: 好的"));
-        assert!(text.contains("用户: 现在写方法"));
-    }
-
-    #[test]
     fn event_names_use_ai_assistant_prefix() {
         assert!(EVENT_THOUGHT.starts_with("ai-assistant:"));
+        assert!(EVENT_TOOL_CALL.starts_with("ai-assistant:"));
         assert!(EVENT_APPROVAL_REQUEST.starts_with("ai-assistant:"));
+        assert!(EVENT_FINISH.starts_with("ai-assistant:"));
         assert!(EVENT_ERROR.starts_with("ai-assistant:"));
     }
 }

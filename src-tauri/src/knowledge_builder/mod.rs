@@ -57,6 +57,7 @@ pub mod session;
 pub mod types;
 
 pub use error::KnowledgeBuilderError;
+#[allow(unused_imports)]
 pub use types::{
     BuildStage, ExtractionPlan, KnowledgeBuildCheckpoint, KnowledgeBuildOptions, PlannedEntry,
 };

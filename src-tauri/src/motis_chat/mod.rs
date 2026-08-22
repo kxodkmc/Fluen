@@ -1,10 +1,18 @@
 //! # motis_chat
 //!
-//! Motis 聊天模块——驱动 Motis 宠物助手的对话流程。
+//! Motis 聊天模块——驱动 Motis **总督角色**的对话与任务编排流程。
 //!
-//! 基于 confluent 运行时，将用户消息与历史记录传入 LLM，
-//! 以流式事件（思考增量、文本增量、工具调用、完成、错误）的形式
-//! 通过 Tauri 事件推送到前端。
+//! 基于 referee [`FluenRuntime`](crate::agent_runtime::FluenRuntime)，
+//! 将用户消息与历史记录传入 LLM，以流式事件（思考增量、文本增量、
+//! 工具调用、完成、错误）的形式通过 Tauri 事件推送到前端。
+//!
+//! ## 总督角色
+//!
+//! Motis 是总督角色——他不直接负责编写、计算等具体任务，而是：
+//! 1. **理解任务**：接收用户需求，分析意图
+//! 2. **派发任务**：通过 `delegate_agent` 工具调用合适的子智能体执行
+//! 3. **汇总结果**：收集子智能体返回结果，汇总后回复用户
+//! 4. **助手操作**：直接处理简单操作（主题切换、语言切换等）
 //!
 //! ## 模块结构
 //!
@@ -12,22 +20,19 @@
 //! |--------|------|
 //! | [`error`] | 统一错误类型 [`MotisChatError`] |
 //! | [`events`] | Tauri 事件名常量与 payload 序列化结构 |
-//! | [`prompt`] | Motis 模块化提示词——人设、Profile 定义与上下文注入器 |
-//! | [`runtime`] | confluent 运行时构建（provider/model 解析 + 提示词装配 + 能力装配） |
+//! | [`prompt`] | Motis 系统提示词（总督角色文案，纯函数组装） |
+//! | [`approval`] | 工具审批器 [`MotisApprover`]（实现 `Approver` trait） |
+//! | [`runtime`] | referee 运行时构建（provider 解析 + 工具装配 + 子智能体委派） |
 //! | [`commands`] | Tauri commands（`motis_chat_send` / `motis_chat_cancel`） |
+//! | [`agents`] | 子智能体注册表——定义可调度的子智能体清单与构建逻辑 |
+//! | [`delegate`] | 子智能体委派工具——让 Motis 通过 function calling 调度子智能体 |
 //!
-//! ## 能力扩展
-//!
-//! 不在本模块硬编码应用操作工具，所有能力扩展通过 confluent 适配器装配：
-//!
-//! | 能力 | 适配器 | 装配条件 |
-//! |------|--------|----------|
-//! | MCP | `confluent::adapters::mcp` | `MascotConfig.mcp_enabled = true` |
-//! | Skills | `confluent::adapters::skills` | `MascotConfig.skills_enabled = true` |
-//! | 函数调用 | `confluent::ToolKit` | `MascotConfig.function_calling_enabled = true` |
+//! 流式消费与事件映射由 [`crate::chat_bridge`] 共享层提供。
 
+pub mod agents;
 pub mod approval;
 pub mod commands;
+pub mod delegate;
 pub mod error;
 pub mod events;
 pub mod prompt;

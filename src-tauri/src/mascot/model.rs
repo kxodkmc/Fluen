@@ -67,6 +67,12 @@ pub struct MascotConfig {
     /// 是否使用专业化表述（默认 false，使用拟人化文案）。
     #[serde(default)]
     pub professional_expression: bool,
+    /// 已启用的子智能体 ID 列表（空列表 = 全部可用）。
+    ///
+    /// 控制 Motis 总督角色可通过 `delegate_agent` 调度的子智能体集合。
+    /// 在设置页面可逐个开关。值为子智能体 ID 字符串（如 `"academic_writer"`）。
+    #[serde(default)]
+    pub enabled_agents: Vec<String>,
 }
 
 impl Default for MascotConfig {
@@ -83,6 +89,7 @@ impl Default for MascotConfig {
             personality: default_personality(),
             show_thinking_content: false,
             professional_expression: false,
+            enabled_agents: Vec::new(), // 空列表 = 全部可用
         }
     }
 }
@@ -205,6 +212,7 @@ mod tests {
         assert_eq!(config.personality, "cheerful");
         assert!(!config.show_thinking_content);
         assert!(!config.professional_expression);
+        assert!(config.enabled_agents.is_empty());
     }
 
     #[test]
@@ -233,6 +241,7 @@ mod tests {
             personality: "calm".into(),
             show_thinking_content: true,
             professional_expression: true,
+            enabled_agents: vec!["academic_writer".into(), "data_analyst".into()],
         };
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: MascotConfig = serde_json::from_str(&json).unwrap();
@@ -247,6 +256,7 @@ mod tests {
         assert_eq!(parsed.personality, "calm");
         assert!(parsed.show_thinking_content);
         assert!(parsed.professional_expression);
+        assert_eq!(parsed.enabled_agents, vec!["academic_writer", "data_analyst"]);
     }
 
     #[test]

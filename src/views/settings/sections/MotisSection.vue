@@ -33,6 +33,7 @@ const {
   functionCallingEnabled,
   showThinkingContent,
   professionalExpression,
+  agents,
   affinity,
   mood,
   personalities,
@@ -46,6 +47,8 @@ const {
   toggleFunctionCalling,
   toggleShowThinking,
   toggleProfessionalExpression,
+  isAgentEnabled,
+  toggleAgent,
 } = useMotisSettings();
 
 /* ── 智慧驱动 ───────────────────────────────────────────────────────── */
@@ -259,6 +262,34 @@ function onModelChange(event: Event): void {
             <input type="checkbox" :checked="professionalExpression" class="toggle__input" @change="toggleProfessionalExpression(($event.target as HTMLInputElement).checked)" />
             <span class="toggle__track" :class="{ 'toggle__track--on': professionalExpression }">
               <span class="toggle__thumb" :class="{ 'toggle__thumb--on': professionalExpression }" />
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <!-- ── 子智能体配置 ─────────────────────────────────────────── -->
+      <div v-if="enabled" class="agents-section">
+        <h3 class="sub-section__title">{{ t('settings.motis.agents.title') }}</h3>
+        <p class="sub-section__desc">{{ t('settings.motis.agents.description') }}</p>
+
+        <div
+          v-for="agent in agents"
+          :key="agent.id"
+          class="capability-row"
+        >
+          <div class="capability-row__info">
+            <span class="capability-row__label">{{ t('settings.motis.agents.' + agent.labelKey) }}</span>
+            <span class="capability-row__desc">{{ t('settings.motis.agents.' + agent.descKey) }}</span>
+          </div>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              :checked="isAgentEnabled(agent.id)"
+              class="toggle__input"
+              @change="toggleAgent(agent.id, ($event.target as HTMLInputElement).checked)"
+            />
+            <span class="toggle__track" :class="{ 'toggle__track--on': isAgentEnabled(agent.id) }">
+              <span class="toggle__thumb" :class="{ 'toggle__thumb--on': isAgentEnabled(agent.id) }" />
             </span>
           </label>
         </div>
@@ -644,6 +675,14 @@ function onModelChange(event: Event): void {
 
 /* ── 对话风格 ────────────────────────────────────────────────────────── */
 .dialog-style-section {
+  border-top: 1px solid var(--fluen-hairline);
+  padding-top: 1.25rem;
+  margin-bottom: 1.5rem;
+  max-width: 640px;
+}
+
+/* ── 子智能体配置 ────────────────────────────────────────────────────── */
+.agents-section {
   border-top: 1px solid var(--fluen-hairline);
   padding-top: 1.25rem;
   margin-bottom: 1.5rem;

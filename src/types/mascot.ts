@@ -34,6 +34,8 @@ export interface MascotConfig {
   show_thinking_content: boolean;
   /** 是否使用专业化表述（默认 false，使用拟人化文案）。 */
   professional_expression: boolean;
+  /** 已启用的子智能体 ID 列表（空列表 = 全部可用）。 */
+  enabled_agents: string[];
 }
 
 /** 宠物助手运行时数据，对应 `mascot_data.json`。 */

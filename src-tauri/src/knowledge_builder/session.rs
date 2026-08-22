@@ -19,10 +19,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use confluent::ConfluentRuntime;
 use fluen_knowledge::async_kb::AsyncKnowledgeBase;
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::agent_runtime::FluenRuntime;
 use crate::llm_config::model::{LlmConfig, SceneModelRef};
 
 use super::context_budget::ContextBudget;
@@ -36,7 +36,9 @@ use super::llm_helper::{
 /// 一个会话可处理多篇论文，通过复用 runtime 命中模型前缀缓存。
 /// 会话销毁后无法恢复 runtime 历史，但 Task 的 checkpoint 仍可恢复。
 pub struct KnowledgeBuildSession {
-    runtime: ConfluentRuntime,
+    runtime: FluenRuntime,
+    /// 思考模式是否启用（由模型能力决定，供 pipeline 各阶段使用）。
+    thinking_enabled: bool,
     budget: ContextBudget,
     /// 已处理论文 ID 列表（仅统计用，不参与恢复）。
     processed: Vec<String>,
@@ -51,7 +53,11 @@ impl KnowledgeBuildSession {
     /// 构建新会话：装配 runtime 与捕获器。
     ///
     /// 返回 `(session, plan_capture, entry_capture, usage_capture)`，
-    /// pipeline 持有 capture 引用，在 `runtime.run()` 后读取结果。
+    /// pipeline 持有 capture 引用，在各阶段执行后从中读取结果。
+    ///
+    /// 注意：`usage_capture` 在 referee 迁移后不再由 observer 写入，
+    /// 而是 pipeline 通过 `set_usage()` 手动更新（`run_chat` 返回 usage 后调用）。
+    /// 保留该 capture 供 pipeline 读取。
     pub async fn new(
         llm: &LlmConfig,
         model_ref: &SceneModelRef,
@@ -62,19 +68,18 @@ impl KnowledgeBuildSession {
         let entry_capture: CreateEntryCapture = Arc::new(Mutex::new(None));
         let usage_capture: UsageCapture = Arc::new(Mutex::new(None));
 
-        let runtime = build_kb_runtime(
+        let (thinking_enabled, runtime) = build_kb_runtime(
             llm,
             model_ref,
             kb,
             plan_capture.clone(),
             entry_capture.clone(),
-            usage_capture.clone(),
-        )
-        .await?;
+        )?;
 
         Ok((
             Self {
                 runtime,
+                thinking_enabled,
                 budget,
                 processed: Vec::new(),
                 history_used: 0,
@@ -85,9 +90,14 @@ impl KnowledgeBuildSession {
         ))
     }
 
-    /// 借用 runtime（pipeline 用于 `runtime.run()`）。
-    pub fn runtime(&self) -> &ConfluentRuntime {
+    /// 借用 runtime（pipeline 用于 `engine.chat()`）。
+    pub fn runtime(&self) -> &FluenRuntime {
         &self.runtime
+    }
+
+    /// 思考模式是否启用。
+    pub fn thinking_enabled(&self) -> bool {
+        self.thinking_enabled
     }
 
     /// 借用预算配置。
@@ -107,7 +117,7 @@ impl KnowledgeBuildSession {
 
     /// 从 LLM 响应的 usage 字段更新真实占用。
     ///
-    /// 在每次 `runtime.run()` 返回后调用。
+    /// 在每次 `engine.chat()` 返回后调用。
     /// `prompt_tokens` 已包含完整历史（system + 所有历史轮次 + 当前轮输入）。
     pub fn update_usage(&mut self, snapshot: UsageSnapshot) {
         self.history_used = snapshot.total();
@@ -143,6 +153,7 @@ impl std::fmt::Debug for KnowledgeBuildSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KnowledgeBuildSession")
             .field("budget", &self.budget)
+            .field("thinking_enabled", &self.thinking_enabled)
             .field("processed", &self.processed)
             .field("history_used", &self.history_used)
             .finish_non_exhaustive()

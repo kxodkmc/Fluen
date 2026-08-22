@@ -1,0 +1,61 @@
+ respondent,age,gender,education,income,q1,q2,q3,q4,q5,q6,pre_anxiety,post_anxiety,therapy_type,session
+R001,22,Female,Bachelor,35000,4,3,5,4,3,4,8,5,CBT,1
+R002,28,Male,Bachelor,45000,5,4,5,5,4,5,7,4,CBT,1
+R003,35,Female,Master,55000,4,3,4,3,4,3,9,6,CBT,1
+R004,40,Male,High School,38000,3,2,4,3,2,3,10,7,CBT,1
+R005,25,Female,Master,62000,5,4,5,5,5,4,6,3,CBT,1
+R006,33,Male,Bachelor,50000,4,4,5,4,3,4,8,5,CBT,1
+R007,29,Female,PhD,78000,5,5,4,5,4,5,7,3,CBT,1
+R008,45,Male,High School,40000,2,3,3,2,2,3,9,7,CBT,1
+R009,27,Female,Bachelor,48000,4,3,5,4,4,4,8,4,CBT,1
+R010,31,Male,Master,58000,5,4,5,5,3,5,7,5,CBT,1
+R011,38,Female,Bachelor,52000,4,3,4,4,4,3,8,6,CBT,1
+R012,24,Male,High School,36000,3,2,3,3,2,3,9,8,CBT,1
+R013,42,Female,Master,68000,5,4,5,5,4,5,6,4,CBT,1
+R014,30,Male,Bachelor,50000,4,4,4,3,3,4,8,5,CBT,1
+R015,26,Female,PhD,82000,5,5,5,5,5,4,7,3,CBT,1
+R016,22,Female,Bachelor,35000,4,3,5,4,3,4,8,6,Control,1
+R017,28,Male,Bachelor,45000,5,4,5,5,4,5,7,7,Control,1
+R018,35,Female,Master,55000,4,3,4,3,4,3,9,9,Control,1
+R019,40,Male,High School,38000,3,2,4,3,2,3,10,10,Control,1
+R020,25,Female,Master,62000,5,4,5,5,5,4,6,6,Control,1
+R021,33,Male,Bachelor,50000,4,4,5,4,3,4,8,8,Control,1
+R022,29,Female,PhD,78000,5,5,4,5,4,5,7,7,Control,1
+R023,45,Male,High School,40000,2,3,3,2,2,3,9,9,Control,1
+R024,27,Female,Bachelor,48000,4,3,5,4,4,4,8,8,Control,1
+R025,31,Male,Master,58000,5,4,5,5,3,5,7,7,Control,1
+R026,38,Female,Bachelor,52000,4,3,4,4,4,3,8,8,Control,1
+R027,24,Male,High School,36000,3,2,3,3,2,3,9,9,Control,1
+R028,42,Female,Master,68000,5,4,5,5,4,5,6,6,Control,1
+R029,30,Male,Bachelor,50000,4,4,4,3,3,4,8,8,Control,1
+R030,26,Female,PhD,82000,5,5,5,5,5,4,7,7,Control,1
+R001,22,Female,Bachelor,35000,4,3,5,4,3,4,5,3,CBT,2
+R002,28,Male,Bachelor,45000,5,4,5,5,4,5,4,2,CBT,2
+R003,35,Female,Master,55000,4,3,4,3,4,3,6,3,CBT,2
+R004,40,Male,High School,38000,3,2,4,3,2,3,7,4,CBT,2
+R005,25,Female,Master,62000,5,4,5,5,5,4,3,1,CBT,2
+R006,33,Male,Bachelor,50000,4,4,5,4,3,4,5,2,CBT,2
+R007,29,Female,PhD,78000,5,5,4,5,4,5,3,1,CBT,2
+R008,45,Male,High School,40000,2,3,3,2,2,3,7,5,CBT,2
+R009,27,Female,Bachelor,48000,4,3,5,4,4,4,4,2,CBT,2
+R010,31,Male,Master,58000,5,4,5,5,3,5,5,3,CBT,2
+R011,38,Female,Bachelor,52000,4,3,4,4,4,3,6,4,CBT,2
+R012,24,Male,High School,36000,3,2,3,3,2,3,8,5,CBT,2
+R013,42,Female,Master,68000,5,4,5,5,4,5,4,2,CBT,2
+R014,30,Male,Bachelor,50000,4,4,4,3,3,4,5,3,CBT,2
+R015,26,Female,PhD,82000,5,5,5,5,5,4,3,1,CBT,2
+R016,22,Female,Bachelor,35000,4,3,5,4,3,4,6,6,Control,2
+R017,28,Male,Bachelor,45000,5,4,5,5,4,5,7,7,Control,2
+R018,35,Female,Master,55000,4,3,4,3,4,3,9,9,Control,2
+R019,40,Male,High School,38000,3,2,4,3,2,3,10,10,Control,2
+R020,25,Female,Master,62000,5,4,5,5,5,4,6,6,Control,2
+R021,33,Male,Bachelor,50000,4,4,5,4,3,4,8,8,Control,2
+R022,29,Female,PhD,78000,5,5,4,5,4,5,7,7,Control,2
+R023,45,Male,High School,40000,2,3,3,2,2,3,9,9,Control,2
+R024,27,Female,Bachelor,48000,4,3,5,4,4,4,8,8,Control,2
+R025,31,Male,Master,58000,5,4,5,5,3,5,7,7,Control,2
+R026,38,Female,Bachelor,52000,4,3,4,4,4,3,8,8,Control,2
+R027,24,Male,High School,36000,3,2,3,3,2,3,9,9,Control,2
+R028,42,Female,Master,68000,5,4,5,5,4,5,6,6,Control,2
+R029,30,Male,Bachelor,50000,4,4,4,3,3,4,8,8,Control,2
+R030,26,Female,PhD,82000,5,5,5,5,5,4,7,7,Control,2

@@ -46,7 +46,10 @@ pub mod state;
 pub mod store;
 pub mod types;
 
+#[allow(unused_imports)]
 pub use error::TaskQueueError;
 pub use state::TaskQueueState;
+#[allow(unused_imports)]
 pub use store::TaskStore;
+#[allow(unused_imports)]
 pub use types::{TaskKind, TaskQueueFile, TaskRecord, TaskStatus};

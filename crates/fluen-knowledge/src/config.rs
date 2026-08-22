@@ -1,7 +1,7 @@
 //! 知识库 MCP / 工具层配置。
 //!
 //! 提供精细化的工具启停、输出截断、前缀定制等能力，
-//! 适配不同集成场景（MCP server、confluent agent_runtime 工具注入等）。
+//! 适配不同集成场景（MCP server、referee-ai 工具注入等）。
 
 use serde::{Deserialize, Serialize};
 

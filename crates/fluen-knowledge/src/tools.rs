@@ -1,12 +1,13 @@
-//! confluent agent_runtime 工具适配层。
+//! referee-ai 工具适配层。
 //!
-//! 将知识库操作适配为 [`confluent::agent_runtime::Tool`] / [`confluent::agent_runtime::ToolProvider`]，
-//! 可直接注册到智能体的 [`confluent::agent_runtime::ToolRegistry`] 中。
+//! 将知识库操作适配为 [`referee_ai::tool::Tool`]，
+//! 可直接注册到智能体的 [`referee_ai::tool::ToolRegistry`] 中。
 //!
 //! # 设计
 //!
 //! - 每个知识库操作对应一个 `Tool` 实现，持有 [`AsyncKnowledgeBase`] 的克隆。
-//! - [`KnowledgeToolProvider`] 聚合全部工具，实现 `ToolProvider` trait。
+//! - [`KnowledgeToolProvider`] 聚合全部工具，提供 `list_tools()` 便捷方法
+//!   供调用方逐个注册到 `ToolRegistry`。
 //! - 工具 schema 的 JSON Schema 与 MCP server 保持一致，确保跨集成方式统一。
 //! - 输出格式简洁：仅返回关键字段，content 按配置截断。
 //!
@@ -16,17 +17,17 @@
 //! # use fluen_knowledge::async_kb::AsyncKnowledgeBase;
 //! # use fluen_knowledge::config::KnowledgeConfig;
 //! # use fluen_knowledge::tools::KnowledgeToolProvider;
-//! # use confluent::agent_runtime::{ToolProvider, ToolRegistry};
+//! # use referee_ai::tool::ToolRegistry;
 //! use std::sync::Arc;
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # fn example() -> anyhow::Result<()> {
 //! let kb = AsyncKnowledgeBase::open("references")?;
 //! let provider = KnowledgeToolProvider::new(kb, KnowledgeConfig::default());
 //!
-//! let registry = ToolRegistry::new();
-//! registry.register_provider(&provider).await;
-//!
-//! // 现在 registry 中已注册 knowledge_query / knowledge_create_entry 等工具
+//! let registry = ToolRegistry::with_defaults();
+//! for tool in provider.list_tools() {
+//!     registry.register(tool)?;
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -34,9 +35,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use referee_ai::tool::{Tool, ToolContext, ToolError, ToolOutput};
 use serde_json::{json, Value};
-
-use confluent::agent_runtime::{InvocationContext, Tool, ToolError, ToolProvider, ToolSchema};
 
 use crate::async_kb::{AsyncBatchQueryParams, AsyncKnowledgeBase, AsyncQueryParams};
 use crate::config::{KnowledgeConfig, ALL_TOOL_SHORT_NAMES};
@@ -44,7 +44,7 @@ use crate::types::MetaQueryType;
 use crate::wiki::{CreateEntryParams, EditEntryParams};
 
 // ════════════════════════════════════════════════════════════════
-// ToolProvider
+// KnowledgeToolProvider
 // ════════════════════════════════════════════════════════════════
 
 /// 知识库工具提供者。
@@ -65,11 +65,9 @@ impl KnowledgeToolProvider {
     pub fn with_defaults(kb: AsyncKnowledgeBase) -> Self {
         Self::new(kb, KnowledgeConfig::default())
     }
-}
 
-#[async_trait]
-impl ToolProvider for KnowledgeToolProvider {
-    async fn list_tools(&self) -> Vec<Arc<dyn Tool>> {
+    /// 列出全部已启用的工具，供调用方逐个注册到 `ToolRegistry`。
+    pub fn list_tools(&self) -> Vec<Arc<dyn Tool>> {
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
 
         for &short_name in ALL_TOOL_SHORT_NAMES {
@@ -113,7 +111,9 @@ fn build_tool(
 /// 工具内部共享状态。
 struct ToolBase {
     kb: AsyncKnowledgeBase,
-    schema: ToolSchema,
+    name: String,
+    description: String,
+    parameters: Value,
     config: KnowledgeConfig,
 }
 
@@ -121,11 +121,9 @@ impl ToolBase {
     fn new(kb: AsyncKnowledgeBase, name: String, description: String, parameters: Value, config: KnowledgeConfig) -> Self {
         Self {
             kb,
-            schema: ToolSchema {
-                name,
-                description,
-                parameters,
-            },
+            name,
+            description,
+            parameters,
             config,
         }
     }
@@ -162,24 +160,28 @@ impl QueryTool {
 
 #[async_trait]
 impl Tool for QueryTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.base.schema
+    fn name(&self) -> &str {
+        &self.base.name
     }
 
-    async fn invoke(
-        &self,
-        input: Value,
-        _ctx: &InvocationContext,
-    ) -> Result<Value, ToolError> {
-        let params: AsyncQueryParams = serde_json::from_value(input)
-            .map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+    fn description(&self) -> &str {
+        &self.base.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.base.parameters.clone()
+    }
+
+    async fn execute(&self, _ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        let params: AsyncQueryParams = serde_json::from_value(args)
+            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let mut result = self
             .base
             .kb
             .query(params)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
 
         // 截断 content
         if self.base.config.max_content_length > 0 {
@@ -190,7 +192,7 @@ impl Tool for QueryTool {
             }
         }
 
-        Ok(json!({
+        let output = json!({
             "success": result.success,
             "method": result.retrieval_method_used.as_str(),
             "count": result.results.len(),
@@ -201,7 +203,8 @@ impl Tool for QueryTool {
                 "score": format!("{:.3}", m.score),
                 "content": m.content,
             })).collect::<Vec<_>>()
-        }))
+        });
+        Ok(ToolOutput::from_json(&output))
     }
 }
 
@@ -235,22 +238,30 @@ impl QueryBatchTool {
 
 #[async_trait]
 impl Tool for QueryBatchTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.base.schema
+    fn name(&self) -> &str {
+        &self.base.name
     }
 
-    async fn invoke(&self, input: Value, _ctx: &InvocationContext) -> Result<Value, ToolError> {
-        let params: AsyncBatchQueryParams = serde_json::from_value(input)
-            .map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+    fn description(&self) -> &str {
+        &self.base.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.base.parameters.clone()
+    }
+
+    async fn execute(&self, _ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        let params: AsyncBatchQueryParams = serde_json::from_value(args)
+            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let result = self
             .base
             .kb
             .query_batch(params)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
 
-        Ok(json!({
+        let output = json!({
             "success": result.success,
             "results": result.results.iter().map(|item| json!({
                 "query": item.query,
@@ -263,7 +274,8 @@ impl Tool for QueryBatchTool {
                     "score": format!("{:.3}", m.score),
                 })).collect::<Vec<_>>()
             })).collect::<Vec<_>>()
-        }))
+        });
+        Ok(ToolOutput::from_json(&output))
     }
 }
 
@@ -306,22 +318,30 @@ impl CreateEntryTool {
 
 #[async_trait]
 impl Tool for CreateEntryTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.base.schema
+    fn name(&self) -> &str {
+        &self.base.name
     }
 
-    async fn invoke(&self, input: Value, _ctx: &InvocationContext) -> Result<Value, ToolError> {
-        let params: CreateEntryParams = serde_json::from_value(input)
-            .map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+    fn description(&self) -> &str {
+        &self.base.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.base.parameters.clone()
+    }
+
+    async fn execute(&self, _ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        let params: CreateEntryParams = serde_json::from_value(args)
+            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let result = self
             .base
             .kb
             .create_entry(params)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
 
-        Ok(json!({
+        let output = json!({
             "success": result.success,
             "wiki_id": result.wiki_id,
             "file_path": result.file_path,
@@ -329,7 +349,8 @@ impl Tool for CreateEntryTool {
             "tags": result.tags_generated.iter().map(|t| json!({
                 "name": t.name, "tag_id": t.tag_id
             })).collect::<Vec<_>>()
-        }))
+        });
+        Ok(ToolOutput::from_json(&output))
     }
 }
 
@@ -380,22 +401,30 @@ impl EditEntryTool {
 
 #[async_trait]
 impl Tool for EditEntryTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.base.schema
+    fn name(&self) -> &str {
+        &self.base.name
     }
 
-    async fn invoke(&self, input: Value, _ctx: &InvocationContext) -> Result<Value, ToolError> {
-        let params: EditEntryParams = serde_json::from_value(input)
-            .map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+    fn description(&self) -> &str {
+        &self.base.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.base.parameters.clone()
+    }
+
+    async fn execute(&self, _ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        let params: EditEntryParams = serde_json::from_value(args)
+            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let result = self
             .base
             .kb
             .edit_entry(params)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
 
-        Ok(json!({
+        let output = json!({
             "success": result.success,
             "wiki_id": result.wiki_id,
             "file_path": result.file_path,
@@ -403,7 +432,8 @@ impl Tool for EditEntryTool {
             "edit_results": result.edit_results.iter().map(|r| json!({
                 "type": r.edit_type, "success": r.success
             })).collect::<Vec<_>>()
-        }))
+        });
+        Ok(ToolOutput::from_json(&output))
     }
 }
 
@@ -434,16 +464,24 @@ impl MetaTool {
 
 #[async_trait]
 impl Tool for MetaTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.base.schema
+    fn name(&self) -> &str {
+        &self.base.name
     }
 
-    async fn invoke(&self, input: Value, _ctx: &InvocationContext) -> Result<Value, ToolError> {
-        let query_type_str = input
+    fn description(&self) -> &str {
+        &self.base.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.base.parameters.clone()
+    }
+
+    async fn execute(&self, _ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        let query_type_str = args
             .get("query_type")
             .and_then(|v| v.as_str())
             .unwrap_or("overview");
-        let limit = input
+        let limit = args
             .get("limit")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.base.config.default_recent_limit as u64) as usize;
@@ -459,9 +497,9 @@ impl Tool for MetaTool {
             .kb
             .meta(query_type, limit)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
 
-        Ok(json!({
+        let output = json!({
             "success": result.success,
             "data": {
                 "total_entries": result.data.total_entries,
@@ -470,7 +508,8 @@ impl Tool for MetaTool {
                 "tags": result.data.tags,
                 "recent_entries": result.data.recent_entries,
             }
-        }))
+        });
+        Ok(ToolOutput::from_json(&output))
     }
 }
 
@@ -484,7 +523,7 @@ struct GetEntryTool {
 
 impl GetEntryTool {
     fn new(kb: AsyncKnowledgeBase, name: String, config: KnowledgeConfig) -> Self {
-        let description = "Get full entry details by wiki ID.".to_string();
+        let description = "Get full entry details by wiki id.".to_string();
         let parameters = json!({
             "type": "object",
             "properties": {
@@ -500,15 +539,23 @@ impl GetEntryTool {
 
 #[async_trait]
 impl Tool for GetEntryTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.base.schema
+    fn name(&self) -> &str {
+        &self.base.name
     }
 
-    async fn invoke(&self, input: Value, _ctx: &InvocationContext) -> Result<Value, ToolError> {
-        let wiki_id = input
+    fn description(&self) -> &str {
+        &self.base.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.base.parameters.clone()
+    }
+
+    async fn execute(&self, _ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        let wiki_id = args
             .get("wiki_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParams("missing 'wiki_id'".into()))?
+            .ok_or_else(|| ToolError::InvalidArguments("missing 'wiki_id'".into()))?
             .to_string();
 
         let entry = self
@@ -516,7 +563,7 @@ impl Tool for GetEntryTool {
             .kb
             .get_entry(wiki_id)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
 
         match entry {
             Some(detail) => {
@@ -524,13 +571,17 @@ impl Tool for GetEntryTool {
                 if self.base.config.max_content_length > 0 && !entry.content.is_empty() {
                     entry.content = self.base.config.truncate_content(&entry.content);
                 }
-                Ok(json!({
+                let output = json!({
                     "entry": entry,
                     "tag_titles": detail.tag_titles,
                     "relation_titles": detail.relation_titles,
-                }))
+                });
+                Ok(ToolOutput::from_json(&output))
             }
-            None => Ok(json!({"found": false})),
+            None => {
+                let output = json!({"found": false});
+                Ok(ToolOutput::from_json(&output))
+            }
         }
     }
 }
@@ -559,19 +610,27 @@ impl ListEntriesTool {
 
 #[async_trait]
 impl Tool for ListEntriesTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.base.schema
+    fn name(&self) -> &str {
+        &self.base.name
     }
 
-    async fn invoke(&self, _input: Value, _ctx: &InvocationContext) -> Result<Value, ToolError> {
+    fn description(&self) -> &str {
+        &self.base.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.base.parameters.clone()
+    }
+
+    async fn execute(&self, _ctx: ToolContext, _args: Value) -> Result<ToolOutput, ToolError> {
         let entries = self
             .base
             .kb
             .list_entries()
             .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
 
-        Ok(json!({
+        let output = json!({
             "count": entries.len(),
             "entries": entries.iter().map(|e| json!({
                 "id": e.id,
@@ -580,7 +639,8 @@ impl Tool for ListEntriesTool {
                 "tags": e.tags,
                 "updated": e.updated,
             })).collect::<Vec<_>>()
-        }))
+        });
+        Ok(ToolOutput::from_json(&output))
     }
 }
 
@@ -594,7 +654,7 @@ struct DeleteEntryTool {
 
 impl DeleteEntryTool {
     fn new(kb: AsyncKnowledgeBase, name: String, config: KnowledgeConfig) -> Self {
-        let description = "Delete a knowledge base entry by wiki ID.".to_string();
+        let description = "Delete a knowledge base entry by wiki id.".to_string();
         let parameters = json!({
             "type": "object",
             "properties": {
@@ -610,31 +670,40 @@ impl DeleteEntryTool {
 
 #[async_trait]
 impl Tool for DeleteEntryTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.base.schema
+    fn name(&self) -> &str {
+        &self.base.name
     }
 
-    async fn invoke(&self, input: Value, _ctx: &InvocationContext) -> Result<Value, ToolError> {
-        let wiki_id = input
+    fn description(&self) -> &str {
+        &self.base.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.base.parameters.clone()
+    }
+
+    async fn execute(&self, _ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        let wiki_id = args
             .get("wiki_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParams("missing 'wiki_id'".into()))?
+            .ok_or_else(|| ToolError::InvalidArguments("missing 'wiki_id'".into()))?
             .to_string();
 
         self.base
             .kb
             .delete_entry(wiki_id)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
 
-        Ok(json!({"success": true}))
+        let output = json!({"success": true});
+        Ok(ToolOutput::from_json(&output))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use confluent::agent_runtime::ToolRegistry;
+    use referee_ai::tool::ToolRegistry;
 
     #[tokio::test]
     async fn test_tool_provider_registration() {
@@ -642,13 +711,10 @@ mod tests {
         let kb = AsyncKnowledgeBase::init(dir.path()).unwrap();
         let provider = KnowledgeToolProvider::with_defaults(kb);
 
-        let tools = provider.list_tools().await;
+        let tools = provider.list_tools();
         assert_eq!(tools.len(), 8);
 
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t.schema().name.as_str())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"knowledge_query"));
         assert!(names.contains(&"knowledge_create_entry"));
         assert!(names.contains(&"knowledge_delete_entry"));
@@ -663,7 +729,7 @@ mod tests {
             .build();
         let provider = KnowledgeToolProvider::new(kb, config);
 
-        let tools = provider.list_tools().await;
+        let tools = provider.list_tools();
         assert_eq!(tools.len(), 2);
     }
 
@@ -673,18 +739,14 @@ mod tests {
         let kb = AsyncKnowledgeBase::init(dir.path()).unwrap();
         let provider = KnowledgeToolProvider::with_defaults(kb);
 
-        let registry = ToolRegistry::new();
-        registry.register_provider(&provider).await;
-
-        let schemas = registry.list_schemas();
-        assert_eq!(schemas.len(), 8);
+        let registry = ToolRegistry::with_defaults();
+        for tool in provider.list_tools() {
+            registry.register(tool).unwrap();
+        }
 
         // 验证能通过 registry 查找工具
-        let query_tool = registry.get("knowledge_query");
-        assert!(query_tool.is_some());
-
-        let create_tool = registry.get("knowledge_create_entry");
-        assert!(create_tool.is_some());
+        assert!(registry.get("knowledge_query").is_some());
+        assert!(registry.get("knowledge_create_entry").is_some());
     }
 
     #[tokio::test]
@@ -693,45 +755,52 @@ mod tests {
         let kb = AsyncKnowledgeBase::init(dir.path()).unwrap();
         let provider = KnowledgeToolProvider::with_defaults(kb);
 
-        let registry = ToolRegistry::new();
-        registry.register_provider(&provider).await;
+        let registry = ToolRegistry::with_defaults();
+        for tool in provider.list_tools() {
+            registry.register(tool).unwrap();
+        }
 
-        // 先创建条目
-        let ctx = InvocationContext {
-            run_id: "test".into(),
-            agent_id: "test".into(),
+        let ctx = ToolContext {
             tool_call_id: "test".into(),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            timeout: std::time::Duration::from_secs(30),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
         };
 
+        // 先创建条目
         let create_result = registry
-            .invoke(
-                "knowledge_create_entry",
-                &json!({
+            .get("knowledge_create_entry")
+            .unwrap()
+            .execute(
+                ctx.clone(),
+                json!({
                     "wiki_type": "concept",
                     "title": "Tool Test",
-                    "content": "Testing confluent agent_runtime tool integration."
+                    "content": "Testing referee-ai tool integration."
                 }),
-                &ctx,
             )
             .await
             .unwrap();
-        assert_eq!(create_result["success"], true);
+        assert!(create_result.content.contains("success"));
+        assert!(create_result.content.contains("true"));
 
         // 查询
         let query_result = registry
-            .invoke(
-                "knowledge_query",
-                &json!({
+            .get("knowledge_query")
+            .unwrap()
+            .execute(
+                ctx,
+                json!({
                     "query": "integration",
                     "method": "keyword"
                 }),
-                &ctx,
             )
             .await
             .unwrap();
-        assert_eq!(query_result["success"], true);
-        assert!(query_result["count"].as_u64().unwrap() > 0);
+        assert!(query_result.content.contains("success"));
+        assert!(query_result.content.contains("true"));
     }
 }

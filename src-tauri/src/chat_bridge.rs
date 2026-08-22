@@ -1,0 +1,396 @@
+//! 聊天流式桥接——referee [`FluenRuntime`] 流式会话 → Tauri 前端事件。
+//!
+//! Motis 聊天与学术助手共用的流式适配层，职责：
+//!
+//! 1. [`start_chat_session`]：回放前端历史（`restore_session_history`）+ 启动流式回合
+//!    （`chat_stream`），返回 [`ChatHandle`] 供调用方注册取消
+//! 2. [`consume_stream`]：消费 `StreamChunk` 流并映射为 Tauri 事件
+//!    （思考增量 / 文本增量 / 工具调用 / 完成 / 错误）
+//!
+//! ## 事件映射
+//!
+//! | StreamChunk | Tauri 事件 |
+//! |-------------|-----------|
+//! | `Delta { reasoning_content }` | `{prefix}:thought` |
+//! | `Delta { content }` | `{prefix}:text` |
+//! | `Delta { tool_calls }`（参数累积完整时） | `{prefix}:tool-call` |
+//! | 流正常结束（记录到 Finish usage） | `{prefix}:finish`（恰好一次） |
+//! | 流错误 | `{prefix}:error` |
+//!
+//! 工具调用事件：referee 的 `ToolCallDelta` 是分片增量（index 定位、
+//! arguments 逐段拼接），桥接层累积并在参数可解析为完整 JSON 时 emit 一次，
+//! 流结束时冲刷未发送的（兜底）。
+//!
+//! `finish` 事件保证**恰好一次**：多轮工具调用会产生多次 `Finish` chunk，
+//! 仅在流结束时携带最后一次的 usage emit。
+
+use std::collections::HashMap;
+
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+use tauri::{Emitter, Window};
+
+use crate::agent_runtime::FluenRuntime;
+
+use referee_ai::engine::ChatHandle;
+use referee_ai::provider::{Message, Role, StreamChunk, ThinkingConfig};
+use referee_ai::session::{ChatOptions, ChatPayload, SessionId};
+
+/// 前端历史消息（`motis_chat_send` / `ai_assistant_send` 的 `history` 参数）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HistoryMessage {
+    /// 消息角色（`"user"` 或 `"assistant"`）。
+    pub role: String,
+    /// 消息内容。
+    pub content: String,
+}
+
+/// 一组前缀化的聊天事件名（如 `motis:*` / `ai-assistant:*`）。
+#[derive(Debug, Clone, Copy)]
+pub struct ChatEvents {
+    /// 思考增量事件。
+    pub thought: &'static str,
+    /// 文本增量事件。
+    pub text: &'static str,
+    /// 工具调用事件。
+    pub tool_call: &'static str,
+    /// 完成事件。
+    pub finish: &'static str,
+    /// 错误事件。
+    pub error: &'static str,
+}
+
+/// 事件 payload（与前端契约一致）。
+mod payload {
+    use serde::Serialize;
+
+    #[derive(Serialize, Clone)]
+    pub struct Thought<'a> {
+        pub delta: &'a str,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct Text<'a> {
+        pub delta: &'a str,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct ToolCall {
+        pub id: String,
+        pub name: String,
+        pub input: serde_json::Value,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct Finish {
+        pub result: serde_json::Value,
+        pub total_tokens: usize,
+    }
+
+    #[derive(Serialize, Clone)]
+    pub struct Error {
+        pub message: String,
+    }
+
+    impl Error {
+        pub fn new(message: impl Into<String>) -> Self {
+            Self {
+                message: message.into(),
+            }
+        }
+    }
+}
+
+/// 将前端历史消息转换为 referee [`Message`]。
+pub fn to_referee_messages(history: &[HistoryMessage]) -> Vec<Message> {
+    history
+        .iter()
+        .map(|msg| Message {
+            role: match msg.role.as_str() {
+                "assistant" => Role::Assistant,
+                _ => Role::User,
+            },
+            content: msg.content.clone().into(),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            usage: None,
+        })
+        .collect()
+}
+
+/// 启动一轮流式会话：回放历史 + 发起 `chat_stream`。
+///
+/// 返回 [`ChatHandle`]——调用方应立即注册到取消表，随后调用
+/// [`consume_stream`] 消费。失败时返回用户可读的错误消息。
+pub fn start_chat_session(
+    runtime: &FluenRuntime,
+    session_id: SessionId,
+    history: Vec<Message>,
+    message: String,
+    system_prompt: String,
+    thinking_enabled: bool,
+) -> Result<ChatHandle, String> {
+    // 回放前端传入的历史（前端是对话的事实源，每轮重建会话）
+    if !history.is_empty() {
+        runtime
+            .restore_session_history(session_id, history)
+            .map_err(|e| format!("会话历史恢复失败: {e}"))?;
+    }
+
+    let payload = ChatPayload {
+        message: Message::user(message),
+        options: ChatOptions {
+            system_prompt: Some(system_prompt),
+            thinking: ThinkingConfig {
+                enabled: thinking_enabled,
+                effort: None,
+            },
+            ..ChatOptions::default()
+        },
+        peer_depth: 0,
+    };
+
+    runtime
+        .chat_stream(session_id, payload)
+        .map_err(|e| format!("会话启动失败: {e}"))
+}
+
+/// 消费流式回复并 emit 到前端。
+///
+/// 阻塞至回合结束（完成 / 错误 / 取消）。`finish` 恰好 emit 一次
+/// （流正常结束时）；错误时 emit `error` 且不再 emit `finish`；
+/// 用户取消（流静默结束）不 emit 任何终止事件。
+pub async fn consume_stream(handle: ChatHandle, window: &Window, events: &ChatEvents) {
+    let reply = match handle.wait().await {
+        Some(reply) => reply,
+        None => return, // 回合已结束（如取消），无需处理
+    };
+
+    use referee_ai::engine::EngineReply;
+    let stream = match reply {
+        EngineReply::Streaming(stream) => stream,
+        EngineReply::Error(err) => {
+            emit_error(window, events, err.to_string());
+            return;
+        }
+        EngineReply::Busy { .. } => {
+            emit_error(window, events, "会话忙碌，请等待当前回合结束");
+            return;
+        }
+        EngineReply::Cancelled => return,
+        EngineReply::Timeout => {
+            emit_error(window, events, "会话超时");
+            return;
+        }
+        EngineReply::Success(resp) => {
+            // chat_stream 正常不返回 Success；稳健处理
+            let total = resp.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+            let _ = window.emit(
+                events.finish,
+                payload::Finish {
+                    result: serde_json::Value::String(
+                        resp.message.content.as_text().unwrap_or_default().to_string(),
+                    ),
+                    total_tokens: total,
+                },
+            );
+            return;
+        }
+    };
+
+    let mut stream = stream;
+    let mut acc = ToolCallAccumulator::default();
+    let mut full_text = String::new();
+    let mut last_usage: Option<usize> = None;
+    let mut errored = false;
+
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(StreamChunk::Delta {
+                content,
+                reasoning_content,
+                tool_calls,
+                ..
+            }) => {
+                if let Some(text) = content {
+                    full_text.push_str(&text);
+                    let _ = window.emit(events.text, payload::Text { delta: &text });
+                }
+                if let Some(thought) = reasoning_content {
+                    let _ = window.emit(events.thought, payload::Thought { delta: &thought });
+                }
+                if !tool_calls.is_empty() {
+                    acc.merge(tool_calls);
+                    acc.flush_ready(window, events);
+                }
+            }
+            Ok(StreamChunk::Finish { usage, .. }) => {
+                last_usage = usage.map(|u| u.total_tokens);
+            }
+            Err(e) => {
+                tracing::error!(
+                    target = "fluen_chat_bridge",
+                    error = %e,
+                    "聊天流式错误（LLM/上游）"
+                );
+                emit_error(window, events, e.to_string());
+                errored = true;
+                break;
+            }
+        }
+    }
+
+    if errored {
+        return;
+    }
+    // 用户取消：无 usage 且无文本增量时静默结束
+    if last_usage.is_none() && full_text.is_empty() && acc.pending_is_empty() {
+        return;
+    }
+
+    acc.flush_all(window, events);
+    let _ = window.emit(
+        events.finish,
+        payload::Finish {
+            result: serde_json::Value::String(full_text),
+            total_tokens: last_usage.unwrap_or(0),
+        },
+    );
+}
+
+/// emit 错误事件（emit 失败时静默——窗口可能已关闭）。
+fn emit_error(window: &Window, events: &ChatEvents, message: impl Into<String>) {
+    let _ = window.emit(events.error, payload::Error::new(message.into()));
+}
+
+/// 工具调用增量累积器。
+///
+/// `ToolCallDelta` 按 `index` 分片到达（id / name 首片携带，arguments 逐片拼接）；
+/// 累积至 arguments 可解析为完整 JSON 时 emit 一次 `tool-call` 事件。
+#[derive(Default)]
+struct ToolCallAccumulator {
+    calls: HashMap<u32, PendingCall>,
+}
+
+struct PendingCall {
+    id: String,
+    name: String,
+    arguments: String,
+    sent: bool,
+}
+
+impl ToolCallAccumulator {
+    fn merge(&mut self, deltas: Vec<referee_ai::provider::ToolCallDelta>) {
+        for delta in deltas {
+            let entry = self.calls.entry(delta.index).or_insert_with(|| PendingCall {
+                id: String::new(),
+                name: String::new(),
+                arguments: String::new(),
+                sent: false,
+            });
+            if let Some(id) = delta.id {
+                if !id.is_empty() {
+                    entry.id = id;
+                }
+            }
+            if let Some(func) = delta.function {
+                if let Some(name) = func.name {
+                    if !name.is_empty() {
+                        entry.name = name;
+                    }
+                }
+                if let Some(args) = func.arguments {
+                    entry.arguments.push_str(&args);
+                }
+            }
+        }
+    }
+
+    /// emit 参数已完整的工具调用（JSON 解析成功即视为完整）。
+    fn flush_ready(&mut self, window: &Window, events: &ChatEvents) {
+        for call in self.calls.values_mut() {
+            if call.sent || call.arguments.is_empty() {
+                continue;
+            }
+            if let Ok(input) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                call.sent = true;
+                tracing::debug!(
+                    target = "fluen_chat_bridge",
+                    tool_name = %call.name,
+                    tool_call_id = %call.id,
+                    "模型发起工具调用"
+                );
+                let _ = window.emit(
+                    events.tool_call,
+                    payload::ToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        input,
+                    },
+                );
+            }
+        }
+    }
+
+    /// 流结束时冲刷全部未发送的工具调用（兜底，参数不完整时按原始字符串发）。
+    fn flush_all(&mut self, window: &Window, events: &ChatEvents) {
+        for call in self.calls.values_mut() {
+            if call.sent {
+                continue;
+            }
+            call.sent = true;
+            let input = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .unwrap_or(serde_json::Value::String(call.arguments.clone()));
+            let _ = window.emit(
+                events.tool_call,
+                payload::ToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    input,
+                },
+            );
+        }
+    }
+
+    fn pending_is_empty(&self) -> bool {
+        self.calls.values().all(|c| c.sent)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 单元测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_maps_roles() {
+        let history = vec![
+            HistoryMessage {
+                role: "user".into(),
+                content: "你好".into(),
+            },
+            HistoryMessage {
+                role: "assistant".into(),
+                content: "你好，有什么可以帮你？".into(),
+            },
+            HistoryMessage {
+                role: "unknown".into(),
+                content: "按 user 处理".into(),
+            },
+        ];
+        let messages = to_referee_messages(&history);
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(messages[0].role, Role::User));
+        assert!(matches!(messages[1].role, Role::Assistant));
+        assert!(matches!(messages[2].role, Role::User));
+    }
+
+    #[test]
+    fn empty_history_maps_to_empty() {
+        assert!(to_referee_messages(&[]).is_empty());
+    }
+}

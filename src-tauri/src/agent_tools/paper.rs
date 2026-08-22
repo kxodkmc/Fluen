@@ -1,8 +1,8 @@
 //! 论文内容工具——供智能体读取当前论文的全文、大纲与指定章节。
 //!
-//! 装配为 confluent [`Tool`] + [`ToolProvider`]，捕获 `project_path` 于构造时
-//! （与知识库 `KnowledgeToolProvider` 相同的注入方式），`invoke` 时实时读取
-//! 项目文件（`project::loader::open_project`），保证内容为磁盘上的最新持久化状态。
+//! 实现 referee [`Tool`] trait，捕获 `project_path` 于构造时，
+//! `execute` 时实时读取项目文件（`project::loader::open_project`），
+//! 保证内容为磁盘上的最新持久化状态。
 //!
 //! ## 功能
 //!
@@ -16,10 +16,8 @@
 //! - 解析逻辑全部下沉到 [`crate::agent_tools::parse`] 纯函数层，工具层仅做参数校验与组装。
 //! - 输出格式简单结构化，便于 LLM 消费；章节未找到时返回可读错误并附可用标题列表。
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
-use confluent::agent_runtime::{InvocationContext, Tool, ToolError, ToolProvider, ToolSchema};
+use referee_ai::tool::{Tool, ToolContext, ToolError, ToolOutput};
 use serde_json::{json, Value};
 
 use super::parse::{build_outline, extract_section};
@@ -27,9 +25,13 @@ use super::parse::{build_outline, extract_section};
 /// 工具名称。
 pub const PAPER_CONTENT_TOOL_NAME: &str = "paper_content";
 
+/// 工具描述。
+const DESCRIPTION: &str = "读取当前论文内容：可获取全文、大纲或指定章节（含子章节）。论文内容较长时优先使用 outline / section 而非 full。";
+
 /// 读取论文内容的智能体工具。
 pub struct PaperContentTool {
-    schema: ToolSchema,
+    /// 输入参数 JSON Schema。
+    parameters: Value,
     /// 论文项目根路径（构造时注入，与当前打开的项目绑定）。
     project_path: String,
 }
@@ -54,11 +56,7 @@ impl PaperContentTool {
         });
 
         Self {
-            schema: ToolSchema {
-                name: PAPER_CONTENT_TOOL_NAME.into(),
-                description: "读取当前论文内容：可获取全文、大纲或指定章节（含子章节）。论文内容较长时优先使用 outline / section 而非 full。".into(),
-                parameters,
-            },
+            parameters,
             project_path,
         }
     }
@@ -67,74 +65,66 @@ impl PaperContentTool {
     fn load_paper(&self) -> Result<String, ToolError> {
         crate::project::loader::open_project(&self.project_path)
             .map(|result| result.main_md)
-            .map_err(|e| ToolError::ExecutionFailed(format!("读取论文失败: {}", e)))
+            .map_err(|e| ToolError::Execution(format!("读取论文失败: {}", e)))
     }
 }
 
 #[async_trait]
 impl Tool for PaperContentTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.schema
+    fn name(&self) -> &str {
+        PAPER_CONTENT_TOOL_NAME
     }
 
-    async fn invoke(
+    fn description(&self) -> &str {
+        DESCRIPTION
+    }
+
+    fn input_schema(&self) -> Value {
+        self.parameters.clone()
+    }
+
+    /// 只读查询工具，默认同步返回结果（LLM 等待本轮调用完成）。
+    fn default_wait(&self) -> bool {
+        true
+    }
+
+    async fn execute(
         &self,
-        input: Value,
-        _ctx: &InvocationContext,
-    ) -> Result<Value, ToolError> {
-        let action = input
+        _ctx: ToolContext,
+        args: Value,
+    ) -> Result<ToolOutput, ToolError> {
+        let action = args
             .get("action")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParams("缺少 action 参数".into()))?;
+            .ok_or_else(|| ToolError::InvalidArguments("缺少 action 参数".into()))?;
 
         let md = self.load_paper()?;
 
         match action {
-            "full" => Ok(json!({ "content": md })),
-            "outline" => Ok(json!({ "outline": build_outline(&md) })),
+            "full" => Ok(ToolOutput::from_json(&json!({ "content": md }))),
+            "outline" => Ok(ToolOutput::from_json(&json!({ "outline": build_outline(&md) }))),
             "section" => {
-                let heading = input
+                let heading = args
                     .get("heading")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.trim().is_empty())
                     .ok_or_else(|| {
-                        ToolError::InvalidParams("action=section 时必须提供 heading 参数".into())
+                        ToolError::InvalidArguments("action=section 时必须提供 heading 参数".into())
                     })?;
 
                 match extract_section(&md, heading) {
-                    Ok(section) => Ok(json!({
+                    Ok(section) => Ok(ToolOutput::from_json(&json!({
                         "heading": format!("{} {}", "#".repeat(section.heading.level as usize), section.heading.text),
                         "content": section.content,
-                    })),
-                    Err(e) => Err(ToolError::InvalidParams(e.message)),
+                    }))),
+                    Err(e) => Err(ToolError::InvalidArguments(e.message)),
                 }
             }
-            other => Err(ToolError::InvalidParams(format!(
+            other => Err(ToolError::InvalidArguments(format!(
                 "未知 action: {}（可选值: full / outline / section）",
                 other
             ))),
         }
-    }
-}
-
-/// 包装 [`PaperContentTool`] 为 [`ToolProvider`]。
-pub struct PaperContentToolProvider {
-    tool: Arc<PaperContentTool>,
-}
-
-impl PaperContentToolProvider {
-    /// 构造提供者。
-    pub fn new(project_path: String) -> Self {
-        Self {
-            tool: Arc::new(PaperContentTool::new(project_path)),
-        }
-    }
-}
-
-#[async_trait]
-impl ToolProvider for PaperContentToolProvider {
-    async fn list_tools(&self) -> Vec<Arc<dyn Tool>> {
-        vec![self.tool.clone()]
     }
 }
 
@@ -222,26 +212,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invoke_full_returns_whole_paper() {
+    async fn execute_full_returns_whole_paper() {
         let (storage, project_dir) = build_test_project();
         let tool = PaperContentTool::new(project_dir.to_string_lossy().to_string());
-        let result = tool
-            .invoke(json!({ "action": "full" }), &ctx())
-            .await
-            .unwrap();
+        let result = output_json(tool.execute(ctx(), json!({ "action": "full" })).await.unwrap());
         assert!(result["content"].as_str().unwrap().contains("# 引言"));
         assert!(result["content"].as_str().unwrap().contains("# 方法"));
         let _ = fs::remove_dir_all(&storage);
     }
 
     #[tokio::test]
-    async fn invoke_outline_returns_tree() {
+    async fn execute_outline_returns_tree() {
         let (storage, project_dir) = build_test_project();
         let tool = PaperContentTool::new(project_dir.to_string_lossy().to_string());
-        let result = tool
-            .invoke(json!({ "action": "outline" }), &ctx())
-            .await
-            .unwrap();
+        let result =
+            output_json(tool.execute(ctx(), json!({ "action": "outline" })).await.unwrap());
         let outline = result["outline"].as_array().unwrap();
         assert_eq!(outline.len(), 2);
         assert_eq!(outline[0]["text"], "引言");
@@ -250,13 +235,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invoke_section_returns_subsections() {
+    async fn execute_section_returns_subsections() {
         let (storage, project_dir) = build_test_project();
         let tool = PaperContentTool::new(project_dir.to_string_lossy().to_string());
-        let result = tool
-            .invoke(json!({ "action": "section", "heading": "# 引言" }), &ctx())
-            .await
-            .unwrap();
+        let result = output_json(
+            tool.execute(ctx(), json!({ "action": "section", "heading": "# 引言" }))
+                .await
+                .unwrap(),
+        );
         let content = result["content"].as_str().unwrap();
         assert!(content.contains("## 研究背景"));
         assert!(content.contains("### 国内现状"));
@@ -265,66 +251,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invoke_section_not_found_returns_error() {
+    async fn execute_section_not_found_returns_error() {
         let (storage, project_dir) = build_test_project();
         let tool = PaperContentTool::new(project_dir.to_string_lossy().to_string());
         let err = tool
-            .invoke(json!({ "action": "section", "heading": "# 不存在" }), &ctx())
+            .execute(ctx(), json!({ "action": "section", "heading": "# 不存在" }))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParams(_)));
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
         assert!(err.to_string().contains("可用标题"));
         let _ = fs::remove_dir_all(&storage);
     }
 
     #[tokio::test]
-    async fn invoke_missing_action_rejected() {
+    async fn execute_missing_action_rejected() {
         let (storage, project_dir) = build_test_project();
         let tool = PaperContentTool::new(project_dir.to_string_lossy().to_string());
-        let err = tool.invoke(json!({}), &ctx()).await.unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParams(_)));
+        let err = tool.execute(ctx(), json!({})).await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
         let _ = fs::remove_dir_all(&storage);
     }
 
     #[tokio::test]
-    async fn invoke_unknown_action_rejected() {
-        let (storage, project_dir) = build_test_project();
-        let tool = PaperContentTool::new(project_dir.to_string_lossy().to_string());
-        let err = tool
-            .invoke(json!({ "action": "bogus" }), &ctx())
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParams(_)));
-        let _ = fs::remove_dir_all(&storage);
-    }
-
-    #[tokio::test]
-    async fn invoke_section_without_heading_rejected() {
+    async fn execute_unknown_action_rejected() {
         let (storage, project_dir) = build_test_project();
         let tool = PaperContentTool::new(project_dir.to_string_lossy().to_string());
         let err = tool
-            .invoke(json!({ "action": "section" }), &ctx())
+            .execute(ctx(), json!({ "action": "bogus" }))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParams(_)));
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
         let _ = fs::remove_dir_all(&storage);
     }
 
     #[tokio::test]
-    async fn invoke_invalid_project_path_fails() {
+    async fn execute_section_without_heading_rejected() {
+        let (storage, project_dir) = build_test_project();
+        let tool = PaperContentTool::new(project_dir.to_string_lossy().to_string());
+        let err = tool
+            .execute(ctx(), json!({ "action": "section" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+        let _ = fs::remove_dir_all(&storage);
+    }
+
+    #[tokio::test]
+    async fn execute_invalid_project_path_fails() {
         let tool = PaperContentTool::new("/nonexistent/fluen-project".into());
-        let err = tool.invoke(json!({ "action": "full" }), &ctx()).await.unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed(_)));
+        let err = tool.execute(ctx(), json!({ "action": "full" })).await.unwrap_err();
+        assert!(matches!(err, ToolError::Execution(_)));
     }
 
-    /// 构造最小可用的 InvocationContext。
-    fn ctx() -> InvocationContext {
-        InvocationContext {
-            run_id: "test-run".into(),
-            agent_id: "test-agent".into(),
+    /// 构造最小可用的 ToolContext。
+    fn ctx() -> ToolContext {
+        ToolContext {
             tool_call_id: "test-call".into(),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            timeout: std::time::Duration::from_secs(30),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
         }
+    }
+
+    /// 解析工具输出为 JSON（工具返回值均为 `ToolOutput::from_json` 构造）。
+    fn output_json(output: ToolOutput) -> Value {
+        serde_json::from_str(&output.content).unwrap()
     }
 }

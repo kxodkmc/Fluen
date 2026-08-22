@@ -2,9 +2,10 @@
 /**
  * MotisThinkingIndicator — Motis 思考指示器。
  *
- * 默认显示"思考中…"文字 + 点点点动画。
- * 当 show_thinking_content 配置为 true 且传入 content 时，
- * 额外展示可折叠的思考增量内容。
+ * - `active=true`（思考进行中）：显示"思考中…"文字 + 点点点动画。
+ * - `active=false`（思考已结束）：不再显示动画，改显示"已思考"，
+ *   点击展开按钮可查看折叠的思考增量内容。
+ * - 当 show_thinking_content 配置为 true 且传入 content 时，展示可折叠的思考内容。
  *
  * 配置来源：useMascotConfig.show_thinking_content
  */
@@ -15,10 +16,15 @@ import { useMascotConfig } from '../../../../composables/useMascotConfig';
 const props = defineProps<{
   /** 思考内容增量（show_thinking_content=true 时展示）。 */
   content?: string;
+  /** 是否仍在思考中（false 表示思考已结束，隐藏动画）。 */
+  active?: boolean;
 }>();
 
 const { t } = useI18n();
 const { loadConfig } = useMascotConfig();
+
+/** 是否仍在思考进行中（缺省视为进行中，兼容尾部指示器等无入参场景）。 */
+const isActive = props.active !== false;
 
 /** 是否展示详细思考内容。 */
 const showThinkingContent = ref(false);
@@ -42,8 +48,8 @@ function toggleExpanded(): void {
 
 <template>
   <div class="motis-thinking">
-    <!-- 思考中动画 -->
-    <div class="motis-thinking__indicator">
+    <!-- 思考中动画（仅思考进行中显示） -->
+    <div v-if="isActive" class="motis-thinking__indicator">
       <span class="motis-thinking__text">{{ t('main.motisPanel.thinking') }}</span>
       <span class="motis-thinking__dots">
         <span class="motis-thinking__dot" />
@@ -56,6 +62,25 @@ function toggleExpanded(): void {
         class="motis-thinking__toggle"
         @click="toggleExpanded"
       >
+        <svg
+          viewBox="0 0 24 24"
+          width="12"
+          height="12"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          :class="{ 'motis-thinking__chevron--expanded': expanded }"
+        >
+          <path d="m6 9 6 6 6-6" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- 思考已结束：仅保留展开按钮与折叠内容，不显示动画 -->
+    <div v-else-if="showThinkingContent && content" class="motis-thinking__indicator motis-thinking__indicator--done">
+      <span class="motis-thinking__text">{{ t('main.motisPanel.thinkingDone') }}</span>
+      <button class="motis-thinking__toggle" @click="toggleExpanded">
         <svg
           viewBox="0 0 24 24"
           width="12"
@@ -99,6 +124,15 @@ function toggleExpanded(): void {
   font-family: var(--fluen-font-sans);
   font-size: 12px;
   color: var(--fluen-slate);
+}
+
+/* 思考已结束：弱化样式，不再暗示进行中 */
+.motis-thinking__indicator--done {
+  background: transparent;
+  border: none;
+  padding: 2px 6px;
+  color: var(--fluen-stone);
+  gap: 4px;
 }
 
 .motis-thinking__dots {

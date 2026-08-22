@@ -5,10 +5,26 @@
 
 use std::collections::{HashMap, HashSet};
 
-use confluent::llmkit::ApiStyle;
 use serde::{Deserialize, Serialize};
 
 use super::error::LlmConfigError;
+
+// ---------------------------------------------------------------------------
+// API 风格（本地定义）
+// ---------------------------------------------------------------------------
+
+/// API 协议风格。
+///
+/// 不同厂商支持不同的 API 协议风格，用于决定请求构建时的端点路由与请求体格式。
+/// 序列化值与旧版兼容（`"OpenAI"` / `"Anthropic"`），
+/// 旧配置文件可直接读取。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApiStyle {
+    /// OpenAI 风格的 API。
+    OpenAI,
+    /// Anthropic 风格的 API。
+    Anthropic,
+}
 
 // ---------------------------------------------------------------------------
 // 提供商类型

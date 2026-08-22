@@ -29,6 +29,7 @@ const DEFAULT_CONFIG: MascotConfig = {
   personality: 'cheerful',
   show_thinking_content: false,
   professional_expression: false,
+  enabled_agents: [],
 };
 
 /**

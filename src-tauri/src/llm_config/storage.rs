@@ -102,9 +102,8 @@ impl ConfigStorage {
 mod tests {
     use super::*;
     use crate::llm_config::model::{
-        LlmConfig, ModelCapabilities, ModelConfig, ProviderConfig, ProviderType,
+        ApiStyle, LlmConfig, ModelCapabilities, ModelConfig, ProviderConfig, ProviderType,
     };
-    use confluent::llmkit::ApiStyle;
     use std::collections::HashMap;
 
     fn sample_config() -> LlmConfig {

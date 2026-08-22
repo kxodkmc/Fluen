@@ -15,9 +15,9 @@ pub enum MotisChatError {
     #[error("LLM 配置错误: {0}")]
     LlmConfig(String),
 
-    /// confluent 运行时错误。
-    #[error(transparent)]
-    Runtime(#[from] confluent::ConfluentError),
+    /// 运行时错误（会话启动失败等）。
+    #[error("运行时错误: {0}")]
+    Runtime(String),
 
     /// IO 错误。
     #[error("IO 错误: {0}")]

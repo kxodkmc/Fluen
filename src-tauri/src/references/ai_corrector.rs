@@ -11,29 +11,33 @@
 //!
 //! ## 依赖
 //!
-//! 复用 [`crate::knowledge_builder::llm_helper::build_chat_client`] 构建 ChatClient，
+//! 复用 [`crate::llm_chat::build_llm_provider`] 构建 LLMProvider，
 //! 避免重复 LLM 客户端装配代码。
 
-use confluent::llmkit::{ChatClient, ChatRequest, Message, MessageRole, ThinkingMode};
+use std::sync::Arc;
+
+use referee_ai::provider::{
+    ChatRequest, LLMProvider, Message, MessageContent, ThinkingConfig, ToolChoice,
+};
 use tokio_util::sync::CancellationToken;
 
-use crate::knowledge_builder::llm_helper::build_chat_client;
+use crate::llm_chat;
 use crate::llm_config::model::LlmConfig;
 
 use super::error::ReferenceError;
 use super::import_mode::ReferenceImportMode;
 
 /// AI 校正的最大输出 token 数（足够容纳典型论文）。
-const MAX_OUTPUT_TOKENS: u32 = 16384;
+const MAX_OUTPUT_TOKENS: usize = 16384;
 /// 采样温度——低温度保证格式稳定。
 const TEMPERATURE: f32 = 0.1;
 
 /// 文献 AI 格式校正器。
 ///
-/// 持有 [`ChatClient`] 与模型 ID，通过 [`AiCorrector::correct`] 发送
+/// 持有 [`LLMProvider`] 与模型 ID，通过 [`AiCorrector::correct`] 发送
 /// 校正请求并返回 AI 输出的标准 Markdown（含 frontmatter）。
 pub struct AiCorrector {
-    client: ChatClient,
+    provider: Arc<dyn LLMProvider>,
     model_id: String,
     /// 模型是否支持思考模式（由模型能力标志决定，开启时请求注入 thinking 参数）。
     thinking: bool,
@@ -43,7 +47,7 @@ impl AiCorrector {
     /// 从 LLM 配置创建校正器。
     ///
     /// 解析 `scene_models.reference_import` 场景模型（未配置则回退到全局激活项），
-    /// 构建对应的 ChatClient。
+    /// 构建对应的 LLMProvider。
     ///
     /// # 错误
     /// - [`ReferenceError::AiCorrection`]：未配置 LLM 提供商 / 场景模型引用失效 / api_key 缺失
@@ -54,8 +58,8 @@ impl AiCorrector {
             ReferenceError::AiCorrection(msg)
         })?;
 
-        let client = build_chat_client(provider).map_err(|e| {
-            tracing::error!(scope = "references", error = %e, "构建 ChatClient 失败");
+        let llm_provider = llm_chat::build_llm_provider(provider, &model_id).map_err(|e| {
+            tracing::error!(scope = "references", error = %e, "构建 LLMProvider 失败");
             ReferenceError::AiCorrection(e.to_string())
         })?;
 
@@ -67,7 +71,7 @@ impl AiCorrector {
         );
 
         Ok(Self {
-            client,
+            provider: llm_provider,
             thinking: provider.model_supports_thinking(&model_id),
             model_id,
         })
@@ -93,25 +97,19 @@ impl AiCorrector {
         let user_content = build_user_content(ocr_md, pdf_text, mode);
 
         let req = ChatRequest {
-            model: self.model_id.clone(),
             messages: vec![
-                Message {
-                    role: MessageRole::System,
-                    content: system_prompt,
-                    ..Default::default()
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: user_content,
-                    ..Default::default()
-                },
+                Message::system(MessageContent::text(system_prompt)),
+                Message::user(MessageContent::text(user_content)),
             ],
-            tools: None,
-            thinking: self.thinking.then_some(ThinkingMode::Enabled),
-            reasoning_effort: None,
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            thinking: ThinkingConfig {
+                enabled: self.thinking,
+                effort: None,
+            },
             max_tokens: Some(MAX_OUTPUT_TOKENS),
             temperature: Some(TEMPERATURE),
-            stream: false,
+            extra: std::collections::HashMap::new(),
         };
 
         tracing::info!(
@@ -125,7 +123,7 @@ impl AiCorrector {
 
         // 通过 select! 响应取消信号
         let result = tokio::select! {
-            r = self.client.chat(&req) => r,
+            r = self.provider.chat(req) => r,
             _ = cancel_token.cancelled() => {
                 tracing::warn!(scope = "references", "AI 校正被取消");
                 return Err(ReferenceError::Cancelled);
@@ -137,7 +135,14 @@ impl AiCorrector {
             ReferenceError::AiCorrection(e.to_string())
         })?;
 
-        let content = response.content.trim().to_string();
+        let content = response
+            .message
+            .content
+            .as_text()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
         if content.is_empty() {
             return Err(ReferenceError::AiCorrection(
                 "AI 返回空内容".into(),
@@ -170,7 +175,7 @@ const RULES_OCR_WITH_AI: &str = concat!(
     "2. **图片标签保留不变**：文本中出现的 HTML 图片标签（如 `<div style=\"text-align: center;\"><img src=\"...\" alt=\"Image\" .../></div>` 及其下方的图注 `<div style=\"text-align: center;\">图X ...</div>`）必须原样保留，不得修改路径、属性或图注文字。\n",
     "3. **冲突以 PDF 文本为准**：当 OCR 结果与 PDF 文本在文字内容上存在冲突（如 OCR 识别错误、多余空格、错字），以 PDF 文本为准。\n",
     "4. **保留分页**：不同页面之间用 `---` 分隔。\n",
-    "5. **输出完整 Markdown**：直接输出校正后的完整 Markdown，不要添加任何解释说明。",
+    "5. **输出完整 Markdown**：直接输出校正后的完整 Markdown，不要添加任何解释说明。\n",
 );
 
 /// 混合模式（OCR + AI 校正）输入说明。
@@ -188,7 +193,7 @@ const RULES_AI_ONLY: &str = concat!(
     "\n## 校正规则\n",
     "1. **只做格式纠错**：校正标题层级（# 一级标题、## 二级标题等）、列表、表格、段落分隔、引用格式。不得增删、改写正文内容。\n",
     "2. **保留分页**：不同页面之间用 `---` 分隔。\n",
-    "3. **输出完整 Markdown**：直接输出校正后的完整 Markdown，不要添加任何解释说明。",
+    "3. **输出完整 Markdown**：直接输出校正后的完整 Markdown，不要添加任何解释说明。\n",
 );
 
 /// 纯 AI 模式（AiOnly）输入说明。
@@ -204,7 +209,7 @@ const RULES_OCR_ONLY: &str = concat!(
     "1. **只做格式纠错**：校正标题层级（# 一级标题、## 二级标题等）、列表、表格、段落分隔、引用格式。不得增删、改写正文内容。\n",
     "2. **图片标签保留不变**：文本中出现的 HTML 图片标签（如 `<div style=\"text-align: center;\"><img src=\"...\" alt=\"Image\" .../></div>` 及其下方的图注 `<div style=\"text-align: center;\">图X ...</div>`）必须原样保留，不得修改路径、属性或图注文字。\n",
     "3. **保留分页**：不同页面之间用 `---` 分隔。\n",
-    "4. **输出完整 Markdown**：直接输出校正后的完整 Markdown，不要添加任何解释说明。",
+    "4. **输出完整 Markdown**：直接输出校正后的完整 Markdown，不要添加任何解释说明。\n",
 );
 
 /// 纯 OCR 模式输入说明。
@@ -283,7 +288,7 @@ fn build_user_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use confluent::llmkit::ApiStyle;
+    use crate::llm_config::model::ApiStyle;
     use std::collections::HashMap;
 
     #[test]

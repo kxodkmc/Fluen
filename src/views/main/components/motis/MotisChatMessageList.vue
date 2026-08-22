@@ -13,6 +13,7 @@
  * 生成中且最后一条非流式文本时，追加思考指示器。
  */
 import { ref, watch, nextTick, computed } from 'vue';
+import MarkdownIt from 'markdown-it';
 import type { ChatMessage } from '../../types';
 import { useI18n } from '../../../../i18n';
 import MotisThinkingIndicator from './MotisThinkingIndicator.vue';
@@ -26,6 +27,30 @@ const props = defineProps<{
 }>();
 
 const { t } = useI18n();
+
+/* ── Markdown 渲染（助手消息） ───────────────────────────────────────── */
+/**
+ * markdown-it 实例（聊天专用）。
+ *
+ * - `html: false`：转义所有 HTML，防止 LLM 输出注入任意标签
+ * - `breaks: true`：单换行渲染为 `<br>`（聊天消息常用单换行分段）
+ * - `linkify` / `typographer`：自动识别链接、优化排版
+ */
+const md = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true,
+  typographer: true,
+});
+
+/** 将消息内容渲染为 HTML（渲染失败时回退原文）。 */
+function renderMd(content: string): string {
+  try {
+    return md.render(content);
+  } catch {
+    return content;
+  }
+}
 
 const scrollRef = ref<HTMLElement | null>(null);
 
@@ -87,7 +112,12 @@ const showTrailingThinking = computed(() => {
           :class="`motis-msg--${msg.role}`"
         >
           <div class="motis-msg__bubble">
-            <span class="motis-msg__text">{{ msg.content }}<span v-if="msg.isStreaming" class="motis-msg__cursor" /></span>
+            <!-- 用户消息：纯文本；助手消息：Markdown 渲染 -->
+            <div v-if="msg.role === 'assistant'" class="motis-msg__markdown" v-html="renderMd(msg.content)" />
+            <template v-else>
+              <span class="motis-msg__text">{{ msg.content }}</span><span v-if="msg.isStreaming" class="motis-msg__cursor" />
+            </template>
+            <span v-if="msg.role === 'assistant' && msg.isStreaming" class="motis-msg__cursor motis-msg__cursor--after" />
             <!-- 中断标记 -->
             <span v-if="msg.interrupted" class="motis-msg__interrupted">
               {{ t('main.motisPanel.interrupted') }}
@@ -99,12 +129,15 @@ const showTrailingThinking = computed(() => {
         <MotisThinkingIndicator
           v-else-if="msg.kind === 'thinking'"
           :content="msg.content"
+          :active="msg.isStreaming !== false"
         />
 
         <!-- 工具调用消息 -->
         <MotisToolCallBubble
           v-else-if="msg.kind === 'tool_call'"
           :tool-name="msg.toolName"
+          :input="msg.toolInput"
+          :result="msg.toolResult"
         />
 
         <!-- 状态消息（错误/提示） -->
@@ -199,6 +232,50 @@ const showTrailingThinking = computed(() => {
   white-space: pre-wrap;
 }
 
+/* 助手消息 Markdown 渲染：继承气泡字体，重置块级默认边距，词长换行 */
+.motis-msg__markdown {
+  word-break: break-word;
+  line-height: 1.6;
+}
+
+.motis-msg__markdown :deep(p),
+.motis-msg__markdown :deep(ul),
+.motis-msg__markdown :deep(ol),
+.motis-msg__markdown :deep(pre),
+.motis-msg__markdown :deep(blockquote) {
+  margin: 0 0 6px;
+}
+
+.motis-msg__markdown :deep(:last-child) {
+  margin-bottom: 0;
+}
+
+.motis-msg__markdown :deep(ul),
+.motis-msg__markdown :deep(ol) {
+  padding-left: 18px;
+}
+
+.motis-msg__markdown :deep(code) {
+  background: var(--fluen-hover);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-family: var(--fluen-font-mono);
+  font-size: 0.92em;
+}
+
+.motis-msg__markdown :deep(pre) {
+  background: var(--fluen-surface);
+  border: 1px solid var(--fluen-hairline);
+  border-radius: 8px;
+  padding: 8px 12px;
+  overflow-x: auto;
+}
+
+.motis-msg__markdown :deep(pre code) {
+  background: transparent;
+  padding: 0;
+}
+
 /* 流式光标（行内，跟随文字） */
 .motis-msg__cursor {
   display: inline-block;
@@ -208,6 +285,11 @@ const showTrailingThinking = computed(() => {
   background: var(--fluen-brand-coral);
   animation: motis-cursor-blink 1s infinite;
   margin-left: 1px;
+}
+
+/* 助手消息 markdown 之后的流式光标（独立行内块，跟随内容末尾） */
+.motis-msg__cursor--after {
+  margin-top: 2px;
 }
 
 @keyframes motis-cursor-blink {

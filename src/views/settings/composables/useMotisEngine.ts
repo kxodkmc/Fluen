@@ -68,8 +68,17 @@ export function useMotisEngine() {
       const [llm, mascot] = await Promise.all([loadLlmConfig(), loadMascotConfig()]);
       llmConfig.value = llm;
       mascotConfig.value = mascot;
-      // 若当前选中的服务商已不存在于 LLM 配置中，清理脏数据
-      if (mascot.provider_id && !llm.providers.some((p) => p.id === mascot.provider_id)) {
+      // 清理脏数据：provider 或 model 已不存在于 LLM 配置中时回退到全局激活项
+      const providerExists =
+        !mascot.provider_id ||
+        llm.providers.some((p) => p.id === mascot.provider_id);
+      const modelExists =
+        !providerExists ||
+        !mascot.model_id ||
+        llm.providers
+          .find((p) => p.id === mascot.provider_id)
+          ?.models.some((m) => m.id === mascot.model_id) === true;
+      if (!providerExists || !modelExists) {
         mascotConfig.value = { ...mascot, provider_id: null, model_id: null };
         await saveMascotConfig(mascotConfig.value);
       }

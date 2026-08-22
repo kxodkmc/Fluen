@@ -12,8 +12,9 @@
  * ```text
  * motis:thought   →  思考增量（依配置决定是否展示）
  * motis:text       →  文本增量（追加到当前 assistant 文本消息）
- * motis:tool-call  →  工具调用（追加 tool_call 消息 + 更新气泡）
- * motis:finish     →  完成（结束流式状态 + 清空气泡）
+ * motis:tool-call   →  工具调用（追加 tool_call 消息 + 更新气泡）
+ * motis:tool-result →  工具执行结果（按 tool_call_id 关联到工具消息）
+ * motis:finish      →  完成（结束流式状态 + 清空气泡）
  * motis:error      →  错误（追加状态消息 + 标记中断 + 清空气泡）
  * ```
  *
@@ -27,6 +28,7 @@
 import { ref, readonly, onScopeDispose, getCurrentScope } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { useLogger } from '../../../composables/useLogger';
 import { useMascotConfig } from '../../../composables/useMascotConfig';
 import { useProject } from '../../../composables/useProject';
 import { useI18n } from '../../../i18n';
@@ -57,6 +59,11 @@ interface ToolCallPayload {
   id: string;
   name: string;
   input: unknown;
+}
+interface ToolResultPayload {
+  tool_call_id: string;
+  name: string;
+  result: unknown;
 }
 interface FinishPayload {
   result: unknown;
@@ -90,6 +97,7 @@ const DEFAULT_CONFIG: MascotConfig = {
   mcp_enabled: false,
   skills_enabled: false,
   function_calling_enabled: false,
+  enabled_agents: [],
   personality: 'cheerful',
   show_thinking_content: false,
   professional_expression: false,
@@ -114,6 +122,8 @@ function generateId(): string {
 export function useMotisChat() {
   const { loadConfig } = useMascotConfig();
   const { t } = useI18n();
+  /** 统一前端日志（桥接到后端同一日志文件）。 */
+  const log = useLogger('motis-chat');
   /** 当前打开的论文项目（发送消息时读取 project_path，供论文内容工具使用）。 */
   const { currentProject } = useProject();
 
@@ -146,7 +156,7 @@ export function useMotisChat() {
     try {
       config = await loadConfig();
     } catch (err) {
-      console.error('[useMotisChat] 加载配置失败:', err);
+      log.error('加载配置失败', err);
       config = { ...DEFAULT_CONFIG };
     }
   }
@@ -212,7 +222,7 @@ export function useMotisChat() {
       try {
         await invoke('motis_chat_resolve_approval', { approvalId: id, approved });
       } catch (err) {
-        console.error('[useMotisChat] 回传审批决策失败:', err);
+        log.error('回传审批决策失败', err);
       }
     }
     pendingApprovals.value = pendingApprovals.value.filter((a) => a.id !== id);
@@ -278,6 +288,7 @@ export function useMotisChat() {
 
   /** 处理工具调用 — 追加 tool_call 消息并更新气泡为拟人化文案。 */
   function onToolCall(payload: ToolCallPayload): void {
+    log.debug('工具调用', { name: payload.name, id: payload.id });
     // 关闭当前流式段（工具调用穿插在文本之间）
     closeStreamingMessages();
 
@@ -288,8 +299,17 @@ export function useMotisChat() {
       content: '',
       timestamp: Date.now(),
       toolName: payload.name,
+      toolInput: payload.input,
     });
     statusBubble.value = pickToolMessage();
+  }
+
+  /** 处理工具结果 — 按 tool_call_id 关联到对应工具调用消息，写入执行结果。 */
+  function onToolResult(payload: ToolResultPayload): void {
+    const msg = messages.value.find((m) => m.kind === 'tool_call' && m.id === payload.tool_call_id);
+    if (msg) {
+      msg.toolResult = payload.result;
+    }
   }
 
   /** 气泡清除延迟（ms）——完成后保留气泡一段时间让用户读完最后回复。 */
@@ -320,6 +340,7 @@ export function useMotisChat() {
 
   /** 处理错误事件 — 追加状态消息、标记中断并清空气泡。 */
   function onError(payload: ErrorPayload): void {
+    log.error('收到错误事件', { message: payload.message });
     closeStreamingMessages(true);
     messages.value.push({
       id: generateId(),
@@ -341,6 +362,7 @@ export function useMotisChat() {
       listen<ThoughtPayload>('motis:thought', (e) => onThought(e.payload)),
       listen<TextPayload>('motis:text', (e) => onText(e.payload)),
       listen<ToolCallPayload>('motis:tool-call', (e) => onToolCall(e.payload)),
+      listen<ToolResultPayload>('motis:tool-result', (e) => onToolResult(e.payload)),
       listen<ApprovalRequestPayload>('motis:approval-request', (e) => onApprovalRequest(e.payload)),
       listen<FinishPayload>('motis:finish', (e) => onFinish(e.payload)),
       listen<ErrorPayload>('motis:error', (e) => onError(e.payload)),
@@ -386,6 +408,11 @@ export function useMotisChat() {
 
     // 3. 构造历史（在追加用户消息之前）
     const history = buildHistory();
+    log.info('发送消息', {
+      message: text,
+      historyCount: history.length,
+      projectPath: currentProject.value?.project_path ?? null,
+    });
 
     // 4. 追加用户消息
     messages.value.push({
@@ -406,7 +433,7 @@ export function useMotisChat() {
 
     // 6. 调用后端命令（非 Tauri 环境直接结束生成状态）
     if (!isTauriEnvironment()) {
-      console.warn('[useMotisChat] 非 Tauri 环境，已跳过实际发送。');
+      log.warn('非 Tauri 环境，已跳过实际发送');
       statusBubble.value = null;
       isGenerating.value = false;
       currentRunId.value = null;
@@ -423,6 +450,7 @@ export function useMotisChat() {
     } catch (err) {
       // invoke 抛错时（命令层异常），补一条错误消息
       const msg = err instanceof Error ? err.message : String(err);
+      log.error('motis_chat_send 失败', { message: msg });
       onError({ message: msg });
     }
   }

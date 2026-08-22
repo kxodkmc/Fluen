@@ -4,7 +4,7 @@
 //!
 //! - **阶段 1（Planning）**：注入 Index 快照（全局去重视图），AI 阅读全文，产出 [`ExtractionPlan`]。
 //! - **阶段 2（Execution）**：按计划逐条创建 summary / concept / entity，
-//!   每条创建前做 L2 混合检索查重，每次 `runtime.run()` 后从真实 usage 更新会话预算。
+//!   每条创建前做 L2 混合检索查重，每次 `engine.chat()` 后从真实 usage 更新会话预算。
 //!   最后单独执行 relations 阶段。
 //!
 //! ## 状态机
@@ -20,29 +20,40 @@
 //!
 //! - **Index 快照注入**：Planning 阶段注入 [`IndexSnapshot`]，AI 拥有全局去重视图。
 //! - **L2 混合检索**：每条创建前查询已有条目（Top 3），注入候选供 AI 决策"更新 vs 新建"。
-//! - **真实 usage 跟踪**：每次 `runtime.run()` 后从 [`UsageCapture`] 读取 LLM 返回的
+//! - **真实 usage 跟踪**：每次 `engine.chat()` 后从 [`UsageSnapshot`] 读取 LLM 返回的
 //!   `prompt_tokens + completion_tokens`，更新 [`KnowledgeBuildSession`] 的 `history_used`。
 //! - **会话复用**：runtime 由调用方（runner）通过 [`KnowledgeBuildSession`] 传入，
 //!   跨论文复用以命中模型前缀缓存。
+//!
+//! ## referee 迁移变化
+//!
+//! - `ConfluentRuntime.run(input)` → `FluenRuntime.chat(session_id, payload)` + `handle.wait()`
+//! - `RuntimeObserver` → `EntryCaptureGuard` 装饰器在工具执行时自动写 capture
+//! - `UsageObserver` → `run_chat()` 直接返回 `UsageSnapshot`
+//! - 每次 `engine.chat()` 使用独立 `SessionId`（由 `new_session_id()` 创建）
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use fluen_knowledge::async_kb::{AsyncKnowledgeBase, AsyncQueryParams};
 use fluen_knowledge::types::{RetrievalMethod, WikiType};
 
+use crate::agent_runtime::FluenRuntime;
 use crate::llm_config::model::LlmConfig;
 
 use super::error::KnowledgeBuilderError;
 use super::events::KbBuildProgressPayload;
 use super::index_snapshot::IndexSnapshot;
-use super::llm_helper::{CreateEntryCapture, PlanCapture, UsageCapture, UsageSnapshot};
+use super::llm_helper::{
+    new_session_id, run_chat, CreateEntryCapture, PlanCapture, UsageCapture,
+    UsageSnapshot,
+};
 use super::prompts::{
-    render_candidates, render_create_concept, render_create_entity, render_create_summary,
-    render_establish_entry_relations, render_planning, render_summarize, L2Candidate, LONG_DOC_THRESHOLD,
+    render_create_concept, render_create_entity, render_create_summary,
+    render_establish_entry_relations, render_planning, render_summarize, L2Candidate,
+    LONG_DOC_THRESHOLD,
 };
 use super::session::KnowledgeBuildSession;
 use super::types::{
@@ -124,6 +135,7 @@ pub async fn build(
         let md_content = read_md_content(project_path, ref_id)?;
         let (plan, usage) = run_planning(
             session.runtime(),
+            session.thinking_enabled(),
             &md_content,
             options,
             &snapshot,
@@ -162,12 +174,12 @@ pub async fn build(
         let candidates = l2_query(&kb, ref_id, Some(WikiType::Summary)).await?;
         let (summary_id, usage) = run_create_summary(
             session.runtime(),
+            session.thinking_enabled(),
             entry_capture,
             usage_capture,
             ref_id,
             &plan.summary_points,
             &candidates,
-            cancel,
         )
         .await?;
 
@@ -209,6 +221,7 @@ pub async fn build(
             let candidates = l2_query(&kb, &planned.title, Some(WikiType::Concept)).await?;
             let (id, usage) = run_create_concept(
                 session.runtime(),
+                session.thinking_enabled(),
                 entry_capture,
                 usage_capture,
                 planned,
@@ -255,6 +268,7 @@ pub async fn build(
             let candidates = l2_query(&kb, &planned.title, Some(WikiType::Entity)).await?;
             let (id, usage) = run_create_entity(
                 session.runtime(),
+                session.thinking_enabled(),
                 entry_capture,
                 usage_capture,
                 planned,
@@ -360,6 +374,7 @@ pub async fn build(
             );
             let usage = run_establish_entry_relations(
                 session.runtime(),
+                session.thinking_enabled(),
                 usage_capture,
                 &entries_table,
                 cancel,
@@ -397,12 +412,31 @@ pub async fn build(
 // 阶段实现
 // ---------------------------------------------------------------------------
 
+/// 知识库构建系统提示词（Planning + Execution 通用）。
+///
+/// 告知 AI 可用工具及其用途，确保 AI 知道需要通过 `submit_plan` 提交计划
+/// 或通过 `knowledge_create_entry` / `knowledge_edit_entry` 创建条目。
+const KB_BUILD_SYSTEM_PROMPT: &str = r#"你是学术文献知识库构建助手。你可以使用以下工具来完成任务：
+
+- `knowledge_query`：搜索知识库已有条目
+- `knowledge_create_entry`：创建新条目（summary/concept/entity）
+- `knowledge_edit_entry`：编辑已有条目（追加内容/关联/标签）
+- `knowledge_get_entry`：获取条目详情
+- `submit_plan`：提交文献提取计划（Planning 阶段必须调用）
+
+**重要规则**：
+1. 创建条目时必须使用工具调用，不要仅输出文本
+2. 关联关系必须使用 wikiID（格式 `wiki-xxxxxxxxxxxxxxxx`），严禁使用标题
+3. 禁止在正文中的 `## 关联页面` 区手写关联，必须通过工具的 relations/add_relations 字段建立
+"#;
+
 /// Planning 阶段：AI 阅读全文 + Index 快照，产出 ExtractionPlan。
 ///
 /// 长文献（> 50000 字）先摘要预处理。
 /// 返回 `(plan, usage)`，usage 用于更新会话的真实上下文占用。
 async fn run_planning(
-    runtime: &confluent::ConfluentRuntime,
+    runtime: &FluenRuntime,
+    thinking_enabled: bool,
     md_content: &str,
     options: &KnowledgeBuildOptions,
     snapshot: &IndexSnapshot,
@@ -417,7 +451,7 @@ async fn run_planning(
     let effective_content = if char_count > LONG_DOC_THRESHOLD {
         tracing::info!(chars = char_count, "长文献，启用摘要预处理");
         let (summary, _) =
-            on_planning_summarize(runtime, md_content, usage_capture, cancel).await?;
+            on_planning_summarize(runtime, thinking_enabled, md_content, usage_capture, cancel).await?;
         summary
     } else {
         md_content.to_string()
@@ -432,18 +466,19 @@ async fn run_planning(
         let mut cap = plan_capture.lock().unwrap();
         *cap = None;
     }
-    clear_usage(usage_capture);
 
-    // 运行 AI
-    let input = json!(prompt);
-    let _result = runtime.run(input).await.map_err(|e| {
-        if cancel.is_cancelled() {
-            KnowledgeBuilderError::Cancelled
-        } else {
-            tracing::error!(error = %e, "Planning LLM 调用失败");
-            KnowledgeBuilderError::Llm(e.to_string())
-        }
-    })?;
+    // 为本次 chat 创建独立会话
+    let session_id = new_session_id();
+    let (_text, usage) = run_chat(runtime, session_id, &prompt, KB_BUILD_SYSTEM_PROMPT, thinking_enabled)
+        .await?;
+
+    // 清理会话
+    runtime.remove_session(session_id);
+
+    // 取消检查
+    if cancel.is_cancelled() {
+        return Err(KnowledgeBuilderError::Cancelled);
+    }
 
     // 从 capture 读取 plan
     let plan = {
@@ -451,8 +486,6 @@ async fn run_planning(
         cap.take()
             .ok_or_else(|| KnowledgeBuilderError::AiOutput("AI 未调用 submit_plan 工具".into()))?
     };
-
-    let usage = take_usage(usage_capture);
 
     tracing::debug!(
         summary_points = plan.summary_points.len(),
@@ -462,6 +495,10 @@ async fn run_planning(
         completion_tokens = usage.completion_tokens,
         "Planning 已捕获 ExtractionPlan"
     );
+
+    // 记录 usage 到 capture（供 session.update_usage 读取）
+    super::llm_helper::set_usage(usage_capture, usage);
+
     Ok((plan, usage))
 }
 
@@ -469,29 +506,24 @@ async fn run_planning(
 ///
 /// 返回 `(摘要文本, usage)`。usage 由调用方决定是否使用。
 async fn on_planning_summarize(
-    runtime: &confluent::ConfluentRuntime,
+    runtime: &FluenRuntime,
+    thinking_enabled: bool,
     md_content: &str,
     usage_capture: &UsageCapture,
     cancel: &CancellationToken,
 ) -> Result<(String, UsageSnapshot), KnowledgeBuilderError> {
     let prompt = render_summarize(md_content);
-    let input = json!(prompt);
 
-    clear_usage(usage_capture);
-    let result = runtime.run(input).await.map_err(|e| {
-        if cancel.is_cancelled() {
-            KnowledgeBuilderError::Cancelled
-        } else {
-            KnowledgeBuilderError::Llm(e.to_string())
-        }
-    })?;
-    let usage = take_usage(usage_capture);
+    let session_id = new_session_id();
+    let (summary, usage) = run_chat(runtime, session_id, &prompt, KB_BUILD_SYSTEM_PROMPT, thinking_enabled)
+        .await?;
+    runtime.remove_session(session_id);
 
-    // AI 返回的摘要文本
-    let summary = result
-        .as_str()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| result.to_string());
+    if cancel.is_cancelled() {
+        return Err(KnowledgeBuilderError::Cancelled);
+    }
+
+    super::llm_helper::set_usage(usage_capture, usage);
 
     Ok((summary, usage))
 }
@@ -499,44 +531,39 @@ async fn on_planning_summarize(
 /// 创建 summary 条目。
 ///
 /// AI 调用 `knowledge_create_entry`（新建）或 `knowledge_edit_entry`
-/// （合并到已有相似条目），[`super::llm_helper::CreateEntryObserver`]
+/// （合并到已有相似条目），[`super::llm_helper::EntryCaptureGuard`]
 /// 自动捕获返回的 `wiki_id`。返回 `(wiki_id, usage)`。
 async fn run_create_summary(
-    runtime: &confluent::ConfluentRuntime,
+    runtime: &FluenRuntime,
+    thinking_enabled: bool,
     entry_capture: &CreateEntryCapture,
     usage_capture: &UsageCapture,
     ref_id: &str,
     summary_points: &[String],
     candidates: &[L2Candidate],
-    cancel: &CancellationToken,
 ) -> Result<(String, UsageSnapshot), KnowledgeBuilderError> {
     let prompt = render_create_summary(ref_id, summary_points, candidates);
-    let input = json!(prompt);
 
     clear_capture(entry_capture);
-    clear_usage(usage_capture);
 
-    runtime.run(input).await.map_err(|e| {
-        if cancel.is_cancelled() {
-            KnowledgeBuilderError::Cancelled
-        } else {
-            tracing::error!(ref_id = %ref_id, error = %e, "create_summary LLM 调用失败");
-            KnowledgeBuilderError::Llm(e.to_string())
-        }
-    })?;
+    let session_id = new_session_id();
+    let (_text, usage) = run_chat(runtime, session_id, &prompt, KB_BUILD_SYSTEM_PROMPT, thinking_enabled)
+        .await?;
+    runtime.remove_session(session_id);
 
     let wiki_id = take_capture(entry_capture, "summary")?;
-    let usage = take_usage(usage_capture);
+    super::llm_helper::set_usage(usage_capture, usage);
     Ok((wiki_id, usage))
 }
 
 /// 创建单个 concept 条目。
 ///
 /// AI 调用 `knowledge_create_entry`（新建）或 `knowledge_edit_entry`
-/// （合并到已有相似条目），[`super::llm_helper::CreateEntryObserver`]
+/// （合并到已有相似条目），[`super::llm_helper::EntryCaptureGuard`]
 /// 自动捕获返回的 `wiki_id`。返回 `(wiki_id, usage)`。
 async fn run_create_concept(
-    runtime: &confluent::ConfluentRuntime,
+    runtime: &FluenRuntime,
+    thinking_enabled: bool,
     entry_capture: &CreateEntryCapture,
     usage_capture: &UsageCapture,
     planned: &PlannedEntry,
@@ -544,32 +571,31 @@ async fn run_create_concept(
     cancel: &CancellationToken,
 ) -> Result<(String, UsageSnapshot), KnowledgeBuilderError> {
     let prompt = render_create_concept(&planned.title, &planned.brief, candidates);
-    let input = json!(prompt);
 
     clear_capture(entry_capture);
-    clear_usage(usage_capture);
 
-    runtime.run(input).await.map_err(|e| {
-        if cancel.is_cancelled() {
-            KnowledgeBuilderError::Cancelled
-        } else {
-            tracing::error!(title = %planned.title, error = %e, "create_concept LLM 调用失败");
-            KnowledgeBuilderError::Llm(e.to_string())
-        }
-    })?;
+    let session_id = new_session_id();
+    let (_text, usage) = run_chat(runtime, session_id, &prompt, KB_BUILD_SYSTEM_PROMPT, thinking_enabled)
+        .await?;
+    runtime.remove_session(session_id);
+
+    if cancel.is_cancelled() {
+        return Err(KnowledgeBuilderError::Cancelled);
+    }
 
     let wiki_id = take_capture(entry_capture, &format!("concept '{}'", planned.title))?;
-    let usage = take_usage(usage_capture);
+    super::llm_helper::set_usage(usage_capture, usage);
     Ok((wiki_id, usage))
 }
 
 /// 创建单个 entity 条目。
 ///
 /// AI 调用 `knowledge_create_entry`（新建）或 `knowledge_edit_entry`
-/// （合并到已有相似条目），[`super::llm_helper::CreateEntryObserver`]
+/// （合并到已有相似条目），[`super::llm_helper::EntryCaptureGuard`]
 /// 自动捕获返回的 `wiki_id`。返回 `(wiki_id, usage)`。
 async fn run_create_entity(
-    runtime: &confluent::ConfluentRuntime,
+    runtime: &FluenRuntime,
+    thinking_enabled: bool,
     entry_capture: &CreateEntryCapture,
     usage_capture: &UsageCapture,
     planned: &PlannedEntry,
@@ -577,22 +603,20 @@ async fn run_create_entity(
     cancel: &CancellationToken,
 ) -> Result<(String, UsageSnapshot), KnowledgeBuilderError> {
     let prompt = render_create_entity(&planned.title, &planned.brief, candidates);
-    let input = json!(prompt);
 
     clear_capture(entry_capture);
-    clear_usage(usage_capture);
 
-    runtime.run(input).await.map_err(|e| {
-        if cancel.is_cancelled() {
-            KnowledgeBuilderError::Cancelled
-        } else {
-            tracing::error!(title = %planned.title, error = %e, "create_entity LLM 调用失败");
-            KnowledgeBuilderError::Llm(e.to_string())
-        }
-    })?;
+    let session_id = new_session_id();
+    let (_text, usage) = run_chat(runtime, session_id, &prompt, KB_BUILD_SYSTEM_PROMPT, thinking_enabled)
+        .await?;
+    runtime.remove_session(session_id);
+
+    if cancel.is_cancelled() {
+        return Err(KnowledgeBuilderError::Cancelled);
+    }
 
     let wiki_id = take_capture(entry_capture, &format!("entity '{}'", planned.title))?;
-    let usage = take_usage(usage_capture);
+    super::llm_helper::set_usage(usage_capture, usage);
     Ok((wiki_id, usage))
 }
 
@@ -602,26 +626,25 @@ async fn run_create_entity(
 /// 通过 `edit_entry` 工具用 wikiID 写入，确保链接格式合规。
 /// 返回 usage。
 async fn run_establish_entry_relations(
-    runtime: &confluent::ConfluentRuntime,
+    runtime: &FluenRuntime,
+    thinking_enabled: bool,
     usage_capture: &UsageCapture,
     entries: &[(String, &str, String)],
     cancel: &CancellationToken,
 ) -> Result<UsageSnapshot, KnowledgeBuilderError> {
     let prompt = render_establish_entry_relations(entries);
-    let input = json!(prompt);
 
-    clear_usage(usage_capture);
+    let session_id = new_session_id();
+    let (_text, usage) = run_chat(runtime, session_id, &prompt, KB_BUILD_SYSTEM_PROMPT, thinking_enabled)
+        .await?;
+    runtime.remove_session(session_id);
 
-    runtime.run(input).await.map_err(|e| {
-        if cancel.is_cancelled() {
-            KnowledgeBuilderError::Cancelled
-        } else {
-            tracing::error!(error = %e, "establish_entry_relations LLM 调用失败");
-            KnowledgeBuilderError::Llm(e.to_string())
-        }
-    })?;
+    if cancel.is_cancelled() {
+        return Err(KnowledgeBuilderError::Cancelled);
+    }
 
-    Ok(take_usage(usage_capture))
+    super::llm_helper::set_usage(usage_capture, usage);
+    Ok(usage)
 }
 
 // ---------------------------------------------------------------------------
@@ -731,12 +754,12 @@ fn read_index_md(refs_dir: &Path) -> String {
     }
 }
 
-/// 清空 entry capture（每次 `runtime.run()` 前调用）。
+/// 清空 entry capture（每次 `engine.chat()` 前调用）。
 fn clear_capture(capture: &CreateEntryCapture) {
     *capture.lock().expect("entry capture poisoned") = None;
 }
 
-/// 从 entry capture 中取出 wiki_id（每次 `runtime.run()` 后调用）。
+/// 从 entry capture 中取出 wiki_id（每次 `engine.chat()` 后调用）。
 ///
 /// 若 capture 为空，说明 AI 未调用 `create_entry`，返回错误。
 fn take_capture(capture: &CreateEntryCapture, context: &str) -> Result<String, KnowledgeBuilderError> {
@@ -752,22 +775,6 @@ fn take_capture(capture: &CreateEntryCapture, context: &str) -> Result<String, K
         })?;
     tracing::debug!(context = %context, wiki_id = %wiki_id, "从 capture 获取 wiki_id");
     Ok(wiki_id)
-}
-
-/// 清空 usage capture（每次 `runtime.run()` 前调用）。
-fn clear_usage(capture: &UsageCapture) {
-    *capture.lock().expect("usage capture poisoned") = None;
-}
-
-/// 从 usage capture 中取出 usage 快照（每次 `runtime.run()` 后调用）。
-///
-/// 若 capture 为空（如 LLM 未返回 usage 字段），返回零值。
-fn take_usage(capture: &UsageCapture) -> UsageSnapshot {
-    capture
-        .lock()
-        .expect("usage capture poisoned")
-        .take()
-        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -835,36 +842,8 @@ mod tests {
     }
 
     #[test]
-    fn take_usage_returns_default_when_empty() {
-        let capture: UsageCapture = Arc::new(Mutex::new(None));
-        let usage = take_usage(&capture);
-        assert_eq!(usage.total(), 0);
-    }
-
-    #[test]
-    fn take_usage_returns_value_when_set() {
-        let capture: UsageCapture = Arc::new(Mutex::new(Some(UsageSnapshot {
-            prompt_tokens: 1000,
-            completion_tokens: 500,
-        })));
-        let usage = take_usage(&capture);
-        assert_eq!(usage.total(), 1500);
-        // take 后应清空
-        assert!(capture.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn clear_usage_sets_to_none() {
-        let capture: UsageCapture = Arc::new(Mutex::new(Some(UsageSnapshot {
-            prompt_tokens: 100,
-            completion_tokens: 50,
-        })));
-        clear_usage(&capture);
-        assert!(capture.lock().unwrap().is_none());
-    }
-
-    #[test]
     fn render_candidates_reused_from_prompts() {
+        use super::super::prompts::render_candidates;
         // 验证 L2Candidate 渲染（来自 prompts 模块）
         let candidates = vec![L2Candidate {
             wiki_id: "wiki-abc".into(),

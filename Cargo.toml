@@ -1,9 +1,13 @@
 [workspace]
 members = [
-    "crates/confluent",
     "crates/boardgame",
-    "crates/fluen-knowledge",
     "crates/fluen-markup",
+    "crates/fluen-knowledge",
+    "crates/socstat",
+    "crates/socstat/crates/socstat-mcp",
+    "crates/referee/referee-core",
+    "crates/referee/referee-ai",
+    "crates/referee/referee-agent",
     "src-tauri",
 ]
 resolver = "2"

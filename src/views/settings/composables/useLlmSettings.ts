@@ -23,6 +23,7 @@ interface PresetModel {
   thinking: boolean;
   vision: boolean;
   audio: boolean;
+  video: boolean;
 }
 
 interface ProviderPreset {
@@ -71,12 +72,12 @@ function generateId(): string {
 }
 
 /** 从预设模型构建能力标志。 */
-function buildCapabilities(model: Pick<PresetModel, 'thinking' | 'vision' | 'audio'>) {
+function buildCapabilities(model: Pick<PresetModel, 'thinking' | 'vision' | 'audio' | 'video'>) {
   return {
     thinking: model.thinking,
     vision: model.vision,
     audio: model.audio,
-    video: false,
+    video: model.video,
     tool_calling: true,
     streaming: true,
   };
@@ -222,7 +223,7 @@ export function useLlmSettings() {
         ? [{
             id: params.modelId,
             name: params.modelName || params.modelId,
-            capabilities: buildCapabilities({ thinking: false, vision: false, audio: false }),
+            capabilities: buildCapabilities({ thinking: false, vision: false, audio: false, video: false }),
             max_output_tokens: null,
             context_window: null,
             description: null,

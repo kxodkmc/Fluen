@@ -8,23 +8,25 @@
 //! 工具固定使用 **Hybrid 混合检索**，**最多返回 top4** 条最相关条目
 //! （文献综述页 / 概念页 / 实体页），每条含 id、标题、类型与相关性评分。
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
-use confluent::agent_runtime::{InvocationContext, Tool, ToolError, ToolProvider, ToolSchema};
 use fluen_knowledge::async_kb::{AsyncKnowledgeBase, AsyncQueryParams};
 use fluen_knowledge::types::{RetrievalMethod, WikiType};
+use referee_ai::tool::{Tool, ToolContext, ToolError, ToolOutput};
 use serde_json::{json, Value};
 
 /// 工具名称。
 pub const LITERATURE_SEARCH_TOOL_NAME: &str = "literature_search";
+
+/// 工具描述。
+const DESCRIPTION: &str = "搜索文献知识库：默认混合检索（关键词 + 语义向量），最多返回 4 条最相关的知识条目（文献综述 / 概念 / 实体），每条含 id、标题、类型与相关性评分。搜索前可先调用 paper_content 了解论文主题。";
 
 /// 默认返回结果数上限（最多返回 4 条）。
 const DEFAULT_TOP_K: usize = 4;
 
 /// 文献知识库搜索工具。
 pub struct LiteratureSearchTool {
-    schema: ToolSchema,
+    /// 输入参数 JSON Schema。
+    parameters: Value,
     kb: AsyncKnowledgeBase,
 }
 
@@ -52,54 +54,60 @@ impl LiteratureSearchTool {
             "required": ["query"]
         });
 
-        Self {
-            schema: ToolSchema {
-                name: LITERATURE_SEARCH_TOOL_NAME.into(),
-                description: "搜索文献知识库：默认混合检索（关键词 + 语义向量），最多返回 4 条最相关的知识条目（文献综述 / 概念 / 实体），每条含 id、标题、类型与相关性评分。搜索前可先调用 paper_content 了解论文主题。".into(),
-                parameters,
-            },
-            kb,
-        }
+        Self { parameters, kb }
     }
 }
 
 #[async_trait]
 impl Tool for LiteratureSearchTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.schema
+    fn name(&self) -> &str {
+        LITERATURE_SEARCH_TOOL_NAME
     }
 
-    async fn invoke(
+    fn description(&self) -> &str {
+        DESCRIPTION
+    }
+
+    fn input_schema(&self) -> Value {
+        self.parameters.clone()
+    }
+
+    /// 检索结果需同步返回（LLM 等待本轮调用完成再继续生成）。
+    fn default_wait(&self) -> bool {
+        true
+    }
+
+    async fn execute(
         &self,
-        input: Value,
-        _ctx: &InvocationContext,
-    ) -> Result<Value, ToolError> {
+        _ctx: ToolContext,
+        args: Value,
+    ) -> Result<ToolOutput, ToolError> {
         // 1. 必填：query
-        let query = input
+        let query = args
             .get("query")
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| ToolError::InvalidParams("缺少 query 参数".into()))?;
+            .ok_or_else(|| ToolError::InvalidArguments("缺少 query 参数".into()))?;
 
         // 2. 可选：wiki_type（不填 = 检索全部；填了非法值报错）
-        let wiki_type = match input.get("wiki_type") {
+        let wiki_type = match args.get("wiki_type") {
             None | Some(Value::Null) => None,
             Some(Value::String(s)) => match s.as_str() {
                 "summary" => Some(WikiType::Summary),
                 "concept" => Some(WikiType::Concept),
                 "entity" => Some(WikiType::Entity),
                 other => {
-                    return Err(ToolError::InvalidParams(format!(
+                    return Err(ToolError::InvalidArguments(format!(
                         "wiki_type 取值非法: {}（可选 summary / concept / entity）",
                         other
                     )));
                 }
             },
-            Some(_) => return Err(ToolError::InvalidParams("wiki_type 必须是字符串".into())),
+            Some(_) => return Err(ToolError::InvalidArguments("wiki_type 必须是字符串".into())),
         };
 
         // 3. 可选：include_content
-        let include_content = input
+        let include_content = args
             .get("include_content")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -117,9 +125,9 @@ impl Tool for LiteratureSearchTool {
             .kb
             .query(params)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("文献检索失败: {}", e)))?;
+            .map_err(|e| ToolError::Execution(format!("文献检索失败: {}", e)))?;
 
-        Ok(json!({
+        Ok(ToolOutput::from_json(&json!({
             "method": result.retrieval_method_used.as_str(),
             "count": result.results.len(),
             "results": result.results.iter().map(|m| json!({
@@ -129,28 +137,7 @@ impl Tool for LiteratureSearchTool {
                 "score": format!("{:.3}", m.score),
                 "content": m.content,
             })).collect::<Vec<_>>()
-        }))
-    }
-}
-
-/// 包装 [`LiteratureSearchTool`] 为 [`ToolProvider`]。
-pub struct LiteratureSearchToolProvider {
-    tool: Arc<LiteratureSearchTool>,
-}
-
-impl LiteratureSearchToolProvider {
-    /// 构造提供者。
-    pub fn new(kb: AsyncKnowledgeBase) -> Self {
-        Self {
-            tool: Arc::new(LiteratureSearchTool::new(kb)),
-        }
-    }
-}
-
-#[async_trait]
-impl ToolProvider for LiteratureSearchToolProvider {
-    async fn list_tools(&self) -> Vec<Arc<dyn Tool>> {
-        vec![self.tool.clone()]
+        })))
     }
 }
 
@@ -178,14 +165,21 @@ mod tests {
         dir
     }
 
-    fn ctx() -> InvocationContext {
-        InvocationContext {
-            run_id: "test-run".into(),
-            agent_id: "test-agent".into(),
+    fn ctx() -> ToolContext {
+        ToolContext {
             tool_call_id: "test-call".into(),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            timeout: std::time::Duration::from_secs(30),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
         }
+    }
+
+    /// 解析工具输出为 JSON（工具返回值均为 `ToolOutput::from_json` 构造）。
+    fn output_json(output: ToolOutput) -> Value {
+        serde_json::from_str(&output.content).unwrap()
     }
 
     #[tokio::test]
@@ -195,10 +189,10 @@ mod tests {
         let tool = LiteratureSearchTool::new(kb);
 
         let err = tool
-            .invoke(json!({ "wiki_type": "summary" }), &ctx())
+            .execute(ctx(), json!({ "wiki_type": "summary" }))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParams(_)));
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -210,10 +204,10 @@ mod tests {
         let tool = LiteratureSearchTool::new(kb);
 
         let err = tool
-            .invoke(json!({ "query": "test", "wiki_type": "bogus" }), &ctx())
+            .execute(ctx(), json!({ "query": "test", "wiki_type": "bogus" }))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParams(_)));
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -224,10 +218,7 @@ mod tests {
         let kb = AsyncKnowledgeBase::init(&dir).unwrap();
         let tool = LiteratureSearchTool::new(kb);
 
-        let result = tool
-            .invoke(json!({ "query": "机器学习" }), &ctx())
-            .await
-            .unwrap();
+        let result = output_json(tool.execute(ctx(), json!({ "query": "机器学习" })).await.unwrap());
         assert_eq!(result["count"], 0);
         assert!(result["results"].as_array().unwrap().is_empty());
 
@@ -257,10 +248,7 @@ mod tests {
         }
 
         let tool = LiteratureSearchTool::new(kb);
-        let result = tool
-            .invoke(json!({ "query": "深度学习" }), &ctx())
-            .await
-            .unwrap();
+        let result = output_json(tool.execute(ctx(), json!({ "query": "深度学习" })).await.unwrap());
 
         // 最多返回 4 条
         assert!(result["count"].as_u64().unwrap() <= 4);
@@ -295,10 +283,11 @@ mod tests {
         .unwrap();
 
         let tool = LiteratureSearchTool::new(kb);
-        let result = tool
-            .invoke(json!({ "query": "Transformer", "include_content": true }), &ctx())
-            .await
-            .unwrap();
+        let result = output_json(
+            tool.execute(ctx(), json!({ "query": "Transformer", "include_content": true }))
+                .await
+                .unwrap(),
+        );
         assert!(result["count"].as_u64().unwrap() >= 1);
 
         let _ = fs::remove_dir_all(&dir);

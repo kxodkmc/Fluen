@@ -27,9 +27,13 @@ thiserror = "1"
 chrono = "0.4.45"
 uuid = { version = "1", features = ["v4"] }
 tauri-plugin-dialog = "2"
-confluent = { path = "../crates/confluent" }
+# NOTE: confluent → referee 迁移完成，confluent 依赖已移除
+referee-core  = { path = "../crates/referee/referee-core" }
+referee-ai    = { path = "../crates/referee/referee-ai", features = ["openai"] }
+referee-agent = { path = "../crates/referee/referee-agent", features = ["openai"] }
 fluen-markup = { path = "../crates/fluen-markup", features = ["serde"] }
 fluen-knowledge = { path = "../crates/fluen-knowledge", features = ["async", "tools"] }
+socstat = { path = "../crates/socstat", features = ["csv", "sav"] }
 parking_lot = "0.12"
 async-trait = "0.1"
 anyhow = "1"

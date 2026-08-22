@@ -6,7 +6,7 @@
  */
 
 import type { ProviderPreset, ThemeOption } from './types';
-import { DEEPSEEK_ICON, XIAOMIMIMO_ICON, MINIMAX_ICON, OLLAMA_ICON, STEPFUN_ICON, ZHIPU_ICON } from './providerIcons';
+import { DEEPSEEK_ICON, XIAOMIMIMO_ICON, KIMI_ICON, AGNES_ICON } from './providerIcons';
 
 /* ── 主题模式选项 ────────────────────────────────────────────────────── */
 export const THEME_OPTIONS: ThemeOption[] = [
@@ -16,13 +16,20 @@ export const THEME_OPTIONS: ThemeOption[] = [
 
 /* ── LLM 提供商预设 ──────────────────────────────────────────────────── */
 
-/** DeepSeek 预设模型：上下文 1M，均支持思考，纯文本。 */
+/**
+ * 预设内容与后端 referee 模块（`referee-ai/src/provider/*`）保持一致：
+ * 仅收录 referee 原生适配的提供商（deepseek / xiaomi / moonshot / agnes），
+ * 其余 OpenAI 兼容服务通过「OpenAI 兼容」自定义入口添加。
+ * 模型规格（上下文窗口 / 最大输出 / 多模态能力）以 referee 各适配器为准。
+ */
+
+/** DeepSeek 预设模型：上下文 1M，最大输出 384K，均支持思考，纯文本。 */
 const DEEPSEEK_MODELS = [
   {
     id: 'deepseek-v4-flash',
     name: 'DeepSeek-V4-Flash',
-    contextWindow: 1_000_000,
-    maxOutputTokens: 8_192,
+    contextWindow: 1_048_576,
+    maxOutputTokens: 393_216,
     thinking: true,
     vision: false,
     audio: false,
@@ -31,57 +38,9 @@ const DEEPSEEK_MODELS = [
   {
     id: 'deepseek-v4-pro',
     name: 'DeepSeek-V4-Pro',
-    contextWindow: 1_000_000,
-    maxOutputTokens: 8_192,
+    contextWindow: 1_048_576,
+    maxOutputTokens: 393_216,
     thinking: true,
-    vision: false,
-    audio: false,
-    video: false,
-  },
-];
-
-/** Minimax 预设模型：上下文 1M，支持思考。 */
-const MINIMAX_MODELS = [
-  {
-    id: 'MiniMax-Text-01',
-    name: 'MiniMax-Text-01',
-    contextWindow: 1_000_000,
-    maxOutputTokens: 131_072,
-    thinking: true,
-    vision: false,
-    audio: false,
-    video: false,
-  },
-  {
-    id: 'abab6.5s-chat',
-    name: 'ABAB 6.5s Chat',
-    contextWindow: 245_760,
-    maxOutputTokens: 8_192,
-    thinking: false,
-    vision: false,
-    audio: false,
-    video: false,
-  },
-];
-
-/** Ollama 预设模型：本地运行，上下文取决于配置。 */
-const OLLAMA_MODELS = [
-  {
-    id: 'llama3.2',
-    name: 'Llama 3.2',
-    contextWindow: 128_000,
-    maxOutputTokens: 8_192,
-    thinking: false,
-    vision: false,
-    audio: false,
-    video: false,
-  },
-  {
-    id: 'qwen2.5',
-    name: 'Qwen 2.5',
-    contextWindow: 128_000,
-    maxOutputTokens: 8_192,
-    thinking: false,
     vision: false,
     audio: false,
     video: false,
@@ -93,7 +52,7 @@ const XIAOMI_MIMO_MODELS = [
   {
     id: 'mimo-v2.5-pro',
     name: 'MiMo-V2.5-Pro',
-    contextWindow: 1_000_000,
+    contextWindow: 1_048_576,
     maxOutputTokens: 131_072,
     thinking: true,
     vision: false,
@@ -103,48 +62,38 @@ const XIAOMI_MIMO_MODELS = [
   {
     id: 'mimo-v2.5',
     name: 'MiMo-V2.5',
-    contextWindow: 1_000_000,
+    contextWindow: 1_048_576,
     maxOutputTokens: 131_072,
     thinking: true,
     vision: true,
     audio: true,
-    video: false,
-  },
-];
-
-/** StepFun 预设模型：多模态推理旗舰，256K 上下文，支持图片/视频输入与三档推理强度。 */
-const STEPFUN_MODELS = [
-  {
-    id: 'step-3.7-flash',
-    name: 'Step 3.7 Flash',
-    contextWindow: 256_000,
-    maxOutputTokens: 8_192,
-    thinking: true,
-    vision: true,
-    audio: false,
     video: true,
   },
 ];
 
-/** 智谱预设模型：GLM-5.2 旗舰（1M 上下文，支持深度思考），GLM-4.7-Flash 免费（200K，强制思考）。 */
-const ZHIPU_MODELS = [
+/** Moonshot Kimi 预设模型：上下文 1M，最大输出 1M，常驻思考，支持图片。 */
+const KIMI_MODELS = [
   {
-    id: 'glm-5.2',
-    name: 'GLM-5.2',
-    contextWindow: 1_000_000,
-    maxOutputTokens: 4_096,
+    id: 'kimi-k3',
+    name: 'Kimi K3',
+    contextWindow: 1_048_576,
+    maxOutputTokens: 1_048_576,
     thinking: true,
-    vision: false,
+    vision: true,
     audio: false,
     video: false,
   },
+];
+
+/** Agnes 预设模型：上下文 512K，最大输出 64K，支持思考与图片。 */
+const AGNES_MODELS = [
   {
-    id: 'glm-4.7-flash',
-    name: 'GLM-4.7-Flash',
-    contextWindow: 200_000,
-    maxOutputTokens: 4_096,
+    id: 'agnes-2.5-flash',
+    name: 'Agnes 2.5 Flash',
+    contextWindow: 524_288,
+    maxOutputTokens: 65_536,
     thinking: true,
-    vision: false,
+    vision: true,
     audio: false,
     video: false,
   },
@@ -160,7 +109,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     models: DEEPSEEK_MODELS,
   },
   {
-    id: 'xiaomimimo',
+    id: 'xiaomi',
     icon: XIAOMIMIMO_ICON,
     isPreset: true,
     openaiBaseUrl: 'https://api.xiaomimimo.com/v1',
@@ -168,44 +117,20 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     models: XIAOMI_MIMO_MODELS,
   },
   {
-    id: 'minimax',
-    icon: MINIMAX_ICON,
+    id: 'moonshot',
+    icon: KIMI_ICON,
     isPreset: true,
-    openaiBaseUrl: 'https://api.minimax.chat/v1',
+    openaiBaseUrl: 'https://api.moonshot.cn/v1',
     defaultStyle: 'OpenAI',
-    models: MINIMAX_MODELS,
+    models: KIMI_MODELS,
   },
   {
-    id: 'ollama',
-    icon: OLLAMA_ICON,
+    id: 'agnes',
+    icon: AGNES_ICON,
     isPreset: true,
-    openaiBaseUrl: 'http://localhost:11434/v1',
+    openaiBaseUrl: 'https://apihub.agnes-ai.com/v1',
     defaultStyle: 'OpenAI',
-    models: OLLAMA_MODELS,
-  },
-  {
-    id: 'stepfun',
-    icon: STEPFUN_ICON,
-    isPreset: true,
-    openaiBaseUrl: 'https://api.stepfun.com/v1',
-    defaultStyle: 'OpenAI',
-    models: STEPFUN_MODELS,
-  },
-  {
-    id: 'stepfun-plan',
-    icon: STEPFUN_ICON,
-    isPreset: true,
-    openaiBaseUrl: 'https://api.stepfun.com/step_plan/v1',
-    defaultStyle: 'OpenAI',
-    models: STEPFUN_MODELS,
-  },
-  {
-    id: 'zhipu',
-    icon: ZHIPU_ICON,
-    isPreset: true,
-    openaiBaseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    defaultStyle: 'OpenAI',
-    models: ZHIPU_MODELS,
+    models: AGNES_MODELS,
   },
   {
     id: 'openai-compatible',

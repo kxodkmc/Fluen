@@ -1,39 +1,27 @@
-//! 学术助手模块化提示词——角色定位、Profile 定义与上下文注入器。
+//! 学术助手系统提示词——角色文案与纯函数组装。
 //!
 //! 学术助手（Academic Assistant）的职责是**根据要求撰写格式规范的文章内容**：
 //! 依据 Fluen 论文标记规范（fluen-markup v1.1）产出正文，并通过 `manuscript`
 //! 工具落盘（自动校验 + 同步章节备份）。
 //!
-//! ## Profile 结构
+//! ## 段落结构
 //!
-//! | Section | 片段 ID | 说明 |
-//! |---------|---------|------|
-//! | Intro | `academic.intro` | 身份与核心使命 |
-//! | Style | `academic.style` | 学术写作风格 |
-//! | System | `academic.system` | 系统约束与安全规则 |
-//! | Tasks | `academic.tasks` | 写作任务定位与工作流程 |
-//! | Actions | `academic.actions` | 可执行行动空间 |
-//! | Environment | `academic.environment` | 运行环境信息 |
-//! | Instructions | `academic.instructions.fluen_markup` | **fluen-markup 规范速查** |
-//! | Instructions | `academic.instructions.workflow` | 撰写流程与落盘约定 |
-//! | Tools | `academic.tools` | 工具使用规则 |
+//! | 段 | 内容 |
+//! |----|------|
+//! | Intro | 身份与核心使命 |
+//! | Style | 学术写作风格 |
+//! | System | 系统约束与安全规则 |
+//! | Tasks | 写作任务定位与工作流程 |
+//! | Actions | 可执行行动空间 |
+//! | Environment | 运行环境信息（`os` / `date` 动态插值） |
+//! | Instructions | **fluen-markup 规范速查** + 撰写流程与落盘约定 |
+//! | Tools | 工具使用规则 |
 //!
-//! ## 变量注入
-//!
-//! [`AcademicContextInjector`] 在 `pre_run`（priority = 5）注入 `os` / `date`；
 //! 论文本身的内容（标题、大纲、章节）由智能体通过 `paper_content` 工具读取，
-//! 不在此注入（保持提示词轻量，避免过时）。
-
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use confluent::agent_runtime::{ExecutionContext, RuntimeError, RuntimeExtension};
-use confluent::capabilities::prompt::{
-    ProfileId, PromptFragment, PromptProfile, PromptRegistry, PromptSection,
-};
+//! 不在提示词注入（保持轻量，避免过时）。
 
 // ===========================================================================
-// Prompt 片段 body 常量
+// 段落文案常量
 // ===========================================================================
 
 /// Intro：身份与核心使命。
@@ -51,8 +39,10 @@ const ACADEMIC_TASKS_BODY: &str = "你的核心任务：\n- 根据用户要求�
 /// Actions：可执行行动空间。
 const ACADEMIC_ACTIONS_BODY: &str = "你可以：\n- 读取论文内容（paper_content：全文 / 大纲 / 单章）。\n- 搜索文献知识库（literature_search：混合检索，最多返回 4 条相关条目——文献综述 / 概念 / 实体，供写作引用与背景参考）。\n- 写入论文正文（manuscript：整体更新 main.md，自动校验格式并同步章节）。\n- 读写项目内文件（project_file，路径限制在项目根内，如参考文献索引、数据文件等）。\n- 每一步行动前评估必要性与影响；写操作需要用户确认后才会生效。";
 
-/// Environment：运行环境信息（动态）。
-const ACADEMIC_ENVIRONMENT_BODY: &str = "运行环境：\n- 平台: Fluen v0.1.0\n- 操作系统: {{os}}\n- 当前日期: {{date}}";
+/// Environment：运行环境信息（含动态变量）。
+fn environment(os: &str, date: &str) -> String {
+    format!("运行环境：\n- 平台: Fluen v0.1.0\n- 操作系统: {os}\n- 当前日期: {date}")
+}
 
 /// Instructions — fluen-markup 规范速查（v1.1 核心）。
 const FLUEN_MARKUP_BODY: &str = "## Fluen 论文标记规范速查（fluen-markup v1.1）\n\n**总原则：Markdown 优先，标签按需，失效可降级。** 标题、列表、加粗、行内代码、行内公式 $...$、块公式 $$...$$、脚注、引用块全部用原生 Markdown，不加标签。\n\n### 标签速查（共 7 个，全部 f- 前缀）\n\n| 标签 | 作用 | 关键属性 | 示例 |\n|------|------|----------|------|\n| `<f-cite>` | 引用文献库 | ref（逗号分隔多篇）loc fallback | `<f-cite ref=\"ref-a1b2c3d4\"/>` |\n| `<f-xref>` | 文内交叉引用 | to fallback | `<f-xref to=\"fig:loss-curve\"/>` |\n| `<f-eq>` | 编号公式（块） | id（可选） | `<f-eq id=\"eq:euler\">e^{i\\pi}+1=0</f-eq>` |\n| `<f-fig>` | 图（浮动体） | id（可选）src alt | `<f-fig id=\"fig:method\" src=\"assets/x.png\"><f-caption>图题</f-caption></f-fig>` |\n| `<f-tbl>` | 表（浮动体） | id（可选）src variant | `<f-tbl id=\"tbl:results\">...<f-caption>表题</f-caption></f-tbl>` |\n| `<f-claim>` | 定理/定义/引理等 | type id（可选） | `<f-claim type=\"theorem\" id=\"thm:conv\">…</f-claim>` |\n| `<f-caption>` | 图/表题注 | — | 仅用于 `<f-fig>`/`<f-tbl>` 内部 |\n\n### ID 前缀强制映射（linter 校验，前缀不符报错）\n\n| 元素 | id 前缀 |\n|------|--------|\n| 图 | `fig:` |\n| 表 | `tbl:` |\n| 公式 | `eq:` |\n| 定理/引理/定义… | `thm:` `lem:` `def:` `prop:` `cor:` `exa:` `rem:` |\n\n- id 用语义名（如 `fig:method-overview`），**禁止** `fig:1` 这类随重排变化的编号。\n- 显示编号（图 1、表 2、式 (3)）由渲染器自动生成，**不要手写编号**。\n\n### 关键规则\n\n- `<f-cite>` 的 ref 必须是文献库（references-index.json）中真实存在的 id；多个引用用逗号合并：`<f-cite ref=\"ref-a,ref-b\"/>`。\n- 依赖外部数据的标签（`<f-cite>` `<f-xref>`）应提供 `fallback` 属性作后备显示，避免失效时正文空洞。\n- `<f-claim>` 的 type 取固定集合：theorem / lemma / definition / proposition / corollary / example / remark。\n- `<f-eq>` 仅含 LaTeX，不解析 Markdown；其余标签内部按 Markdown 二次解析。\n- 章节标题保持原生 Markdown；仅当需被交叉引用时加 Pandoc 行尾 id：`## 方法 {#sec:method}`。";
@@ -64,127 +54,25 @@ const ACADEMIC_WORKFLOW_BODY: &str = "## 撰写流程\n\n1. **读取现状**：�
 const ACADEMIC_TOOLS_BODY: &str = "工具使用规则：\n- 撰写前先读取论文现状（paper_content），必要时用 literature_search 检索文献知识库获取背景与素材，避免覆盖已有内容。\n- 工具结果可能出错或过时，需结合上下文校验后再采用。\n- 写操作（manuscript / project_file 写）会弹窗请求用户确认，属正常流程。\n- 调用失败时记录错误并尝试替代方案，不要在同一错误上反复重试。";
 
 // ===========================================================================
-// Profile 构建
+// 组装
 // ===========================================================================
 
-/// 学术助手 prompt profile 的 ID。
-pub const ACADEMIC_ASSISTANT_PROFILE_ID: &str = "academic-assistant";
-
-/// 构建学术助手专属 prompt profile。
-pub fn academic_profile() -> PromptProfile {
-    let mut profile = PromptProfile::new(ProfileId::from(ACADEMIC_ASSISTANT_PROFILE_ID));
-
-    // ── 静态段 ──────────────────────────────────────────────────────
-    profile = profile
-        .add_fragment(PromptFragment::new(
-            "academic.intro".into(),
-            PromptSection::Intro,
-            ACADEMIC_INTRO_BODY,
-        ))
-        .add_fragment(PromptFragment::new(
-            "academic.style".into(),
-            PromptSection::Style,
-            ACADEMIC_STYLE_BODY,
-        ))
-        .add_fragment(PromptFragment::new(
-            "academic.system".into(),
-            PromptSection::System,
-            ACADEMIC_SYSTEM_BODY,
-        ))
-        .add_fragment(PromptFragment::new(
-            "academic.tasks".into(),
-            PromptSection::Tasks,
-            ACADEMIC_TASKS_BODY,
-        ))
-        .add_fragment(PromptFragment::new(
-            "academic.actions".into(),
-            PromptSection::Actions,
-            ACADEMIC_ACTIONS_BODY,
-        ));
-
-    // ── 动态段 ──────────────────────────────────────────────────────
-    profile = profile
-        .add_fragment(PromptFragment::new(
-            "academic.environment".into(),
-            PromptSection::Environment,
-            ACADEMIC_ENVIRONMENT_BODY,
-        ))
-        .add_fragment(
-            PromptFragment::new(
-                "academic.instructions.fluen_markup".into(),
-                PromptSection::Instructions,
-                FLUEN_MARKUP_BODY,
-            )
-            .with_priority(100),
-        )
-        .add_fragment(
-            PromptFragment::new(
-                "academic.instructions.workflow".into(),
-                PromptSection::Instructions,
-                ACADEMIC_WORKFLOW_BODY,
-            )
-            .with_priority(200),
-        )
-        .add_fragment(PromptFragment::new(
-            "academic.tools".into(),
-            PromptSection::Tools,
-            ACADEMIC_TOOLS_BODY,
-        ));
-
-    profile
-}
-
-/// 创建并填充包含学术助手 profile 的 [`PromptRegistry`]。
-pub fn academic_registry() -> Arc<PromptRegistry> {
-    let registry = Arc::new(PromptRegistry::new());
-    for fragment in academic_profile().fragments {
-        registry.register(ACADEMIC_ASSISTANT_PROFILE_ID.into(), fragment);
-    }
-    registry
-}
-
-// ===========================================================================
-// 上下文注入器
-// ===========================================================================
-
-/// 学术助手上下文注入器——注入运行环境变量。
+/// 组装学术助手系统提示词。
 ///
-/// 以 `priority = 5` 在 `pre_run` 阶段执行（早于 `ProfileInjector`(10) 等），
-/// 使后续扩展能读取到 `os` / `date` 变量。
-pub struct AcademicContextInjector {
-    /// 操作系统（`{{os}}`）。
-    os: String,
-    /// 当前日期（`{{date}}`）。
-    date: String,
-}
-
-impl AcademicContextInjector {
-    /// 创建注入器。
-    pub fn new() -> Self {
-        Self {
-            os: detect_os(),
-            date: chrono::Local::now().format("%Y-%m-%d").to_string(),
-        }
-    }
-}
-
-impl Default for AcademicContextInjector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl RuntimeExtension for AcademicContextInjector {
-    fn priority(&self) -> i32 {
-        5
-    }
-
-    async fn pre_run(&self, ctx: &mut ExecutionContext) -> Result<(), RuntimeError> {
-        ctx.set_state("os", self.os.clone());
-        ctx.set_state("date", self.date.clone());
-        Ok(())
-    }
+/// 运行环境变量（系统 / 日期）在组装时插值，每轮对话调用一次。
+pub fn build_system_prompt() -> String {
+    [
+        ACADEMIC_INTRO_BODY.to_string(),
+        ACADEMIC_STYLE_BODY.to_string(),
+        ACADEMIC_SYSTEM_BODY.to_string(),
+        ACADEMIC_TASKS_BODY.to_string(),
+        ACADEMIC_ACTIONS_BODY.to_string(),
+        environment(&detect_os(), &today()),
+        FLUEN_MARKUP_BODY.to_string(),
+        ACADEMIC_WORKFLOW_BODY.to_string(),
+        ACADEMIC_TOOLS_BODY.to_string(),
+    ]
+    .join("\n\n")
 }
 
 /// 检测当前操作系统名称。
@@ -200,6 +88,11 @@ fn detect_os() -> String {
     }
 }
 
+/// 当前日期（`YYYY-MM-DD`）。
+fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
 // ===========================================================================
 // 测试
 // ===========================================================================
@@ -209,48 +102,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn profile_has_all_sections() {
-        let profile = academic_profile();
-        let sections: Vec<_> = profile.fragments.iter().map(|f| f.section).collect();
-
-        assert!(sections.contains(&PromptSection::Intro));
-        assert!(sections.contains(&PromptSection::Style));
-        assert!(sections.contains(&PromptSection::System));
-        assert!(sections.contains(&PromptSection::Tasks));
-        assert!(sections.contains(&PromptSection::Actions));
-        assert!(sections.contains(&PromptSection::Environment));
-        assert!(sections.contains(&PromptSection::Instructions));
-        assert!(sections.contains(&PromptSection::Tools));
+    fn prompt_contains_all_sections() {
+        let prompt = build_system_prompt();
+        assert!(prompt.contains("学术写作助手"));
+        assert!(prompt.contains("写作风格要求"));
+        assert!(prompt.contains("系统约束"));
+        assert!(prompt.contains("核心任务"));
+        assert!(prompt.contains("paper_content"));
+        assert!(prompt.contains("运行环境"));
+        assert!(prompt.contains("fluen-markup v1.1"));
+        assert!(prompt.contains("撰写流程"));
+        assert!(prompt.contains("工具使用规则"));
     }
 
     #[test]
-    fn profile_contains_markup_spec_fragment() {
-        let profile = academic_profile();
-        let spec = profile
-            .fragments
-            .iter()
-            .find(|f| f.id.as_str() == "academic.instructions.fluen_markup")
-            .expect("fluen-markup 规范片段应存在");
-        // 规范正文应覆盖关键标签
-        assert!(spec.body.contains("<f-cite>"));
-        assert!(spec.body.contains("fig:"));
-        assert!(spec.body.contains("fallback"));
-    }
-
-    #[test]
-    fn registry_contains_academic_profile() {
-        let registry = academic_registry();
-        let profiles = registry.profiles();
-        assert!(profiles
-            .iter()
-            .any(|p| p.as_str() == ACADEMIC_ASSISTANT_PROFILE_ID));
-    }
-
-    #[test]
-    fn injector_writes_os_and_date() {
-        let injector = AcademicContextInjector::new();
-        assert_eq!(injector.priority(), 5);
-        assert!(!injector.os.is_empty());
-        assert!(!injector.date.is_empty());
+    fn prompt_covers_markup_spec() {
+        let prompt = build_system_prompt();
+        // 规范正文应覆盖关键标签与前缀
+        assert!(prompt.contains("<f-cite>"));
+        assert!(prompt.contains("fig:"));
+        assert!(prompt.contains("fallback"));
     }
 }

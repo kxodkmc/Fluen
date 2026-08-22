@@ -1,68 +1,62 @@
-//! confluent 运行时构建。
+//! Motis 运行时构建——基于 referee [`FluenRuntime`]。
 //!
-//! 依据 [`MascotConfig`] + [`MascotData`] + [`LlmConfig`] 构造 [`ConfluentRuntime`]：
+//! 依据 [`MascotConfig`] + [`MascotData`] + [`LlmConfig`] 装配：
 //!
 //! 1. 解析 provider/model（优先 Motis 配置，回退 LLM 全局激活项）
-//! 2. 构造 [`ChatClient`]（LLM 连接层 [`crate::llm_chat`] 提供）
-//! 3. 装配模块化提示词系统（PromptRegistry + MotisContextInjector + PromptExtension）
-//! 4. 按能力开关装配 MCP / Skills / Toolkit 适配器
+//!    并构造 referee [`LLMProvider`](referee_ai::provider::LLMProvider)
+//! 2. 组装系统提示词（[`super::prompt::build_system_prompt`]，由 commands 层传入会话）
+//! 3. 装配 Motis 总督角色工具集：
+//!    - **基础工具**（只读）：`paper_content`（论文内容读取）、`project_file`（项目内文件读写）
+//!    - **子智能体委派**：`delegate_agent`（派发任务给子智能体并汇总结果）
+//!    写操作经 [`ApprovalGuard`](crate::agent_runtime::approval::ApprovalGuard) 包装
 //!
-//! ## 能力装配策略
+//! ## 总督角色工具策略
 //!
-//! | 开关 | 装配内容 |
-//! |------|----------|
-//! | 提示词系统 | 始终装配——Motis prompt profile + 上下文注入器 + PromptExtension |
-//! | `mcp_enabled` | 从配置目录加载 `.mcp.json`，装配 MCP 适配器 |
-//! | `skills_enabled` | 从配置目录加载 `skills/`，装配 Skills 适配器 |
-//! | `function_calling_enabled` | 装配 confluent 内置 ToolKit |
+//! Motis 自身仅装配**只读工具**与**委派工具**——不直接装配
+//! `manuscript`（论文正文写入）等具体执行工具，
+//! 这些由子智能体在各自运行时中独立装配。
 //!
-//! **不在本模块硬编码应用操作工具**，所有能力扩展通过 confluent 适配器装配。
+//! ## 配置控制
+//!
+//! - `function_calling_enabled`：控制是否装配所有工具（含基础工具与委派工具）
+//! - `enabled_agents`：控制哪些子智能体可通过 `delegate_agent` 调度
+//!   （空列表时全部可用，设置后仅允许已启用的智能体）
 
 use std::sync::Arc;
 
-use confluent::llmkit::ThinkingMode;
-use confluent::{ConfluentRuntime, ConfluentRuntimeBuilder, ToolKit};
+use referee_ai::tool::ToolRegistry;
 
+use crate::agent_runtime::approval::{approval_executor, ApprovalGuard, Approver};
+use crate::agent_runtime::{FluenRuntime, FluenRuntimeBuilder};
 use crate::llm_chat;
 use crate::llm_config::model::LlmConfig;
-use crate::mascot::model::{MascotConfig, MascotData};
-use crate::platform::fluen_config_dir;
+use crate::mascot::model::MascotConfig;
 
+use super::delegate::DelegateAgentTool;
 use super::error::MotisChatError;
-use super::prompt::{MotisContextInjector, MOTIS_PROFILE_ID, motis_registry};
 
-/// MCP 配置文件名（位于配置目录下）。
-const MCP_CONFIG_FILE: &str = ".mcp.json";
-
-/// Skills 目录名（位于配置目录下）。
-const SKILLS_DIR_NAME: &str = "skills";
-
-/// 构建 confluent 运行时。
+/// 构建 Motis 运行时。
 ///
 /// # 参数
 ///
 /// - `mascot`: Motis 宠物助手配置（能力开关、provider/model 覆盖、人格）
-/// - `data`: Motis 宠物运行时数据（心情、好感度）
 /// - `llm`: LLM 全局配置（提供商与模型列表）
-/// - `project_path`: 当前打开的论文项目路径（可选）。存在时装配
-///   [`crate::agent_tools::paper::PaperContentTool`]，供智能体读取论文内容。
+/// - `project_path`: 当前打开的论文项目路径（可选）。存在且
+///   `function_calling_enabled` 时装配项目级工具
+/// - `approver`: 工具审批器（写操作弹窗确认，包装 `project_file`）
 ///
-/// # 流程
+/// # 返回
 ///
-/// 1. 解析 provider/model（优先 Motis，回退 LLM 全局激活项）
-/// 2. 构造 ChatClient
-/// 3. 装配模块化提示词系统（PromptRegistry + MotisContextInjector + PromptExtension）
-/// 4. 按能力开关装配 MCP / Skills / Toolkit 适配器
-/// 5. 注入工具审批扩展（写操作需用户确认）
-/// 6. 构建并返回 ConfluentRuntime
-pub async fn build_runtime(
+/// 思考模式是否启用（由模型能力决定，供 `ChatOptions` 使用）
+/// 与 [`FluenRuntime`]。
+pub fn build_runtime(
     mascot: &MascotConfig,
-    data: &MascotData,
     llm: &LlmConfig,
     project_path: Option<&str>,
-    approval_extension: Arc<dyn confluent::agent_runtime::RuntimeExtension>,
-) -> Result<ConfluentRuntime, MotisChatError> {
-    // 1. 解析 provider 与 model
+    approver: Arc<dyn Approver>,
+    reporter: crate::motis_chat::delegate::ToolReporter,
+) -> Result<(bool, FluenRuntime), MotisChatError> {
+    // 1. 解析 provider 与 model（优先 Motis 配置，回退全局激活项）
     let (provider, model_id) = llm_chat::resolve_provider_model(
         mascot.provider_id.as_deref(),
         mascot.model_id.as_deref(),
@@ -70,113 +64,90 @@ pub async fn build_runtime(
     )
     .map_err(map_llm_chat_error)?;
 
-    // 2. 构造 ChatClient
-    let chat_client = llm_chat::build_chat_client(provider).map_err(map_llm_chat_error)?;
-
-    // 3. 构造 builder——装配提示词系统
-    let registry = motis_registry();
-    let context_injector = Arc::new(MotisContextInjector::new(mascot, data));
-
     // 模型支持思考时启用思考模式（如 DeepSeek / 智谱深度思考）。
-    // 由模型能力标志驱动，未来如需用户级开关可在此扩展。
-    let supports_thinking = provider.model_supports_thinking(&model_id);
+    let thinking_enabled = provider.model_supports_thinking(&model_id);
 
-    let mut builder = ConfluentRuntimeBuilder::new()
-        .with_agent_id("motis".to_string())
-        .with_model(model_id)
-        .with_chat_client(Arc::new(chat_client))
-        // 装配模块化提示词：注册 PromptRegistry → 构造 DefaultComposer → 包装为 PromptExtension
-        .with_prompt_registry(registry)
-        // 设置当前 profile id（ProfileInjector 在 pre_run 写入 dynamic_state）
-        .with_prompt_profile(MOTIS_PROFILE_ID)
-        // 注入 Motis 上下文变量（agent_name / personality_style / mood / affinity 等）
-        .with_extension(context_injector as Arc<dyn confluent::agent_runtime::RuntimeExtension>);
+    // 2. 构造 referee LLMProvider
+    let llm_provider = llm_chat::build_llm_provider(provider, &model_id)
+        .map_err(map_llm_chat_error)?;
 
-    if supports_thinking {
-        builder = builder.with_thinking(ThinkingMode::Enabled);
-    }
-
-    // 4. 按能力开关装配适配器
-    if mascot.mcp_enabled {
-        builder = assemble_mcp(builder).await?;
-    }
-    if mascot.skills_enabled {
-        builder = assemble_skills(builder)?;
-    }
+    // 3. 装配 Motis 总督角色工具集
+    let mut builder = FluenRuntimeBuilder::new(llm_provider);
     if mascot.function_calling_enabled {
-        // 内置 ToolKit 过滤：移除 fs_write_file（任意路径写、无审批，会被用来
-        // 绕过 project_file 的用户确认）；fs_execute_command 保留但纳入审批扩展
-        let mut kit = ToolKit::new();
-        for tool in ToolKit::default().into_tools() {
-            if tool.schema().name != "fs_write_file" {
-                kit = kit.with(tool);
-            }
-        }
-        builder = builder.with_toolkit(kit);
-        // 有打开的项目时，装配项目级工具（论文内容读取 + 项目内文件读写）
         if let Some(project_path) = project_path {
-            let paper_provider = Arc::new(
-                crate::agent_tools::paper::PaperContentToolProvider::new(
-                    project_path.to_string(),
-                ),
-            );
-            builder = builder.with_tool_provider(paper_provider);
-
-            let file_provider = Arc::new(
-                crate::agent_tools::file::ProjectFileToolProvider::new(
-                    project_path.to_string(),
-                ),
-            );
-            builder = builder.with_tool_provider(file_provider);
+            let registry = build_motis_tool_registry(mascot, llm, project_path, approver, reporter)?;
+            // 审批等待最长 5 分钟，执行器超时取 6 分钟（见 approval_executor）
+            builder = builder.with_tools(registry, approval_executor());
         }
     }
 
-    // 5. 注入工具审批扩展（project_file 写操作调用前弹窗确认）
-    builder = builder.with_extension(approval_extension);
+    Ok((thinking_enabled, builder.build()))
+}
 
-    // 6. 构建运行时
-    let runtime = builder.build().await?;
-    Ok(runtime)
+/// 装配 Motis 总督角色的工具集。
+///
+/// Motis 仅装配只读工具与委派工具：
+/// - `paper_content`：论文内容读取（只读）
+/// - `project_file`：项目内文件读写（写操作经 ApprovalGuard 包装）
+/// - `delegate_agent`：子智能体委派工具
+fn build_motis_tool_registry(
+    mascot: &MascotConfig,
+    llm: &LlmConfig,
+    project_path: &str,
+    approver: Arc<dyn Approver>,
+    reporter: crate::motis_chat::delegate::ToolReporter,
+) -> Result<ToolRegistry, MotisChatError> {
+    let registry = ToolRegistry::with_defaults();
+
+    // 只读：论文内容读取（全文 / 大纲 / 章节）
+    registry
+        .register(Arc::new(crate::agent_tools::paper::PaperContentTool::new(
+            project_path.to_string(),
+        )))
+        .map_err(|e| MotisChatError::Config(format!("工具注册失败: {e}")))?;
+
+    // 读写：项目内文件（ApprovalGuard 包装写操作）
+    registry
+        .register(Arc::new(ApprovalGuard::new(
+            Arc::new(crate::agent_tools::file::ProjectFileTool::new(
+                project_path.to_string(),
+            )),
+            approver.clone(),
+        )))
+        .map_err(|e| MotisChatError::Config(format!("工具注册失败: {e}")))?;
+
+    // 子智能体委派工具（总督核心能力，根据 enabled_agents 过滤）
+    registry
+        .register(Arc::new(DelegateAgentTool::new(
+            llm.clone(),
+            project_path.to_string(),
+            approver,
+            mascot.enabled_agents.clone(),
+            reporter,
+        )))
+        .map_err(|e| MotisChatError::Config(format!("工具注册失败: {e}")))?;
+
+    tracing::debug!(
+        function_calling = mascot.function_calling_enabled,
+        agents_enabled = ?mascot.enabled_agents,
+        "Motis 总督工具集装配完成"
+    );
+
+    Ok(registry)
 }
 
 /// 将 [`LlmChatError`](crate::llm_chat::LlmChatError) 映射为 [`MotisChatError`]。
 fn map_llm_chat_error(e: crate::llm_chat::LlmChatError) -> MotisChatError {
+    match &e {
+        crate::llm_chat::LlmChatError::Config(msg) => {
+            tracing::error!("Motis LLM 配置错误: {msg}")
+        }
+        crate::llm_chat::LlmChatError::NoProvider => {
+            tracing::error!("Motis 未配置可用的 LLM 提供商")
+        }
+    }
     match e {
         crate::llm_chat::LlmChatError::Config(msg) => MotisChatError::Config(msg),
         crate::llm_chat::LlmChatError::NoProvider => MotisChatError::NoProvider,
     }
-}
-
-/// 装配 MCP 适配器。
-///
-/// 从配置目录读取 `.mcp.json`，若文件不存在则跳过（不视为错误）。
-async fn assemble_mcp(
-    builder: ConfluentRuntimeBuilder,
-) -> Result<ConfluentRuntimeBuilder, MotisChatError> {
-    let config_dir = fluen_config_dir()?;
-    let mcp_path = config_dir.join(MCP_CONFIG_FILE);
-
-    if !mcp_path.exists() {
-        // MCP 配置文件不存在，跳过装配
-        return Ok(builder);
-    }
-
-    Ok(builder.with_mcp_from_file(&mcp_path).await?)
-}
-
-/// 装配 Skills 适配器。
-///
-/// 从配置目录读取 `skills/` 子目录，若目录不存在则跳过。
-fn assemble_skills(
-    builder: ConfluentRuntimeBuilder,
-) -> Result<ConfluentRuntimeBuilder, MotisChatError> {
-    let config_dir = fluen_config_dir()?;
-    let skills_dir = config_dir.join(SKILLS_DIR_NAME);
-
-    if !skills_dir.exists() {
-        // Skills 目录不存在，跳过装配
-        return Ok(builder);
-    }
-
-    Ok(builder.with_skills_from_dir(&skills_dir)?)
 }

@@ -26,5 +26,7 @@ pub mod embedding;
 pub mod obfuscation;
 pub mod openai_provider;
 
+#[allow(unused_imports)]
 pub use embedding::{BuiltinEmbeddingProvider, EmbeddingRouter};
+#[allow(unused_imports)]
 pub use openai_provider::OpenAiEmbeddingProvider;

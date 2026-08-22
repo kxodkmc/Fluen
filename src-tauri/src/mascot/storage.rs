@@ -282,6 +282,7 @@ mod tests {
             personality: "calm".into(),
             show_thinking_content: false,
             professional_expression: false,
+            enabled_agents: Vec::new(),
         }
     }
 

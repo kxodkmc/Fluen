@@ -2,11 +2,14 @@
 #[allow(dead_code)]
 mod ai_assistant;
 mod ai_services;
+mod agent_runtime;
 mod agent_tools;
 #[allow(dead_code)]
 mod app_config;
+mod data_analysis;
 pub mod editor;
 mod builtin_providers;
+mod chat_bridge;
 mod knowledge_builder;
 mod llm_chat;
 mod logging;
@@ -114,6 +117,30 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            data_analysis::commands::data_load_dataset,
+            data_analysis::commands::data_descriptive,
+            data_analysis::commands::data_frequencies,
+            data_analysis::commands::data_crosstab,
+            data_analysis::commands::data_independent_t_test,
+            data_analysis::commands::data_paired_t_test,
+            data_analysis::commands::data_one_way_anova,
+            data_analysis::commands::data_mann_whitney_u_test,
+            data_analysis::commands::data_wilcoxon_signed_rank_test,
+            data_analysis::commands::data_kruskal_wallis_test,
+            data_analysis::commands::data_chi_square_test,
+            data_analysis::commands::data_fisher_exact_test,
+            data_analysis::commands::data_shapiro_wilk,
+            data_analysis::commands::data_ks_normality_test,
+            data_analysis::commands::data_correlation,
+            data_analysis::commands::data_correlation_pair,
+            data_analysis::commands::data_partial_correlation,
+            data_analysis::commands::data_regression,
+            data_analysis::commands::data_logistic_regression,
+            data_analysis::commands::data_vif,
+            data_analysis::commands::data_pca,
+            data_analysis::commands::data_reliability,
+            data_analysis::commands::data_post_hoc,
+            data_analysis::commands::data_factorial_anova,
             llm_config::commands::get_llm_config,
             llm_config::commands::save_llm_config,
             llm_config::commands::get_llm_config_path,

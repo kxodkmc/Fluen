@@ -24,45 +24,51 @@
 //! | `motis:tool-call` | `{ id, name, input }` | 工具调用 |
 //! | `motis:finish` | `{ result, total_tokens }` | 完成 |
 //! | `motis:error` | `{ message: string }` | 错误 |
+//!
+//! ## 会话模型
+//!
+//! 前端是对话的事实源（每轮传入完整 history）。每轮：
+//! 新建 `SessionId` → `restore_session_history` 恢复上下文 → `chat_stream`
+//! 启动流式回合 → [`chat_bridge`] 消费流并 emit 事件。
+//! 会话与运行时随回合结束丢弃（引擎内部自动回收）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use confluent::agent_runtime::AgentEvent;
-use futures::StreamExt;
-use serde::Deserialize;
 use tauri::{Emitter, State, Window};
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::chat_bridge::{
+    self, start_chat_session, to_referee_messages, ChatEvents, HistoryMessage,
+};
 use crate::llm_config::storage::ConfigStorage;
 use crate::mascot::storage::{MascotConfigStorage, MascotDataStorage};
+use referee_ai::session::SessionId;
 
-use super::approval::{ApprovalMap, ApprovalOutcome, ToolApprovalExtension};
+use super::approval::{ApprovalMap, ApprovalOutcome, MotisApprover};
+use super::delegate::ToolReporter;
 use super::error::MotisChatError;
-use super::events::{
-    ErrorPayload, FinishPayload, TextPayload, ThoughtPayload, ToolCallPayload, EVENT_ERROR,
-    EVENT_FINISH, EVENT_TEXT, EVENT_THOUGHT, EVENT_TOOL_CALL,
-};
+use super::events::{EVENT_APPROVAL_REQUEST, EVENT_TOOL_RESULT, ToolResultPayload};
+use super::prompt;
 use super::runtime::build_runtime;
 
-/// 历史消息（由前端传入）。
-#[derive(Debug, Clone, Deserialize)]
-pub struct HistoryMessage {
-    /// 消息角色（`"user"` 或 `"assistant"`）。
-    pub role: String,
-    /// 消息内容。
-    pub content: String,
-}
+/// motis 事件集（`motis:*` 前缀）。
+const EVENTS: ChatEvents = ChatEvents {
+    thought: super::events::EVENT_THOUGHT,
+    text: super::events::EVENT_TEXT,
+    tool_call: super::events::EVENT_TOOL_CALL,
+    finish: super::events::EVENT_FINISH,
+    error: super::events::EVENT_ERROR,
+};
 
-/// Motis 聊天全局状态：维护活跃的取消令牌映射与待审批请求映射。
+/// Motis 聊天全局状态：活跃回合句柄与待审批请求映射。
 ///
-/// 通过 `Mutex<HashMap<run_id, CancellationToken>>` 管理当前活跃的会话，
-/// 供 `motis_chat_cancel` 取消当前运行；`approvals` 为工具审批请求的
-/// 决策通道（审批 handler 写入，`motis_chat_resolve_approval` 读取）。
+/// `handles` 供 `motis_chat_cancel` 中断当前回合；
+/// `approvals` 为工具审批请求的决策通道（审批器写入，
+/// `motis_chat_resolve_approval` 读取）。
 pub struct MotisChatState {
-    /// 活跃的取消令牌映射（key: run_id）。
-    tokens: Mutex<HashMap<String, CancellationToken>>,
+    /// 活跃的回合句柄映射（key: run_id）。
+    handles: Mutex<HashMap<String, referee_ai::engine::ChatHandle>>,
     /// 待审批请求的决策通道映射（key: approval_id）。
     approvals: Arc<ApprovalMap>,
 }
@@ -71,12 +77,12 @@ impl MotisChatState {
     /// 创建新的聊天状态实例。
     pub fn new() -> Self {
         Self {
-            tokens: Mutex::new(HashMap::new()),
+            handles: Mutex::new(HashMap::new()),
             approvals: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// 返回审批通道的共享句柄（供 [`MotisApprovalHandler`] 写入）。
+    /// 返回审批通道的共享句柄（供 [`MotisApprover`] 写入）。
     pub fn approvals_handle(&self) -> Arc<ApprovalMap> {
         self.approvals.clone()
     }
@@ -102,27 +108,26 @@ impl MotisChatState {
         Ok(())
     }
 
-    /// 注册取消令牌。
-    fn register(&self, run_id: String, token: CancellationToken) {
-        let mut map = self.tokens.lock().unwrap();
-        map.insert(run_id, token);
+    /// 注册回合句柄。
+    fn register(&self, run_id: String, handle: referee_ai::engine::ChatHandle) {
+        let mut map = self.handles.lock().unwrap();
+        map.insert(run_id, handle);
     }
 
-    /// 注销取消令牌。
+    /// 注销回合句柄。
     fn unregister(&self, run_id: &str) {
-        let mut map = self.tokens.lock().unwrap();
+        let mut map = self.handles.lock().unwrap();
         map.remove(run_id);
     }
 
     /// 取消当前活跃的会话。
     ///
-    /// 取消第一个找到的活跃令牌并移除。返回是否成功取消。
+    /// 取消第一个找到的活跃回合并移除。返回是否成功取消。
     fn cancel_active(&self) -> bool {
-        let mut map = self.tokens.lock().unwrap();
+        let mut map = self.handles.lock().unwrap();
         if let Some(key) = map.keys().next().cloned() {
-            if let Some(token) = map.remove(&key) {
-                token.cancel();
-                return true;
+            if let Some(handle) = map.remove(&key) {
+                return handle.cancel();
             }
         }
         false
@@ -139,12 +144,11 @@ impl Default for MotisChatState {
 ///
 /// # 流程
 ///
-/// 1. 加载 MascotConfig + MascotData + LlmConfig
-/// 2. 构建 confluent 运行时（装配提示词系统 + MCP / Skills / Toolkit 适配器）
-/// 3. 构造输入（历史 + 当前消息）
-/// 4. `run_stream` 启动流式执行
-/// 5. 逐事件 `window.emit` 推送到前端
-/// 6. 完成后清理取消令牌
+/// 1. 加载 MascotConfig + LlmConfig（MascotData 在提示词组装时读取）
+/// 2. 构建 referee 运行时（项目级工具 + 审批包装）
+/// 3. 回放历史 + 启动流式回合
+/// 4. [`chat_bridge`] 消费流并 emit 到前端
+/// 5. 完成后清理回合句柄
 #[tauri::command]
 pub async fn motis_chat_send(
     message: String,
@@ -167,54 +171,65 @@ pub async fn motis_chat_send(
         .load()
         .map_err(|e| MotisChatError::LlmConfig(e.to_string()))?;
 
-    // 2. 构建运行时（含提示词系统 + 论文内容工具 + 工具审批扩展）
-    let approval_extension = Arc::new(ToolApprovalExtension::new(
+    // 2. 构建运行时（论文内容工具 + 文件工具审批包装）
+    let approver = Arc::new(MotisApprover::new(
         window.clone(),
         chat_state.approvals_handle(),
-        super::events::EVENT_APPROVAL_REQUEST,
+        EVENT_APPROVAL_REQUEST,
     ));
-    let runtime = build_runtime(
+    // 工具结果上报器：把委派结果透传给前端（按 tool_call_id 关联到工具调用消息）
+    let reporter = ToolReporter::new({
+        let window = window.clone();
+        move |tool_call_id, name, result| {
+            let _ = window.emit(
+                EVENT_TOOL_RESULT,
+                ToolResultPayload {
+                    tool_call_id: tool_call_id.to_string(),
+                    name: name.to_string(),
+                    result: result.clone(),
+                },
+            );
+        }
+    });
+    let (thinking_enabled, runtime) = build_runtime(
         &mascot_config,
-        &mascot_data,
         &llm_config,
         project_path.as_deref(),
-        approval_extension,
+        approver,
+        reporter,
+    )?;
+
+    // 3. 回放历史 + 启动流式回合
+    let session_id = SessionId::new_v4();
+    // 构建已启用子智能体描述（供提示词注入）。
+    // 工具与委派仅在「工具调用开关 + 已打开论文项目」时可用。
+    let function_calling_available =
+        mascot_config.function_calling_enabled && project_path.is_some();
+    let agents_desc = if function_calling_available {
+        crate::motis_chat::agents::enabled_agents_description(&mascot_config.enabled_agents)
+    } else {
+        String::new()
+    };
+    let system_prompt = prompt::build_system_prompt(
+        &mascot_config,
+        &mascot_data,
+        &agents_desc,
+        function_calling_available,
+    );
+    let handle = start_chat_session(
+        &runtime,
+        session_id,
+        to_referee_messages(&history),
+        message,
+        system_prompt,
+        thinking_enabled,
     )
-    .await?;
+    .map_err(MotisChatError::Runtime)?;
 
-    // 3. 构造输入（历史 + 当前消息，人格由系统提示词处理）
-    let input = build_input(&message, &history);
-
-    // 4. 启动流式执行
-    let (stream, cancel_token) = runtime.run_stream(input);
-
-    // 5. 注册取消令牌
+    // 4. 注册句柄并消费流
     let run_id = Uuid::new_v4().to_string();
-    chat_state.register(run_id.clone(), cancel_token);
-
-    // 6. 消费事件流并 emit 到前端
-    let mut stream = stream;
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(event) => {
-                if emit_agent_event(&window, event).is_err() {
-                    // emit 失败（窗口可能已关闭），终止流
-                    break;
-                }
-            }
-            Err(e) => {
-                let _ = window.emit(
-                    EVENT_ERROR,
-                    ErrorPayload {
-                        message: e.to_string(),
-                    },
-                );
-                break;
-            }
-        }
-    }
-
-    // 7. 清理取消令牌
+    chat_state.register(run_id.clone(), handle.clone());
+    chat_bridge::consume_stream(handle, &window, &EVENTS).await;
     chat_state.unregister(&run_id);
 
     Ok(())
@@ -239,65 +254,4 @@ pub fn motis_chat_resolve_approval(
     chat_state: State<'_, MotisChatState>,
 ) -> Result<(), MotisChatError> {
     chat_state.resolve_approval(&approval_id, approved, reason)
-}
-
-/// 构造 confluent 输入。
-///
-/// 将历史记录与当前消息格式化为单条用户消息，
-/// 作为 [`ConfluentRuntime::run_stream`] 的输入。
-///
-/// 人格、表达模式等上下文由 [`MotisContextInjector`] 通过 `dynamic_state`
-/// 注入，经 [`PromptExtension`] 组装为 system prompt，不再在此拼接。
-fn build_input(message: &str, history: &[HistoryMessage]) -> serde_json::Value {
-    let mut parts: Vec<String> = Vec::new();
-
-    // 历史记录
-    for msg in history {
-        let role = match msg.role.as_str() {
-            "user" => "用户",
-            "assistant" => "助手",
-            other => other,
-        };
-        parts.push(format!("{}: {}", role, msg.content));
-    }
-
-    // 当前消息
-    parts.push(format!("用户: {}", message));
-
-    serde_json::Value::String(parts.join("\n"))
-}
-
-/// 将 [`AgentEvent`] 转换为 Tauri 事件并 emit 到前端。
-fn emit_agent_event(window: &Window, event: AgentEvent) -> Result<(), tauri::Error> {
-    match event {
-        AgentEvent::ThoughtDelta(delta) => {
-            window.emit(EVENT_THOUGHT, ThoughtPayload { delta })?;
-        }
-        AgentEvent::TextDelta(delta) => {
-            window.emit(EVENT_TEXT, TextPayload { delta })?;
-        }
-        AgentEvent::ToolCallRequest(tool_call) => {
-            window.emit(
-                EVENT_TOOL_CALL,
-                ToolCallPayload {
-                    id: tool_call.id,
-                    name: tool_call.name,
-                    input: tool_call.input,
-                },
-            )?;
-        }
-        AgentEvent::Finish { result, usage } => {
-            window.emit(
-                EVENT_FINISH,
-                FinishPayload {
-                    result,
-                    total_tokens: usage.total_tokens,
-                },
-            )?;
-        }
-        AgentEvent::Yield => {
-            // 主动让出，无需通知前端
-        }
-    }
-    Ok(())
 }

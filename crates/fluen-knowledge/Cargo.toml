@@ -18,8 +18,8 @@ thiserror = "1"
 # ── Optional: async 运行时 ──
 tokio = { version = "1", features = ["rt", "sync", "io-util", "io-std", "macros"], optional = true }
 
-# ── Optional: confluent agent_runtime 工具适配 ──
-confluent = { path = "../../crates/confluent", optional = true }
+# ── Optional: referee-ai 工具适配 ──
+referee-ai = { path = "../../crates/referee/referee-ai", optional = true }
 
 [features]
 default = []
@@ -27,8 +27,8 @@ default = []
 async = ["dep:tokio"]
 # MCP server：将知识库暴露为 MCP 工具（JSON-RPC 2.0 over stdio）
 mcp-server = ["async"]
-# confluent agent_runtime 工具适配：将知识库操作适配为 Tool / ToolProvider
-tools = ["async", "dep:confluent"]
+# referee-ai 工具适配：将知识库操作适配为 Tool
+tools = ["async", "dep:referee-ai"]
 
 [dev-dependencies]
 tempfile = "3"

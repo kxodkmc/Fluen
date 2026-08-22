@@ -5,21 +5,24 @@
 //! 硬错误时拒绝保存），保存后自动拆分同步各 `sec-{id}.md` 备份与
 //! `sections.json`（章节 ID 按标记 / H1 标题稳定匹配）。
 //!
-//! 这是学术助手撰写正文的标准落盘通道；写操作同样纳入工具审批
-//! （`motis_chat::approval::ToolApprovalExtension`），需用户点击「应用」才生效。
-
-use std::sync::Arc;
+//! 这是学术助手撰写正文的标准落盘通道；写操作由装配层的
+//! [`ApprovalGuard`](crate::agent_runtime::approval::ApprovalGuard) 包装，
+//! 需用户点击「应用」才生效。
 
 use async_trait::async_trait;
-use confluent::agent_runtime::{InvocationContext, Tool, ToolError, ToolProvider, ToolSchema};
+use referee_ai::tool::{Tool, ToolContext, ToolError, ToolOutput};
 use serde_json::{json, Value};
 
 /// 工具名称。
 pub const MANUSCRIPT_TOOL_NAME: &str = "manuscript";
 
+/// 工具描述。
+const DESCRIPTION: &str = "撰写/更新论文正文（格式规范）：整体替换 manuscript/main.md 内容，自动校验 fluen-markup 语法并同步章节备份与索引。写入前会弹出确认框，需用户点击「应用」后才真正保存。";
+
 /// 论文正文写入工具。
 pub struct ManuscriptEditTool {
-    schema: ToolSchema,
+    /// 输入参数 JSON Schema。
+    parameters: Value,
     /// 论文项目根路径（构造时注入）。
     project_path: String,
 }
@@ -44,11 +47,7 @@ impl ManuscriptEditTool {
         });
 
         Self {
-            schema: ToolSchema {
-                name: MANUSCRIPT_TOOL_NAME.into(),
-                description: "撰写/更新论文正文（格式规范）：整体替换 manuscript/main.md 内容，自动校验 fluen-markup 语法并同步章节备份与索引。写入前会弹出确认框，需用户点击「应用」后才真正保存。".into(),
-                parameters,
-            },
+            parameters,
             project_path,
         }
     }
@@ -56,23 +55,36 @@ impl ManuscriptEditTool {
 
 #[async_trait]
 impl Tool for ManuscriptEditTool {
-    fn schema(&self) -> &ToolSchema {
-        &self.schema
+    fn name(&self) -> &str {
+        MANUSCRIPT_TOOL_NAME
     }
 
-    async fn invoke(
+    fn description(&self) -> &str {
+        DESCRIPTION
+    }
+
+    fn input_schema(&self) -> Value {
+        self.parameters.clone()
+    }
+
+    /// 写入结果需同步反馈（LLM 等待保存完成再继续生成）。
+    fn default_wait(&self) -> bool {
+        true
+    }
+
+    async fn execute(
         &self,
-        input: Value,
-        _ctx: &InvocationContext,
-    ) -> Result<Value, ToolError> {
-        let action = input
+        _ctx: ToolContext,
+        args: Value,
+    ) -> Result<ToolOutput, ToolError> {
+        let action = args
             .get("action")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParams("缺少 action 参数".into()))?;
-        let content = input
+            .ok_or_else(|| ToolError::InvalidArguments("缺少 action 参数".into()))?;
+        let content = args
             .get("content")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParams("update 需要 content 参数".into()))?;
+            .ok_or_else(|| ToolError::InvalidArguments("update 需要 content 参数".into()))?;
 
         match action {
             "update" => {
@@ -81,7 +93,7 @@ impl Tool for ManuscriptEditTool {
                     content: content.to_string(),
                 };
                 let result = crate::project::section::save_document(request).map_err(|e| {
-                    ToolError::ExecutionFailed(format!("论文保存失败: {}", e))
+                    ToolError::Execution(format!("论文保存失败: {}", e))
                 })?;
 
                 let sections: Vec<Value> = result
@@ -96,40 +108,19 @@ impl Tool for ManuscriptEditTool {
                     })
                     .collect();
 
-                Ok(json!({
+                Ok(ToolOutput::from_json(&json!({
                     "path": "manuscript/main.md",
                     "saved": true,
                     "main_md_bytes": result.main_md.len(),
                     "section_count": sections.len(),
                     "sections": sections,
-                }))
+                })))
             }
-            other => Err(ToolError::InvalidParams(format!(
+            other => Err(ToolError::InvalidArguments(format!(
                 "未知 action: {}（可选值: update）",
                 other
             ))),
         }
-    }
-}
-
-/// 包装 [`ManuscriptEditTool`] 为 [`ToolProvider`]。
-pub struct ManuscriptEditToolProvider {
-    tool: Arc<ManuscriptEditTool>,
-}
-
-impl ManuscriptEditToolProvider {
-    /// 构造提供者。
-    pub fn new(project_path: String) -> Self {
-        Self {
-            tool: Arc::new(ManuscriptEditTool::new(project_path)),
-        }
-    }
-}
-
-#[async_trait]
-impl ToolProvider for ManuscriptEditToolProvider {
-    async fn list_tools(&self) -> Vec<Arc<dyn Tool>> {
-        vec![self.tool.clone()]
     }
 }
 
@@ -170,14 +161,21 @@ mod tests {
         std::path::PathBuf::from(path)
     }
 
-    fn ctx() -> InvocationContext {
-        InvocationContext {
-            run_id: "test-run".into(),
-            agent_id: "test-agent".into(),
+    fn ctx() -> ToolContext {
+        ToolContext {
             tool_call_id: "test-call".into(),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            timeout: std::time::Duration::from_secs(30),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
         }
+    }
+
+    /// 解析工具输出为 JSON（工具返回值均为 `ToolOutput::from_json` 构造）。
+    fn output_json(output: ToolOutput) -> Value {
+        serde_json::from_str(&output.content).unwrap()
     }
 
     #[tokio::test]
@@ -187,10 +185,11 @@ mod tests {
         let tool = ManuscriptEditTool::new(project_dir.to_string_lossy().to_string());
 
         let content = "# 引言\n\n引言正文\n\n# 方法\n\n方法正文";
-        let result = tool
-            .invoke(json!({ "action": "update", "content": content }), &ctx())
-            .await
-            .unwrap();
+        let result = output_json(
+            tool.execute(ctx(), json!({ "action": "update", "content": content }))
+                .await
+                .unwrap(),
+        );
 
         assert_eq!(result["saved"], true);
         assert_eq!(result["section_count"], 2);
@@ -224,19 +223,21 @@ mod tests {
 
         // 首次写入两个章节
         let first = "# 引言\n\n引言正文";
-        let result = tool
-            .invoke(json!({ "action": "update", "content": first }), &ctx())
-            .await
-            .unwrap();
+        let result = output_json(
+            tool.execute(ctx(), json!({ "action": "update", "content": first }))
+                .await
+                .unwrap(),
+        );
         let section_id = result["sections"][0]["id"].as_str().unwrap().to_string();
 
         // 第二次更新：标记保留、标题变更 → ID 稳定
         let main_file = fs::read_to_string(project_dir.join("manuscript/main.md")).unwrap();
         let updated = main_file.replace("# 引言", "# 绪论");
-        let result2 = tool
-            .invoke(json!({ "action": "update", "content": updated }), &ctx())
-            .await
-            .unwrap();
+        let result2 = output_json(
+            tool.execute(ctx(), json!({ "action": "update", "content": updated }))
+                .await
+                .unwrap(),
+        );
         assert_eq!(result2["sections"][0]["id"], section_id);
         assert_eq!(result2["sections"][0]["title"], "绪论");
 
@@ -252,10 +253,10 @@ mod tests {
         // 重复 id 触发 lint 硬错误 → 拒绝保存
         let bad = "# 引言\n\n<f-fig id=\"fig:a\" src=\"assets/a.png\">\n<f-caption>图一</f-caption>\n</f-fig>\n\n<f-fig id=\"fig:a\" src=\"assets/a.png\">\n<f-caption>图二</f-caption>\n</f-fig>";
         let err = tool
-            .invoke(json!({ "action": "update", "content": bad }), &ctx())
+            .execute(ctx(), json!({ "action": "update", "content": bad }))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed(_)));
+        assert!(matches!(err, ToolError::Execution(_)));
         assert!(err.to_string().contains("拒绝保存"));
 
         let _ = fs::remove_dir_all(&storage);
@@ -268,10 +269,10 @@ mod tests {
         let tool = ManuscriptEditTool::new(project_dir.to_string_lossy().to_string());
 
         let err = tool
-            .invoke(json!({ "action": "update" }), &ctx())
+            .execute(ctx(), json!({ "action": "update" }))
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParams(_)));
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
 
         let _ = fs::remove_dir_all(&storage);
     }

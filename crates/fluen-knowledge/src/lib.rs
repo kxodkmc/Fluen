@@ -29,7 +29,7 @@
 //! |---------|------|
 //! | `async` | 异步知识库句柄 [`async_kb::AsyncKnowledgeBase`] |
 //! | `mcp-server` | MCP server（JSON-RPC 2.0 over stdio）[`mcp_server::KnowledgeMcpServer`] |
-//! | `tools` | confluent agent_runtime 工具适配 [`tools::KnowledgeToolProvider`] |
+//! | `tools` | referee-ai 工具适配 [`tools::KnowledgeToolProvider`] |
 //!
 //! ### MCP server 示例
 //!
@@ -50,19 +50,21 @@
 //! # fn main() {}
 //! ```
 //!
-//! ### confluent agent_runtime 工具注入示例
+//! ### referee-ai 工具注入示例
 //!
 //! ```no_run
 //! # #[cfg(feature = "tools")]
-//! # async fn example() -> anyhow::Result<()> {
+//! # fn example() -> anyhow::Result<()> {
 //! use fluen_knowledge::async_kb::AsyncKnowledgeBase;
 //! use fluen_knowledge::tools::KnowledgeToolProvider;
-//! use confluent::agent_runtime::ToolRegistry;
+//! use referee_ai::tool::ToolRegistry;
 //!
 //! let kb = AsyncKnowledgeBase::open("references")?;
 //! let provider = KnowledgeToolProvider::with_defaults(kb);
-//! let registry = ToolRegistry::new();
-//! registry.register_provider(&provider).await;
+//! let registry = ToolRegistry::with_defaults();
+//! for tool in provider.list_tools() {
+//!     registry.register(tool)?;
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -104,9 +106,9 @@ pub mod async_kb;
 #[cfg(feature = "mcp-server")]
 pub mod mcp_server;
 
-/// confluent agent_runtime 工具适配（`tools` feature）。
+/// referee-ai 工具适配（`tools` feature）。
 ///
-/// 将知识库操作适配为 `Tool` / `ToolProvider`，可直接注册到
+/// 将知识库操作适配为 `Tool`，可直接注册到
 /// 智能体的 `ToolRegistry`。
 #[cfg(feature = "tools")]
 pub mod tools;

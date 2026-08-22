@@ -6,6 +6,7 @@
  */
 
 import { ref, computed } from 'vue';
+import { useLogger } from '../../../composables/useLogger';
 import { useMascotConfig } from '../../../composables/useMascotConfig';
 import { useMascotData } from '../../../composables/useMascotData';
 import type { MascotConfig, MascotData, Mood } from '../../../types/mascot';
@@ -27,6 +28,24 @@ const PERSONALITIES: PersonalityOption[] = [
   { id: 'professional', labelKey: 'professional' },
 ];
 
+/* ── 子智能体定义 ──────────────────────────────────────────────────────── */
+
+/** Motis 可调度的子智能体选项。 */
+export interface AgentOption {
+  id: string;
+  /** i18n key 后缀，完整路径为 `settings.motis.agents.${suffix}`。 */
+  labelKey: string;
+  /** 职责描述 i18n key 后缀。 */
+  descKey: string;
+}
+
+/** 内置子智能体选项列表。 */
+const AGENTS: AgentOption[] = [
+  { id: 'academic_writer', labelKey: 'academicWriter', descKey: 'academicWriterDesc' },
+  { id: 'knowledge_builder', labelKey: 'knowledgeBuilder', descKey: 'knowledgeBuilderDesc' },
+  { id: 'data_analyst', labelKey: 'dataAnalyst', descKey: 'dataAnalystDesc' },
+];
+
 /* ── 状态 ───────────────────────────────────────────────────────────── */
 
 /** Motis 配置（null = 尚未加载）。 */
@@ -43,6 +62,8 @@ const isSaving = ref(false);
 export function useMotisSettings() {
   const { loadConfig, saveConfig } = useMascotConfig();
   const { loadData, syncMoodFromAffinity } = useMascotData();
+  /** 统一前端日志（桥接到后端同一日志文件）。 */
+  const log = useLogger('motis-settings');
 
   /** 人格选项列表。 */
   const personalities = PERSONALITIES;
@@ -71,6 +92,18 @@ export function useMotisSettings() {
   /** 是否使用专业化表述。 */
   const professionalExpression = computed(() => config.value?.professional_expression ?? false);
 
+  /** 已启用的子智能体 ID 列表（空列表 = 全部可用）。 */
+  const enabledAgents = computed<string[]>(() => config.value?.enabled_agents ?? []);
+
+  /** 子智能体选项列表。 */
+  const agents = AGENTS;
+
+  /** 判断指定子智能体是否启用。空列表 = 全部可用。 */
+  function isAgentEnabled(agentId: string): boolean {
+    const list = enabledAgents.value;
+    return list.length === 0 || list.includes(agentId);
+  }
+
   /** 当前好感度。 */
   const affinity = computed(() => data.value?.affinity ?? 0);
 
@@ -98,8 +131,9 @@ export function useMotisSettings() {
     isSaving.value = true;
     try {
       await saveConfig(config.value);
+      log.debug('保存 Motis 配置', patch);
     } catch (err) {
-      console.error('[useMotisSettings] 保存配置失败:', err);
+      log.error('保存配置失败', err);
     } finally {
       isSaving.value = false;
     }
@@ -132,6 +166,7 @@ export function useMotisSettings() {
 
   /** 切换函数调用。 */
   async function toggleFunctionCalling(value: boolean): Promise<void> {
+    log.info('切换工具调用总开关', { enabled: value });
     await updateConfig({ function_calling_enabled: value });
   }
 
@@ -143,6 +178,40 @@ export function useMotisSettings() {
   /** 切换专业化表述。 */
   async function toggleProfessionalExpression(value: boolean): Promise<void> {
     await updateConfig({ professional_expression: value });
+  }
+
+  /** 切换子智能体启用状态。
+   *
+   * 空列表语义为「全部可用」——当用户首次操作时，
+   * 将当前全部 Agent ID 写入列表作为初始状态，再执行增删。
+   *
+   * **联动总开关**：子智能体依赖「函数调用」工具能力——任一子智能体
+   * 开启则自动打开 `function_calling_enabled`，全部关闭则随之关闭，
+   * 避免出现「开了子智能体却调不到工具」的困惑。
+   */
+  async function toggleAgent(agentId: string, enabled: boolean): Promise<void> {
+    let list = config.value?.enabled_agents ?? [];
+    // 空列表 = 全部可用，首次操作时初始化为全部 ID
+    if (list.length === 0) {
+      list = AGENTS.map((a) => a.id);
+    }
+    if (enabled) {
+      if (!list.includes(agentId)) {
+        list = [...list, agentId];
+      }
+    } else {
+      list = list.filter((id) => id !== agentId);
+    }
+    await updateConfig({
+      enabled_agents: list,
+      function_calling_enabled: list.length > 0,
+    });
+    log.info('切换子智能体', {
+      agentId,
+      enabled,
+      enabledList: list,
+      masterAuto: list.length > 0,
+    });
   }
 
   /* ── 数据更新 ────────────────────────────────────────────────────── */
@@ -169,6 +238,8 @@ export function useMotisSettings() {
     functionCallingEnabled,
     showThinkingContent,
     professionalExpression,
+    enabledAgents,
+    agents,
     affinity,
     mood,
     personalities,
@@ -182,6 +253,8 @@ export function useMotisSettings() {
     toggleFunctionCalling,
     toggleShowThinking,
     toggleProfessionalExpression,
+    isAgentEnabled,
+    toggleAgent,
     syncMood,
   };
 }

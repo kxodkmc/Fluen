@@ -107,6 +107,9 @@ pub struct ReferenceEntry {
     /// 作者列表（模式 2 / 3 由 AI 识别写入索引，模式 1 为 None）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authors: Option<Vec<String>>,
+    /// 发表年份（导入完成时从 MD frontmatter 同步；存量项目由一致性回填）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<String>,
     /// 导入模式（记录该文献由何种模式导入，重试时复用）。
     #[serde(default)]
     pub import_mode: ReferenceImportMode,
@@ -221,6 +224,7 @@ mod tests {
             source: None,
             ai_summary: None,
             authors: Some(vec!["Author A".into()]),
+            year: Some("2025".into()),
             import_mode: ReferenceImportMode::OcrWithAiCorrection,
             status: ReferenceStatus::Completed,
             error: None,

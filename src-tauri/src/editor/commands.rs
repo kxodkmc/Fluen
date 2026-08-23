@@ -122,18 +122,30 @@ pub fn editor_redo(state: tauri::State<EditorState>) -> Result<UndoRedoResult, E
 
 /// 渲染为 HTML。
 ///
-/// 传入 `content` 时即时渲染该内容（不修改引擎 source_md，且不要求引擎已加载——
-/// 预览渲染是无状态操作，使用默认渲染选项）；
+/// 传入 `content` 时即时渲染该内容（不修改引擎 source_md，且不要求引擎已加载）；
 /// 不传或传 `null` 时渲染引擎当前 source_md（要求引擎已加载）。
+///
+/// 两条路径的文献库均取自引擎绑定项目（未绑定时为空库，`<f-cite>` 降级显示）。
 #[tauri::command]
 pub fn editor_render_html(
     state: tauri::State<EditorState>,
     content: Option<String>,
 ) -> Result<String, EditorErrorResponse> {
     match content {
-        // 有内容时无状态渲染：不依赖引擎，用默认配置
-        Some(c) => super::render::render_to_html(&c, &super::config::EditorConfig::default().render_options)
-            .map_err(Into::into),
+        // 有内容时无状态渲染：不依赖引擎内容，仅借用其绑定的项目路径
+        Some(c) => {
+            let project_path = {
+                let guard = state.0.lock();
+                guard.as_ref().and_then(|e| e.project_path().map(String::from))
+            };
+            let refs = super::reflib::load_for_project(project_path.as_deref());
+            super::render::render_to_html(
+                &c,
+                &super::config::EditorConfig::default().render_options,
+                &refs,
+            )
+            .map_err(Into::into)
+        }
         // 无内容时读引擎 source_md
         None => {
             let guard = state.0.lock();

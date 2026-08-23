@@ -95,16 +95,16 @@ fn write_config_yaml(
     });
     let config = ProjectConfig::new(&request.title, &request.author, description);
     let yaml = serde_yaml::to_string(&config)?;
-    std::fs::write(project_dir.join("config.yaml"), yaml)?;
+    super::atomic::atomic_write(&project_dir.join("config.yaml"), yaml.as_bytes())?;
     Ok(())
 }
 
 /// 写入 `references-index.json`（初始空数组）。
 fn write_references_index(project_dir: &Path) -> Result<(), ProjectError> {
     let json = serde_json::to_string_pretty(&Vec::<serde_json::Value>::new())?;
-    std::fs::write(
-        project_dir.join("references").join("references-index.json"),
-        json,
+    super::atomic::atomic_write(
+        &project_dir.join("references").join("references-index.json"),
+        json.as_bytes(),
     )?;
     Ok(())
 }
@@ -112,21 +112,21 @@ fn write_references_index(project_dir: &Path) -> Result<(), ProjectError> {
 /// 写入 `sections.json`（初始空数组）。
 fn write_sections_json(project_dir: &Path) -> Result<(), ProjectError> {
     let json = serde_json::to_string_pretty(&Vec::<serde_json::Value>::new())?;
-    std::fs::write(
-        project_dir
+    super::atomic::atomic_write(
+        &project_dir
             .join("manuscript")
             .join("sections")
             .join("sections.json"),
-        json,
+        json.as_bytes(),
     )?;
     Ok(())
 }
 
 /// 写入 `manuscript/main.md`（初始为空主文档，编辑器唯一真实数据源）。
 fn write_main_md(project_dir: &Path) -> Result<(), ProjectError> {
-    std::fs::write(
-        project_dir.join("manuscript").join(loader::MAIN_MD_NAME),
-        "",
+    super::atomic::atomic_write(
+        &project_dir.join("manuscript").join(loader::MAIN_MD_NAME),
+        b"",
     )?;
     Ok(())
 }

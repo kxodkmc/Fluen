@@ -152,17 +152,35 @@ export function useLlmSettings() {
     selectedPresetId.value = '';
   }
 
-  /** 从预设构建 ProviderConfig。 */
-  function buildProviderFromPreset(preset: ProviderPreset, apiKey: string): ProviderConfig {
-    const models: ModelConfig[] = preset.models.map((m) => ({
-      id: m.id,
-      name: m.name,
-      capabilities: buildCapabilities(m),
-      max_output_tokens: m.maxOutputTokens,
-      context_window: m.contextWindow,
-      description: null,
-      enabled: true,
-    }));
+  /**
+   * 从预设构建 ProviderConfig。
+   *
+   * 当预设无可选模型（如 OpenRouter 聚合网关）时，使用调用方传入的
+   * `modelId`（用户自填）生成单个模型条目；未填则模型列表为空。
+   */
+  function buildProviderFromPreset(preset: ProviderPreset, apiKey: string, modelId: string): ProviderConfig {
+    const models: ModelConfig[] =
+      preset.models.length > 0
+        ? preset.models.map((m) => ({
+            id: m.id,
+            name: m.name,
+            capabilities: buildCapabilities(m),
+            max_output_tokens: m.maxOutputTokens,
+            context_window: m.contextWindow,
+            description: null,
+            enabled: true,
+          }))
+        : modelId
+          ? [{
+              id: modelId,
+              name: modelId,
+              capabilities: buildCapabilities({ thinking: false, vision: false, audio: false, video: false }),
+              max_output_tokens: null,
+              context_window: null,
+              description: null,
+              enabled: true,
+            }]
+          : [];
 
     return {
       id: preset.id,
@@ -183,7 +201,7 @@ export function useLlmSettings() {
   /** 添加预设提供商。 */
   async function addPresetProvider(preset: ProviderPreset, apiKey: string, modelId: string): Promise<void> {
     if (!config.value) return;
-    const provider = buildProviderFromPreset(preset, apiKey);
+    const provider = buildProviderFromPreset(preset, apiKey, modelId);
     // 替换同 ID 的已有提供商
     config.value.providers = config.value.providers.filter((p) => p.id !== provider.id);
     config.value.providers.push(provider);

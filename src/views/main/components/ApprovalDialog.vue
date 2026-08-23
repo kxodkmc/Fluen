@@ -2,15 +2,15 @@
 /**
  * ApprovalDialog — 工具写操作确认弹窗（共享组件）。
  *
- * 当智能体（Motis / 学术助手）通过写工具（project_file / manuscript /
- * fs_execute_command）发起操作时，后端推送审批请求事件，本组件将请求
+ * 当智能体（Motis / 学术助手）通过写工具（project_write / project_edit /
+ * manuscript）发起操作时，后端推送审批请求事件，本组件将请求
  * 展示为浮动卡片；用户点击「应用」才真正写入，点击「拒绝」则拦截。
  *
  * 纯展示组件：待审批列表由 props 注入，用户决策通过 `resolve` 事件上抛，
  * 由父组件（持有 useMotisChat / useAIAssistant 实例）回传后端。
  */
 import { computed } from 'vue';
-import { useI18n } from 'vue-i18n';
+import { useI18n } from '../../../i18n';
 
 /** 待审批条目（结构兼容 useMotisChat / useAIAssistant 的 PendingApproval）。 */
 export interface ApprovalItem {
@@ -38,13 +38,11 @@ const visible = computed(() => props.approvals.length > 0);
 function actionLabel(action: unknown): string {
   switch (action) {
     case 'write':
-      return t('motisPanel.approval.actionWrite');
+      return t('main.motisPanel.approval.actionWrite');
     case 'edit':
-      return t('motisPanel.approval.actionEdit');
-    case 'append':
-      return t('motisPanel.approval.actionAppend');
+      return t('main.motisPanel.approval.actionEdit');
     case 'update':
-      return t('motisPanel.approval.actionUpdate');
+      return t('main.motisPanel.approval.actionUpdate');
     default:
       return String(action ?? '');
   }
@@ -82,10 +80,10 @@ function reject(id: string): void {
     <div v-if="visible" class="approval-overlay" @click.self="() => {}">
       <div class="approval-card">
         <div class="approval-header">
-          <span class="approval-title">{{ t('motisPanel.approval.title') }}</span>
+          <span class="approval-title">{{ t('main.motisPanel.approval.title') }}</span>
           <span class="approval-count">{{ approvals.length }}</span>
         </div>
-        <p class="approval-desc">{{ t('motisPanel.approval.desc') }}</p>
+        <p class="approval-desc">{{ t('main.motisPanel.approval.desc') }}</p>
 
         <div class="approval-list">
           <div v-for="item in approvals" :key="item.id" class="approval-item">
@@ -98,10 +96,10 @@ function reject(id: string): void {
             <pre v-if="summary(item)" class="approval-summary">{{ summary(item) }}</pre>
             <div class="approval-item-actions">
               <button class="btn apply" @click="apply(item.id)">
-                {{ t('motisPanel.approval.apply') }}
+                {{ t('main.motisPanel.approval.apply') }}
               </button>
               <button class="btn reject" @click="reject(item.id)">
-                {{ t('motisPanel.approval.reject') }}
+                {{ t('main.motisPanel.approval.reject') }}
               </button>
             </div>
           </div>

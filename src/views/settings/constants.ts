@@ -42,16 +42,16 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     component: LanguageSection,
   },
   {
-    id: 'llmConfig',
-    labelKey: 'settings.sections.llmConfig',
-    icon: 'M12 2a3 3 0 0 0-3 3v1H7a3 3 0 0 0-3 3v1H3v2h1v1a3 3 0 0 0 3 3h2v1a3 3 0 0 0 6 0v-1h2a3 3 0 0 0 3-3v-1h1v-2h-1V9a3 3 0 0 0-3-3h-2V5a3 3 0 0 0-3-3z',
-    component: LlmConfigSection,
-  },
-  {
     id: 'aiServices',
     labelKey: 'settings.sections.aiServices',
     icon: 'M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10',
     children: [
+      {
+        id: 'llmConfig',
+        labelKey: 'settings.sections.llmConfig',
+        icon: 'M12 2a3 3 0 0 0-3 3v1H7a3 3 0 0 0-3 3v1H3v2h1v1a3 3 0 0 0 3 3h2v1a3 3 0 0 0 6 0v-1h2a3 3 0 0 0 3-3v-1h1v-2h-1V9a3 3 0 0 0-3-3h-2V5a3 3 0 0 0-3-3z',
+        component: LlmConfigSection,
+      },
       {
         id: 'literature',
         labelKey: 'settings.sections.literature',

@@ -16,6 +16,7 @@ import { ref, computed, watch, onMounted } from 'vue';
 import { useI18n } from '../../../../i18n';
 import { useMascotConfig } from '../../../../composables/useMascotConfig';
 import type { ChatMessage } from '../../types';
+import MotisAgentRun from './MotisAgentRun.vue';
 import {
   describeToolCall,
   summarizeToolDisplays,
@@ -136,8 +137,9 @@ function detailText(row: ActivityRow): string {
     .join('\n\n');
 }
 
-/** 行是否有可展开详情。 */
+/** 行是否有可展开详情（子智能体运行面板 / 思考原文 / 参数+结果）。 */
 function canExpand(row: ActivityRow): boolean {
+  if (row.kind === 'tool' && row.msg.agentRun) return true;
   if (row.kind === 'thinking') {
     return showThinkingContent.value && row.msg.content.trim() !== '';
   }
@@ -266,8 +268,14 @@ function iconPathsOf(row: ActivityRow): string[] {
           </svg>
         </div>
 
-        <!-- 展开详情（思考原文 / 参数与结果） -->
-        <pre v-if="openedRows[row.id]" class="motis-act__detail">{{ detailText(row) }}</pre>
+        <!-- 展开详情：子智能体运行面板 / 思考原文 / 参数与结果 -->
+        <div
+          v-if="openedRows[row.id] && row.kind === 'tool' && row.msg.agentRun"
+          class="motis-act__agent-run"
+        >
+          <MotisAgentRun :run="row.msg.agentRun" />
+        </div>
+        <pre v-else-if="openedRows[row.id]" class="motis-act__detail">{{ detailText(row) }}</pre>
       </div>
     </div>
   </div>
@@ -461,5 +469,14 @@ function iconPathsOf(row: ActivityRow): string[] {
   word-break: break-word;
   max-height: 220px;
   overflow-y: auto;
+}
+
+/* 子智能体运行面板容器（与 pre 详情同缩进） */
+.motis-act__agent-run {
+  margin: 2px 0 4px 27px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--fluen-surface);
+  border: 1px solid var(--fluen-hairline);
 }
 </style>

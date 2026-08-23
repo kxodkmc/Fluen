@@ -5,19 +5,18 @@
 //!
 //! - [`resolve_provider_model`]：解析 provider 与 model（优先提示的 provider_id/model_id，
 //!   否则回退到 LLM 全局激活项）
-//! - [`build_llm_provider`]：按 provider 配置构造 [`LLMProvider`]
-//!   （通用 OpenAI 兼容 / 智谱专用 thinking 注入）
+//! - [`build_llm_provider`]：按 provider 配置构造 [`LLMProvider`]（通用 OpenAI 兼容适配器）
 //!
 //! 依赖 [`LlmConfig`]（全局 LLM 配置存储），与具体的智能体配置解耦。
-//! 基于 referee-ai 的 `GenericProvider` 适配器，统一走 OpenAI 兼容协议。
+//! 基于 referee-ai 的 `OpenAiProvider` 适配器，统一走 OpenAI 兼容协议。
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use referee_ai::provider::generic::{GenericConfig, GenericProvider};
-use referee_ai::provider::{LLMProvider, RetryPolicy};
+use referee_ai::provider::openai::{OpenAiConfig, OpenAiProvider};
+use referee_ai::provider::{LLMProvider, ModelSpec, RetryPolicy};
 
-use crate::llm_config::model::{ApiStyle, LlmConfig, ProviderConfig};
+use crate::llm_config::model::{LlmConfig, ProviderConfig};
 
 /// 聊天连接层错误。
 #[derive(Debug, thiserror::Error)]
@@ -30,14 +29,8 @@ pub enum LlmChatError {
     NoProvider,
 }
 
-/// Anthropic API 默认版本头。
-const ANTHROPIC_VERSION: &str = "2023-06-06";
-
 /// LLM 请求默认超时——4 分钟（长文档 / 深度思考场景需要更大余量）。
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
-
-/// 智谱 thinking 注入字段路径（OpenAI 兼容协议的深度思考参数）。
-const ZHIPU_THINKING_FIELD: &str = "thinking.type";
 
 /// 解析 provider 与 model。
 ///
@@ -82,39 +75,20 @@ pub fn resolve_provider_model<'a>(
     }
 }
 
-/// 将 base URL 规范化为完整的 OpenAI Chat Completions 端点。
+/// 将用户配置的 URL 规范化为 base URL。
 ///
-/// 用户配置中的 `openai_base_url` 可能是 base URL（如 `https://api.stepfun.com/v1`），
-/// 也可能是完整端点（如 `https://api.stepfun.com/v1/chat/completions`）。
-/// 本函数确保最终 URL 以 `/chat/completions` 结尾。
-fn normalize_openai_endpoint(base_url: &str) -> String {
+/// 用户配置的 `openai_base_url` 可能是 base（如 `https://api.deepseek.com`、
+/// `https://api.stepfun.com/v1`），也可能是完整端点（如
+/// `https://api.stepfun.com/v1/chat/completions`）。`OpenAiProvider` 底层客户端
+/// 会自行拼接 `/chat/completions`，故此处统一剥离该后缀，确保以 base 形式传入。
+fn normalize_base_url(url: &str) -> String {
     const CHAT_PATH: &str = "/chat/completions";
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with(CHAT_PATH) {
-        trimmed.to_string()
+    let trimmed = url.trim_end_matches('/');
+    if let Some(stripped) = trimmed.strip_suffix(CHAT_PATH) {
+        stripped.to_string()
     } else {
-        format!("{trimmed}{CHAT_PATH}")
+        trimmed.to_string()
     }
-}
-
-/// 构建提供商的额外请求头。
-///
-/// 对 Anthropic 风格的提供商，自动补充 `anthropic-version` 默认头。
-fn build_extra_headers(provider: &ProviderConfig) -> Vec<(String, String)> {
-    let mut headers: Vec<(String, String)> = provider
-        .extra_headers
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-
-    // Anthropic 风格需要 anthropic-version 头
-    if matches!(provider.default_style, ApiStyle::Anthropic)
-        && !headers.iter().any(|(k, _)| k == "anthropic-version")
-    {
-        headers.push(("anthropic-version".into(), ANTHROPIC_VERSION.into()));
-    }
-
-    headers
 }
 
 /// 从 `ModelConfig` 中提取模型规模规格，缺省时使用安全默认值。
@@ -140,12 +114,9 @@ fn resolve_model_spec(provider: &ProviderConfig, model_id: &str) -> (usize, usiz
 
 /// 构造 [`LLMProvider`]。
 ///
-/// 按提供商配置选择适配策略：
-/// - 所有提供商均走 `GenericProvider`（OpenAI 兼容协议底座）
-/// - `openai_base_url` 优先；仅有 `anthropic_base_url` 时使用 Anthropic 风格端点
-/// - 智谱（GLM）注入 `thinking.type` 字段（深度思考参数）
-/// - base_url 自动规范化（补全 `/chat/completions`）
-/// - 额外请求头逐条注入
+/// 所有提供商均走 `OpenAiProvider`（OpenAI 兼容协议底座）：
+/// - `openai_base_url` 优先；仅有 `anthropic_base_url` 时使用其作为 base
+/// - base_url 自动规范化（剥离 `/chat/completions` 后缀）
 ///
 /// 返回 `Arc<dyn LLMProvider>`，可直接用于构造 referee `Engine`。
 ///
@@ -169,22 +140,12 @@ pub fn build_llm_provider_with_timeout(
         LlmChatError::Config(format!("提供商 {} 未配置 api_key", provider.id))
     })?;
 
-    // 确定端点 URL：优先 OpenAI 风格，回退 Anthropic 风格
+    // 确定 base URL：优先 OpenAI 风格，回退 Anthropic 风格
     let base_url = if let Some(openai_url) = provider.openai_base_url.as_ref() {
-        normalize_openai_endpoint(openai_url)
+        normalize_base_url(openai_url)
     } else if let Some(anthropic_url) = provider.anthropic_base_url.as_ref() {
-        // Anthropic 风格端点也走 OpenAI 兼容底座（GenericProvider 统一处理）
-        let trimmed = anthropic_url.trim_end_matches('/');
-        if trimmed.ends_with("/v1/messages") {
-            // 去掉 /v1/messages 后缀，改用 /chat/completions
-            // 因为 GenericProvider 内部会自动拼接 /chat/completions
-            trimmed
-                .strip_suffix("/v1/messages")
-                .unwrap_or(trimmed)
-                .to_string()
-        } else {
-            trimmed.to_string()
-        }
+        // Anthropic 风格端点同样由 OpenAI 兼容底座处理，剥离开各自后缀统一走 /chat/completions
+        normalize_base_url(anthropic_url)
     } else {
         tracing::error!(
             provider_id = %provider.id,
@@ -196,31 +157,26 @@ pub fn build_llm_provider_with_timeout(
         )));
     };
 
-    let extra_headers = build_extra_headers(provider);
     let (context_window, max_output) = resolve_model_spec(provider, model_id);
 
-    let mut config = GenericConfig::new(api_key.clone(), base_url, model_id)
-        .with_extra_headers(extra_headers)
-        .with_model_spec(context_window, max_output)
+    let config = OpenAiConfig::new(base_url, api_key.clone(), model_id.to_string())
+        .with_model_spec(ModelSpec {
+            context_window_tokens: context_window,
+            max_output_tokens: max_output,
+        })
         .with_timeout(timeout)
         .with_retry(RetryPolicy::default());
 
-    // 智谱（GLM）：注入 thinking.type 字段（OpenAI 兼容协议，深度思考参数需专用转换器注入）
-    if provider.id == "zhipu" {
-        config = config.with_thinking(ZHIPU_THINKING_FIELD);
-    }
+    let openai = OpenAiProvider::new(config).map_err(|e| {
+        tracing::error!(
+            provider_id = %provider.id,
+            model_id = model_id,
+            "构建 LLM Provider 失败: {e}"
+        );
+        LlmChatError::Config(format!("创建 LLM Provider 失败: {e}"))
+    })?;
 
-    let generic = GenericProvider::new(&provider.id, config)
-        .map_err(|e| {
-            tracing::error!(
-                provider_id = %provider.id,
-                model_id = model_id,
-                "构建 LLM Provider 失败: {e}"
-            );
-            LlmChatError::Config(format!("创建 LLM Provider 失败: {e}"))
-        })?;
-
-    Ok(Arc::new(generic))
+    Ok(Arc::new(openai))
 }
 
 /// 便捷方法：一步完成 provider 解析 + LLMProvider 构造。
@@ -296,26 +252,26 @@ mod tests {
     }
 
     #[test]
-    fn normalize_openai_endpoint_handles_base_url() {
+    fn normalize_base_url_preserves_base() {
         assert_eq!(
-            normalize_openai_endpoint("https://api.example.com/v1"),
-            "https://api.example.com/v1/chat/completions"
+            normalize_base_url("https://api.example.com/v1"),
+            "https://api.example.com/v1"
         );
     }
 
     #[test]
-    fn normalize_openai_endpoint_handles_full_url() {
+    fn normalize_base_url_strips_full_endpoint() {
         assert_eq!(
-            normalize_openai_endpoint("https://api.example.com/v1/chat/completions"),
-            "https://api.example.com/v1/chat/completions"
+            normalize_base_url("https://api.example.com/v1/chat/completions"),
+            "https://api.example.com/v1"
         );
     }
 
     #[test]
-    fn normalize_openai_endpoint_strips_trailing_slash() {
+    fn normalize_base_url_strips_trailing_slash() {
         assert_eq!(
-            normalize_openai_endpoint("https://api.example.com/v1/"),
-            "https://api.example.com/v1/chat/completions"
+            normalize_base_url("https://api.example.com/v1/"),
+            "https://api.example.com/v1"
         );
     }
 }

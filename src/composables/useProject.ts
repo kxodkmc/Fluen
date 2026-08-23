@@ -221,6 +221,24 @@ export function useProject() {
     }
   }
 
+  /**
+   * 重新拉取当前项目内容（AI 写入正文后的外部变更刷新）。
+   *
+   * 仅替换内容状态，不记录最近打开、不触发 loading；无项目或失败时静默
+   * （调用方负责脏缓冲检查，避免覆盖用户未保存的编辑）。
+   */
+  async function refreshProject(): Promise<void> {
+    const path = _currentProject.value?.project_path;
+    if (!path) return;
+    try {
+      _currentProject.value = await invoke<OpenProjectResult>('open_project', {
+        projectPath: path,
+      });
+    } catch (err) {
+      console.error('[useProject] 刷新项目内容失败:', err);
+    }
+  }
+
   return {
     // 状态（只读）
     currentProject: readonly(_currentProject),
@@ -243,5 +261,6 @@ export function useProject() {
     insertHeading,
     saveDocument,
     saveContent,
+    refreshProject,
   };
 }

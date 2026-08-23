@@ -16,7 +16,7 @@
 //! | [`model`] | 数据模型（`ReferenceEntry`、`ReferenceStatus` 等） |
 //! | [`error`] | 统一错误类型 [`ReferenceError`] |
 //! | [`storage`] | 索引文件 I/O（`Mutex` 互斥 + 原子写入 + 内存缓存） |
-//! | [`consistency`] | 启动时孤儿文件扫描与一致性校验 |
+//! | [`consistency`] | 孤儿文件扫描、一致性校验与元数据回填 |
 //! | [`import_mode`] | 导入模式枚举（`Ocr` / `OcrWithAiCorrection` / `AiOnly`） |
 //! | [`frontmatter`] | YAML frontmatter 解析与序列化 |
 //! | [`pdf_text`] | PDF 文本提取（`pdf_oxide` 封装） |

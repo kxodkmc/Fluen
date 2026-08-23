@@ -50,6 +50,8 @@ export interface ReferenceEntry {
   ai_summary?: string | null;
   /** 作者列表（AI 校正解析，未解析时为空/缺省）。 */
   authors?: string[];
+  /** 发表年份（导入完成时从 MD frontmatter 同步；旧版项目由一致性回填）。 */
+  year?: string | null;
   /** 导入状态。 */
   status: ReferenceStatus;
   /** 失败原因（`status === 'failed'` 时有值）。 */

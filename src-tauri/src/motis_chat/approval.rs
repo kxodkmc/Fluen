@@ -12,10 +12,9 @@
 //!
 //! | 工具 | 是否弹窗 |
 //! |------|----------|
-//! | `project_file`（write / edit / append） | ✅ |
-//! | `project_file`（read） | ❌ 只读免审批 |
+//! | `project_write` / `project_edit`（项目内文件写入/编辑） | ✅ |
 //! | `manuscript`（论文正文写入） | ✅ |
-//! | 其余只读工具（paper_content / literature_search 等） | ❌ |
+//! | 其余只读工具（paper_outline / paper_section / literature_search / project_read 等） | ❌ |
 //!
 //! ## 事件名
 //!
@@ -35,8 +34,10 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::agent_runtime::approval::Approver;
-use crate::agent_tools::file::PROJECT_FILE_TOOL_NAME;
 use crate::agent_tools::manuscript::MANUSCRIPT_TOOL_NAME;
+use crate::agent_tools::project::edit::PROJECT_EDIT_TOOL_NAME;
+use crate::agent_tools::project::read::PROJECT_READ_TOOL_NAME;
+use crate::agent_tools::project::write::PROJECT_WRITE_TOOL_NAME;
 
 use super::events::ApprovalRequestPayload;
 
@@ -59,14 +60,14 @@ pub struct ApprovalOutcome {
 pub type ApprovalMap = Mutex<HashMap<String, oneshot::Sender<ApprovalOutcome>>>;
 
 /// 判断工具调用是否需要审批。
-fn needs_approval(tool_name: &str, input: &Value) -> bool {
-    if tool_name == PROJECT_FILE_TOOL_NAME {
-        // project_file：写操作（非 read）需要审批
-        !matches!(input.get("action").and_then(|v| v.as_str()), Some("read"))
-    } else {
-        // 其它写类工具按名称匹配
-        tool_name == MANUSCRIPT_TOOL_NAME
-    }
+///
+/// 工具均为单一职责：写类工具整工具需审批，只读工具一律免审批，
+/// 无需再检查入参。
+fn needs_approval(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        PROJECT_WRITE_TOOL_NAME | PROJECT_EDIT_TOOL_NAME | MANUSCRIPT_TOOL_NAME
+    )
 }
 
 /// 工具审批器——推送到前端弹窗并挂起等待用户决策。
@@ -93,7 +94,7 @@ impl MotisApprover {
 #[async_trait]
 impl Approver for MotisApprover {
     async fn approve(&self, tool_name: &str, input: &Value) -> Result<(), ToolError> {
-        if !needs_approval(tool_name, input) {
+        if !needs_approval(tool_name) {
             return Ok(());
         }
 
@@ -142,43 +143,29 @@ impl Approver for MotisApprover {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn project_file_read_is_exempt() {
-        assert!(!needs_approval(
-            PROJECT_FILE_TOOL_NAME,
-            &json!({ "action": "read", "path": "a.txt" })
-        ));
+    fn project_read_is_exempt() {
+        assert!(!needs_approval(PROJECT_READ_TOOL_NAME));
     }
 
     #[test]
-    fn project_file_writes_require_approval() {
-        for action in ["write", "edit", "append"] {
-            assert!(needs_approval(
-                PROJECT_FILE_TOOL_NAME,
-                &json!({ "action": action, "path": "a.txt" })
-            ));
-        }
-        // action 缺失时按需审批处理（默认安全）
-        assert!(needs_approval(PROJECT_FILE_TOOL_NAME, &json!({ "path": "a.txt" })));
+    fn project_write_and_edit_require_approval() {
+        assert!(needs_approval(PROJECT_WRITE_TOOL_NAME));
+        assert!(needs_approval(PROJECT_EDIT_TOOL_NAME));
     }
 
     #[test]
     fn manuscript_requires_approval() {
         // 论文正文写入工具：整个工具都是写操作
-        assert!(needs_approval(
-            MANUSCRIPT_TOOL_NAME,
-            &json!({ "action": "update", "content": "..." })
-        ));
+        assert!(needs_approval(MANUSCRIPT_TOOL_NAME));
     }
 
     #[test]
     fn read_only_tools_are_exempt() {
-        assert!(!needs_approval("paper_content", &json!({ "action": "full" })));
-        assert!(!needs_approval(
-            "literature_search",
-            &json!({ "query": "深度学习" })
-        ));
+        assert!(!needs_approval("paper_outline"));
+        assert!(!needs_approval("paper_section"));
+        assert!(!needs_approval("literature_search"));
+        assert!(!needs_approval("delegate_agent"));
     }
 }

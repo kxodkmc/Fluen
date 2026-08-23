@@ -6,7 +6,7 @@
  * 面板自管理对话状态（useAIAssistant）：
  *
  *   - 消息列表：文本（Markdown 渲染）/ 思考指示器 / 工具调用 / 状态提示
- *   - 写操作审批弹窗：manuscript / project_file 等写工具调用前弹出确认，
+ *   - 写操作审批弹窗：manuscript / project_write 等写工具调用前弹出确认，
  *     用户点击「应用」才真正写入
  *   - 输入区：发送 / 停止（生成中）
  */
@@ -86,13 +86,16 @@ watch(
 /* ── 消息渲染辅助 ─────────────────────────────────────────────────────── */
 
 /** 工具调用展示名。 */
-function toolDisplayName(msg: ChatMessage): string {
+function toolDisplayName(msg: Pick<ChatMessage, 'toolName'>): string {
   switch (msg.toolName) {
-    case 'paper_content':
+    case 'paper_outline':
+    case 'paper_section':
       return t('main.aiPanel.toolPaper');
     case 'manuscript':
       return t('main.aiPanel.toolManuscript');
-    case 'project_file':
+    case 'project_read':
+    case 'project_write':
+    case 'project_edit':
       return t('main.aiPanel.toolProjectFile');
     default:
       return msg.toolName ?? '';

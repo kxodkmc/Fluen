@@ -1,6 +1,6 @@
 # 大纲面板优化方案与执行计划
 
-> 状态：待审核
+> 状态：已实施（Phase 0-4 全部落地，2026-08-22）
 > 范围：`src/views/main/composables/outlineParser.ts`、`useOutline.ts`、`functionpanel/panels/OutlinePanel.vue`、`OutlineNodeItem.vue` 及编辑器联动层
 > 关联：Motis AI 多写者收口为后续独立议题，本方案不依赖它（见第九节）
 
@@ -29,7 +29,6 @@ CM6 事务
 放大器：
 
 - **key 不稳定**：`OutlinePanel.vue:145` 与 `OutlineNodeItem.vue:214` 用 `` `${sectionId}-${line}` `` 作 key。标题上方增删一行会使其后所有标题的 `line` 偏移 → key 变化 → Vue 将这些子树**销毁重建**而非 patch，伴随 GC 压力。
-- **watcher 重复注册**：`useOutline.ts:75-81` 的 `watch(mainMd)` 写在 composable 函数体内，每个调用组件各注册一份。
 - **面板常驻**：`Sidebar.vue:40` 用 `v-show`，未激活时上述开销照付。
 
 ### 1.3 根因二：双数据源冲突（"不实时"的真相）
@@ -44,12 +43,13 @@ CM6 事务
 大纲面板的重命名/插入走第二条链（`useProject.ts:110-170`）：IPC 到后端，基于**上次保存的内容**做文本匹配。后果：
 
 1. 编辑器有未保存修改时，后端匹配的是旧文本 → 操作失败或错位；
-2. 即使成功，返回值整体替换 `_currentProject` → `FluenEditor.vue:72-79` 的 `props.md` watch 触发 `setMd()` → **用后端版本覆盖编辑器缓冲，未保存输入被静默丢弃**，undo 历史清空；
-3. 往返延迟期间 `isSaving` 锁 UI，两次解析先后落地造成闪烁。
+2. 即使成功，返回值整体替换 `_currentProject` → `FluenEditor.vue:72-79` 的 `props.md` watch 触发 `setMd()` → **用后端版本覆盖编辑器缓冲，未保存输入被静默丢弃**，undo 历史清空（`setMd` 重建 `EditorState`）;
+3. 往返延迟期间 `isSaving` 锁 UI，两次解析先后落地造成闪烁；
+4. 第二条链自身的放大器：`watch(mainMd)` 注册在 `useOutline()` 函数体内（`useOutline.ts:75-81`），而递归组件 `OutlineNodeItem` 每个节点实例各调用一次 `useOutline()` → N 个标题注册 N+1 份 watcher，`mainMd` 每次变化（打开/保存/结构 IPC）触发 N+1 次全量 `parseOutline`。注意它不放大打字开销（§1.2），只放大本链路。
 
 ### 1.4 冗余 DOM
 
-以 100 个标题为例，面板常驻约：100 个占位 span（`OutlineNodeItem.vue:146`）、200 个 `opacity:0` 的 hover 按钮、400+ 条 SVG `<path>`；chevron 用两条 path 切换方向而非 CSS rotate；SVG 大量内联重复。另发现死代码：`useOutline.ts:32` 的 `jumpTarget` 无任何消费者。
+以 100 个标题为例，面板常驻约：100 个占位 span（`OutlineNodeItem.vue:146`）、200 个 `opacity:0` 的 hover 按钮、约 400 条 SVG `<path>`（每行 chevron 1 + 重命名 2 + 插子标题 1）；chevron 用两条 path 切换方向而非 CSS rotate；SVG 大量内联重复。另发现死代码：`useOutline.ts:32` 的 `jumpTarget` 无任何消费者。
 
 ---
 
@@ -129,7 +129,7 @@ components/functionpanel/panels/
 
 `assignStableIds(prevFlat, nextParsed)` 以内容键 `sectionId|level|text` 匹配新旧列表并复用旧 id；匹配不到的新建 id。约 30 行，O(N)。
 
-- 效果：上方打字/插行不再改变任何节点的 key → 零子树重建；重命名会使该行获得新 id（仅一行 remount，可接受）。
+- 效果：上方打字/插行不再改变任何节点的 key → 零子树重建；重命名会使该行获得新 id（仅一行 remount，可接受；折叠集合按 id 存储，该行的折叠状态随之丢失，已知取舍）。
 - `FlatHeading` 在解析期附带 `depth`（树深度），供缩进使用，不再依赖嵌套 `<ul>`。
 
 ### 5.2 结构操作本地事务化（headingOps.ts）
@@ -147,8 +147,8 @@ components/functionpanel/panels/
 
 - `useFluenEditor` 新增 `onTransaction(cb: (u: Update) => void)` 订阅（现有 `onDocChange(md)` 保留给预览/liveMd，不受影响）。
 - 事务到达时用 `update.changes.iterChangedRanges()` 取变化区间，只对区间内行做正则扫描，splice 进 `flatHeadings`。
-- 围栏状态（``` 开关）可能随编辑翻转：扫描前从文档头快速推进围栏奇偶至编辑起点（无分配的轻循环，MB 级 <5ms）；若编辑前后奇偶一致则完全跳过。
-- 每次 splice 后跑一遍 `assignStableIds`（轻量 O(N) 匹配）。单次按键总成本 ≈ 微秒~亚毫秒级，无需 debounce。
+- 围栏状态（``` 开关）可能随编辑翻转：扫描前从文档头快速推进围栏奇偶至编辑起点（无分配的轻循环，MB 级预估 <5ms，以 Phase 2 验收实测为准）；若编辑前后奇偶一致则完全跳过。
+- 每次 splice 后跑一遍 `assignStableIds`（轻量 O(N) 匹配）。单次按键总成本预估 ≈ 微秒~亚毫秒级（Phase 2 验收实测确认），无需 debounce。
 - 折叠集合继续按稳定 id 存储（现状按 sectionId 的思路正确，改为按新 id）。
 
 ### 5.4 扁平化渲染与折叠算法（OutlineTree.vue）
@@ -222,7 +222,7 @@ const visibleRows = computed(() => {
 
 验收：属性测试「随机编辑序列下，增量结果 === 全量 parse 结果」通过；500KB 文档打字 CPU 占用对比 Phase 0 明显下降。
 
-### Phase 3 — 渲染重构（约 1 天)
+### Phase 3 — 渲染重构（约 1 天）
 
 1. 新增 `OutlineTree.vue` / `OutlineRow.vue` / `icons.ts`，删除 `OutlineNodeItem.vue`；
 2. 扁平行渲染 + 可见行折叠算法 + hover 单份操作按钮 + v-memo；

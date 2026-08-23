@@ -293,6 +293,11 @@ function hasApiKey(provider: ProviderConfig): boolean {
             <label class="form-label">{{ t('settings.llmConfig.apiAddress') }}</label>
             <div class="readonly-field">{{ selectedPreset.openaiBaseUrl }}</div>
           </div>
+          <!-- 模型自填（预设无内置模型，如 OpenRouter 聚合网关） -->
+          <div v-if="selectedPreset.models.length === 0" class="form-group">
+            <label class="form-label">{{ t('settings.llmConfig.modelId') }}</label>
+            <input v-model="presetModelId" class="form-input" type="text" :placeholder="t('settings.llmConfig.placeholders.modelId')" />
+          </div>
           <div v-if="selectedPreset.models.length > 0" class="form-group">
             <label class="form-label">{{ t('settings.llmConfig.model') }}</label>
             <div class="model-select">

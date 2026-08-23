@@ -44,10 +44,12 @@ export default {
         modelId: 'ID del modelo',
         modelDisplayName: 'Nombre para mostrar del modelo',
         providerPresets: {
+          openai: 'OpenAI',
           deepseek: 'DeepSeek',
           xiaomi: 'Xiaomi MiMo',
           moonshot: 'Moonshot Kimi',
           agnes: 'Agnes',
+          openrouter: 'OpenRouter',
           openaiCompatible: 'Compatible con OpenAI',
         },
         modelTags: {
@@ -60,7 +62,7 @@ export default {
           providerName: 'p. ej., OpenAI',
           baseUrl: 'https://api.openai.com/v1',
           apiKey: 'sk-...',
-          modelId: 'p. ej., gpt-4o',
+          modelId: 'p. ej., gpt-4o, openai/gpt-4o',
           modelDisplayName: 'p. ej., GPT-4o',
         },
       },
@@ -387,8 +389,14 @@ export default {
         reject: 'Rechazar',
         actionWrite: 'Escribir',
         actionEdit: 'Reemplazar',
-        actionAppend: 'Añadir',
         actionUpdate: 'Actualizar manuscrito',
+      },
+      agentRun: {
+        statusRunning: 'Ejecutando',
+        statusDone: 'Completado',
+        statusFailed: 'Fallido',
+        durationSec: '{s}s',
+        tokens: '{n} tokens',
       },
     },
     content: {

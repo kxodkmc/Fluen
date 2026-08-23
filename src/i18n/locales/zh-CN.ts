@@ -44,10 +44,12 @@ export default {
         modelId: '模型 ID',
         modelDisplayName: '模型显示名称',
         providerPresets: {
+          openai: 'OpenAI',
           deepseek: 'DeepSeek',
           xiaomi: 'Xiaomi MiMo',
           moonshot: 'Moonshot Kimi',
           agnes: 'Agnes',
+          openrouter: 'OpenRouter',
           openaiCompatible: 'OpenAI 兼容',
         },
         modelTags: {
@@ -60,7 +62,7 @@ export default {
           providerName: '例如：OpenAI',
           baseUrl: 'https://api.openai.com/v1',
           apiKey: 'sk-...',
-          modelId: '例如：gpt-4o',
+          modelId: '例如：gpt-4o、openai/gpt-4o',
           modelDisplayName: '例如：GPT-4o',
         },
       },
@@ -387,8 +389,14 @@ export default {
         reject: '拒绝',
         actionWrite: '写入',
         actionEdit: '替换',
-        actionAppend: '追加',
         actionUpdate: '更新正文',
+      },
+      agentRun: {
+        statusRunning: '正在执行',
+        statusDone: '已完成',
+        statusFailed: '失败',
+        durationSec: '{s} 秒',
+        tokens: '{n} tokens',
       },
     },
     content: {

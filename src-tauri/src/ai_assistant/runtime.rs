@@ -7,21 +7,26 @@
 //!    由 [`super::prompt::build_system_prompt`] 组装后经
 //!    `ChatOptions::system_prompt` 传入
 //! 3. **工具集**：只装配与论文写作相关的工具——
-//!    - **不装配** referee 内置工具（其只读工具接受任意绝对路径、
-//!      无项目根约束；项目内读取由 `project_file` 的 read 提供
-//!      并受路径安全校验保护）
-//!    - `paper_content`：读取论文全文 / 大纲 / 章节（只读）
+//!    - **不直接装配** referee 内置文件工具（其接受任意绝对路径、
+//!      无项目相对路径门面；改为组合 referee 原语并经路径安全层暴露）
+//!    - `paper_outline` / `paper_section`：读取论文大纲 / 指定章节
+//!      （只读，文件读取经 referee `read`）
 //!    - `literature_search`：检索文献知识库（只读，混合检索 top4，
 //!      知识库存在时装配）
-//!    - `manuscript`：写入论文正文（格式校验 + 章节同步，需审批）
-//!    - `project_file`：读写项目内文件（路径限制在项目根内，写操作需审批）
-//! 4. **审批机制**：写工具经 [`ApprovalGuard`] 包装，调用前弹窗征求用户确认
+//!    - `manuscript`：写入论文正文（格式校验 + 章节同步，需审批；
+//!      正文唯一写入通道）
+//!    - `project_read`：读取项目内通用文件（只读，字符窗口续读）
+//!    - `project_write` / `project_edit`：写入/编辑项目内非正文文件
+//!      （referee 原子写与唯一匹配编辑，需审批；正文 main.md 写保护）
+//! 4. **审批机制**：写工具经 `ApprovalGuard`（agent_runtime::approval）包装，
+//!    调用前弹窗征求用户确认——包装发生在共享装配层
+//!    [`agent_tools::assemble`](crate::agent_tools::assemble)
 
 use std::sync::Arc;
 
 use referee_ai::tool::ToolRegistry;
 
-use crate::agent_runtime::approval::{approval_executor, ApprovalGuard, Approver};
+use crate::agent_runtime::approval::{approval_executor, Approver};
 use crate::agent_runtime::{FluenRuntime, FluenRuntimeBuilder};
 use crate::llm_chat;
 use crate::llm_config::model::LlmConfig;
@@ -36,7 +41,7 @@ use super::error::AiAssistantError;
 /// - `project_path`: 当前打开的论文项目路径（可选）。存在时装配论文写作
 ///   工具；未打开项目时仅提供纯对话能力（可输出草稿，不落盘）
 /// - `approver`: 工具审批器（写操作弹窗确认，包装 `manuscript` /
-///   `project_file`）
+///   `project_write` / `project_edit`）
 ///
 /// # 返回
 ///
@@ -62,8 +67,11 @@ pub fn build_runtime(
     let mut builder = FluenRuntimeBuilder::new(llm_provider);
     if let Some(project_path) = project_path {
         let registry = build_tool_registry(project_path, llm, approver)?;
-        // 审批等待最长 5 分钟，执行器超时取 6 分钟（见 approval_executor）
-        builder = builder.with_tools(registry, approval_executor());
+        // 审批等待最长 5 分钟，执行器超时须大于该上限（见 approval_executor）
+        builder = builder.with_tools(
+            registry,
+            approval_executor(crate::agent_runtime::approval::APPROVAL_EXECUTOR_TIMEOUT),
+        );
     }
 
     Ok((thinking_enabled, builder.build()))
@@ -76,78 +84,27 @@ fn build_tool_registry(
     approver: Arc<dyn Approver>,
 ) -> Result<ToolRegistry, AiAssistantError> {
     let registry = ToolRegistry::with_defaults();
+    let reg_err = |e: referee_ai::tool::RegistryError| {
+        AiAssistantError::Config(format!("工具注册失败: {e}"))
+    };
 
-    // 只读：论文内容读取（全文 / 大纲 / 章节）
-    registry
-        .register(Arc::new(crate::agent_tools::paper::PaperContentTool::new(
-            project_path.to_string(),
-        )))
-        .map_err(|e| AiAssistantError::Config(format!("工具注册失败: {e}")))?;
+    // 只读：论文大纲与章节读取
+    crate::agent_tools::assemble::register_paper_readers(&registry, project_path)
+        .map_err(reg_err)?;
 
-    // 只读：文献知识库搜索（知识库存在时装配；注入 embedding 以启用语义
-    // 检索，未配置 embedding 时由 fluen-knowledge 自动降级为关键词检索）
-    register_literature_search(&registry, project_path, llm)?;
+    // 只读：文献知识库搜索（知识库存在时装配；缺失/打开失败时降级跳过）
+    crate::agent_tools::assemble::register_literature_search(&registry, project_path, llm)
+        .map_err(reg_err)?;
 
     // 写操作：论文正文写入（格式校验 + 章节同步，ApprovalGuard 包装）
-    registry
-        .register(Arc::new(ApprovalGuard::new(
-            Arc::new(crate::agent_tools::manuscript::ManuscriptEditTool::new(
-                project_path.to_string(),
-            )),
-            approver.clone(),
-        )))
-        .map_err(|e| AiAssistantError::Config(format!("工具注册失败: {e}")))?;
+    crate::agent_tools::assemble::register_manuscript(&registry, project_path, approver.clone())
+        .map_err(reg_err)?;
 
-    // 读写：项目内文件（路径限制在项目根内，写操作经审批）
-    registry
-        .register(Arc::new(ApprovalGuard::new(
-            Arc::new(crate::agent_tools::file::ProjectFileTool::new(
-                project_path.to_string(),
-            )),
-            approver,
-        )))
-        .map_err(|e| AiAssistantError::Config(format!("工具注册失败: {e}")))?;
+    // 读写：项目内文件三件套（写/编辑需审批；正文 main.md 写保护）
+    crate::agent_tools::assemble::register_project_files(&registry, project_path, approver)
+        .map_err(reg_err)?;
 
     Ok(registry)
-}
-
-/// 知识库存在时注册 `literature_search` 工具。
-///
-/// 打开失败（索引损坏等）仅告警降级，不阻断助手启动。
-fn register_literature_search(
-    registry: &ToolRegistry,
-    project_path: &str,
-    llm: &LlmConfig,
-) -> Result<(), AiAssistantError> {
-    let references_dir = std::path::PathBuf::from(project_path).join("references");
-    if !references_dir.join("wiki").join("index.db").is_file() {
-        return Ok(());
-    }
-
-    let kb = match fluen_knowledge::async_kb::AsyncKnowledgeBase::open(&references_dir) {
-        Ok(kb) => kb,
-        Err(e) => {
-            tracing::warn!(
-                references_dir = %references_dir.display(),
-                "文献知识库打开失败，跳过 literature_search 工具: {e}"
-            );
-            return Ok(());
-        }
-    };
-
-    // 注入 embedding router 启用语义检索（未配置时降级关键词检索）
-    let kb = match crate::builtin_providers::embedding::build_embedding_router(llm) {
-        Some(router) => kb.with_embedding_provider(Arc::new(router)),
-        None => kb,
-    };
-
-    registry
-        .register(Arc::new(crate::agent_tools::literature::LiteratureSearchTool::new(
-            kb,
-        )))
-        .map_err(|e| AiAssistantError::Config(format!("工具注册失败: {e}")))?;
-
-    Ok(())
 }
 
 /// 将 [`LlmChatError`](crate::llm_chat::LlmChatError) 映射为 [`AiAssistantError`]。

@@ -13,6 +13,7 @@
  *   ├── MotisChatHeader
  *   ├── MotisChatMessageList
  *   │   ├── MotisActivityGroup（连续思考/工具调用的可折叠时间线）
+ *   │   │   └── MotisAgentRun（delegate_agent 的子智能体运行面板）
  *   │   └── MotisThinkingIndicator（尾部思考指示器）
  *   └── MotisChatInput
  */
@@ -22,5 +23,6 @@ export { default as MotisChatHeader } from './MotisChatHeader.vue';
 export { default as MotisChatMessageList } from './MotisChatMessageList.vue';
 export { default as MotisChatInput } from './MotisChatInput.vue';
 export { default as MotisActivityGroup } from './MotisActivityGroup.vue';
+export { default as MotisAgentRun } from './MotisAgentRun.vue';
 export { default as MotisThinkingIndicator } from './MotisThinkingIndicator.vue';
 export { MOTIS_CHAT_KEY } from './symbols';

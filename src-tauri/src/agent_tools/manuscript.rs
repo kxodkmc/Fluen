@@ -1,9 +1,9 @@
 //! 论文正文写入工具——供智能体以**格式规范**的方式撰写论文内容。
 //!
-//! 与通用文件工具 `project_file` 不同，本工具感知 Fluen 章节结构：
-//! 写入 `manuscript/main.md` 前经过 fluen-markup 校验（存在 `Severity::Error`
-//! 硬错误时拒绝保存），保存后自动拆分同步各 `sec-{id}.md` 备份与
-//! `sections.json`（章节 ID 按标记 / H1 标题稳定匹配）。
+//! 与通用文件工具（`project_write` / `project_edit`，已对其封锁正文路径）不同，
+//! 本工具感知 Fluen 章节结构：写入 `manuscript/main.md` 前经过 fluen-markup
+//! 校验（存在 `Severity::Error` 硬错误时拒绝保存），保存后自动拆分同步各
+//! `sec-{id}.md` 备份与 `sections.json`（章节 ID 按标记 / H1 标题稳定匹配）。
 //!
 //! 这是学术助手撰写正文的标准落盘通道；写操作由装配层的
 //! [`ApprovalGuard`](crate::agent_runtime::approval::ApprovalGuard) 包装，

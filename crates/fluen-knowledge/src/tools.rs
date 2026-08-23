@@ -129,6 +129,11 @@ impl ToolBase {
     }
 }
 
+/// 保留三位小数的数值评分（score 输出统一为数值而非格式化字符串）。
+fn rounded_score(score: f64) -> f64 {
+    (score * 1000.0).round() / 1000.0
+}
+
 // ════════════════════════════════════════════════════════════════
 // 工具一：query
 // ════════════════════════════════════════════════════════════════
@@ -139,7 +144,7 @@ struct QueryTool {
 
 impl QueryTool {
     fn new(kb: AsyncKnowledgeBase, name: String, config: KnowledgeConfig) -> Self {
-        let description = "Query the knowledge base. Supports keyword (FTS5), semantic (embedding), and hybrid retrieval."
+        let description = "检索知识库：支持关键词（FTS5）、语义向量与混合三种检索方式，返回最相关的知识条目列表。"
             .to_string();
         let parameters = json!({
             "type": "object",
@@ -200,7 +205,7 @@ impl Tool for QueryTool {
                 "id": m.wiki_id,
                 "type": m.wiki_type,
                 "title": m.title,
-                "score": format!("{:.3}", m.score),
+                "score": rounded_score(m.score),
                 "content": m.content,
             })).collect::<Vec<_>>()
         });
@@ -218,7 +223,7 @@ struct QueryBatchTool {
 
 impl QueryBatchTool {
     fn new(kb: AsyncKnowledgeBase, name: String, config: KnowledgeConfig) -> Self {
-        let description = "Batch query the knowledge base with multiple queries.".to_string();
+        let description = "批量检索知识库：以多个查询文本一次调用，逐个返回各自的最相关条目。".to_string();
         let parameters = json!({
             "type": "object",
             "properties": {
@@ -271,7 +276,7 @@ impl Tool for QueryBatchTool {
                     "id": m.wiki_id,
                     "type": m.wiki_type,
                     "title": m.title,
-                    "score": format!("{:.3}", m.score),
+                    "score": rounded_score(m.score),
                 })).collect::<Vec<_>>()
             })).collect::<Vec<_>>()
         });
@@ -364,7 +369,7 @@ struct EditEntryTool {
 
 impl EditEntryTool {
     fn new(kb: AsyncKnowledgeBase, name: String, config: KnowledgeConfig) -> Self {
-        let description = "Edit an existing knowledge base entry.".to_string();
+        let description = "编辑已有知识库条目：对正文执行精确替换或锚点插入，并可追加关联与标签。".to_string();
         let parameters = json!({
             "type": "object",
             "properties": {
@@ -414,6 +419,10 @@ impl Tool for EditEntryTool {
     }
 
     async fn execute(&self, _ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        // schema 表达不了「按 type 条件必填」，这里前置校验给出明确报错，
+        // 避免参数错误流入执行层产生难定位的失败。
+        validate_edits(&args)?;
+
         let params: EditEntryParams = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
@@ -437,6 +446,37 @@ impl Tool for EditEntryTool {
     }
 }
 
+/// 校验 `edits[]` 的条件必填约束：
+///
+/// - `search_replace` 必须提供字符串字段 `search` 与 `replace`；
+/// - `insert_after` 必须提供字符串字段 `anchor` 与 `content`；
+/// - `type` 只允许上述两种取值。
+fn validate_edits(args: &Value) -> Result<(), ToolError> {
+    let Some(edits) = args.get("edits").and_then(|v| v.as_array()) else {
+        return Ok(());
+    };
+    for (i, edit) in edits.iter().enumerate() {
+        let ty = edit.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let required = match ty {
+            "search_replace" => ["search", "replace"].as_slice(),
+            "insert_after" => ["anchor", "content"].as_slice(),
+            other => {
+                return Err(ToolError::InvalidArguments(format!(
+                    "edits[{i}].type 取值非法: {other:?}（可选 search_replace / insert_after）"
+                )));
+            }
+        };
+        for field in required {
+            if edit.get(field).and_then(|v| v.as_str()).is_none() {
+                return Err(ToolError::InvalidArguments(format!(
+                    "edits[{i}] 类型为 {ty} 时必须提供字符串字段 '{field}'"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 // ════════════════════════════════════════════════════════════════
 // 工具五：meta
 // ════════════════════════════════════════════════════════════════
@@ -447,8 +487,7 @@ struct MetaTool {
 
 impl MetaTool {
     fn new(kb: AsyncKnowledgeBase, name: String, config: KnowledgeConfig) -> Self {
-        let description = "Query knowledge base metadata (overview, tags, or recent entries)."
-            .to_string();
+        let description = "查询知识库元信息：overview=总览统计，tags=全部标签，recent=最近条目。".to_string();
         let parameters = json!({
             "type": "object",
             "properties": {
@@ -499,15 +538,21 @@ impl Tool for MetaTool {
             .await
             .map_err(|e| ToolError::Execution(e.to_string()))?;
 
-        let output = json!({
-            "success": result.success,
-            "data": {
+        // 按 query_type 只返回对应字段，避免全量冗余
+        let data = match query_type {
+            MetaQueryType::Tags => json!({ "tags": result.data.tags }),
+            MetaQueryType::Recent => json!({ "recent_entries": result.data.recent_entries }),
+            MetaQueryType::Overview => json!({
                 "total_entries": result.data.total_entries,
                 "total_tags": result.data.total_tags,
                 "embedding_enabled": result.data.embedding_enabled,
-                "tags": result.data.tags,
-                "recent_entries": result.data.recent_entries,
-            }
+            }),
+        };
+
+        let output = json!({
+            "success": result.success,
+            "query_type": query_type_str,
+            "data": data
         });
         Ok(ToolOutput::from_json(&output))
     }
@@ -523,7 +568,7 @@ struct GetEntryTool {
 
 impl GetEntryTool {
     fn new(kb: AsyncKnowledgeBase, name: String, config: KnowledgeConfig) -> Self {
-        let description = "Get full entry details by wiki id.".to_string();
+        let description = "按 wikiID 获取条目完整详情（含正文、标签与关联的标题）。".to_string();
         let parameters = json!({
             "type": "object",
             "properties": {
@@ -572,6 +617,7 @@ impl Tool for GetEntryTool {
                     entry.content = self.base.config.truncate_content(&entry.content);
                 }
                 let output = json!({
+                    "found": true,
                     "entry": entry,
                     "tag_titles": detail.tag_titles,
                     "relation_titles": detail.relation_titles,
@@ -596,10 +642,12 @@ struct ListEntriesTool {
 
 impl ListEntriesTool {
     fn new(kb: AsyncKnowledgeBase, name: String, config: KnowledgeConfig) -> Self {
-        let description = "List all knowledge base entries (without content).".to_string();
+        let description = "列出知识库条目（仅元信息，不含正文），支持 limit 限制返回数量。用于在 Planning 阶段查询已有条目以避免重复创建。".to_string();
         let parameters = json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "limit": {"type": "integer", "default": 50, "description": "返回条目数上限（防止大知识库刷爆上下文）；超出时 truncated=true，可用更大的 limit 分页查看"}
+            },
             "description": "列出知识库中所有条目（仅元信息，不含正文）。用于在 Planning 阶段查询已有条目以避免重复创建。"
         });
         Self {
@@ -622,7 +670,15 @@ impl Tool for ListEntriesTool {
         self.base.parameters.clone()
     }
 
-    async fn execute(&self, _ctx: ToolContext, _args: Value) -> Result<ToolOutput, ToolError> {
+    async fn execute(&self, _ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        // limit 缺省 50；非法值（非正整数）按缺省处理
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .filter(|&v| v > 0)
+            .map(|v| v as usize)
+            .unwrap_or(50);
+
         let entries = self
             .base
             .kb
@@ -630,8 +686,15 @@ impl Tool for ListEntriesTool {
             .await
             .map_err(|e| ToolError::Execution(e.to_string()))?;
 
+        let total = entries.len();
+        let truncated = total > limit;
+        let entries = &entries[..limit.min(total)];
+
         let output = json!({
+            "success": true,
             "count": entries.len(),
+            "total": total,
+            "truncated": truncated,
             "entries": entries.iter().map(|e| json!({
                 "id": e.id,
                 "type": e.wiki_type,
@@ -654,7 +717,7 @@ struct DeleteEntryTool {
 
 impl DeleteEntryTool {
     fn new(kb: AsyncKnowledgeBase, name: String, config: KnowledgeConfig) -> Self {
-        let description = "Delete a knowledge base entry by wiki id.".to_string();
+        let description = "按 wikiID 删除知识库条目（含其文件与索引记录）。".to_string();
         let parameters = json!({
             "type": "object",
             "properties": {
@@ -689,13 +752,25 @@ impl Tool for DeleteEntryTool {
             .ok_or_else(|| ToolError::InvalidArguments("missing 'wiki_id'".into()))?
             .to_string();
 
+        // 与 get_entry 的未找到语义统一：条目不存在时返回 found:false 而非报错
+        if self
+            .base
+            .kb
+            .get_entry(wiki_id.clone())
+            .await
+            .map_err(|e| ToolError::Execution(e.to_string()))?
+            .is_none()
+        {
+            return Ok(ToolOutput::from_json(&json!({ "found": false })));
+        }
+
         self.base
             .kb
-            .delete_entry(wiki_id)
+            .delete_entry(wiki_id.clone())
             .await
             .map_err(|e| ToolError::Execution(e.to_string()))?;
 
-        let output = json!({"success": true});
+        let output = json!({"success": true, "wiki_id": wiki_id});
         Ok(ToolOutput::from_json(&output))
     }
 }
@@ -802,5 +877,159 @@ mod tests {
             .unwrap();
         assert!(query_result.content.contains("success"));
         assert!(query_result.content.contains("true"));
+    }
+
+    // ── 输出规范测试 ──────────────────────────────────────────
+
+    fn ctx() -> ToolContext {
+        ToolContext {
+            tool_call_id: "test".into(),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
+        }
+    }
+
+    /// 解析工具输出为 JSON。
+    fn output_json(output: ToolOutput) -> Value {
+        serde_json::from_str(&output.content).unwrap()
+    }
+
+    async fn make_provider_with_entries(count: usize) -> KnowledgeToolProvider {
+        let dir = tempfile::TempDir::new().unwrap();
+        let kb = AsyncKnowledgeBase::init(dir.path()).unwrap();
+        for i in 0..count {
+            kb.create_entry(CreateEntryParams {
+                wiki_type: crate::types::WikiType::Concept,
+                title: format!("条目{i}"),
+                content: format!("测试条目内容 {i}，包含关键词 alpha。"),
+                source: None,
+                authors: vec![],
+                tags: vec![],
+                relations: vec![],
+            })
+            .await
+            .unwrap();
+        }
+        KnowledgeToolProvider::with_defaults(kb)
+    }
+
+    #[tokio::test]
+    async fn query_score_is_number_not_string() {
+        let provider = make_provider_with_entries(1).await;
+        let tool = provider.list_tools().into_iter()
+            .find(|t| t.name() == "knowledge_query")
+            .unwrap();
+
+        let out = output_json(
+            tool.execute(ctx(), json!({ "query": "alpha", "method": "keyword" }))
+                .await
+                .unwrap(),
+        );
+        let first = &out["results"][0];
+        assert!(first["score"].is_number(), "score 应为数值: {}", first["score"]);
+    }
+
+    #[tokio::test]
+    async fn list_entries_limit_and_truncated() {
+        let provider = make_provider_with_entries(3).await;
+        let tool = provider.list_tools().into_iter()
+            .find(|t| t.name() == "knowledge_list_entries")
+            .unwrap();
+
+        // limit=2：返回 2 条，total=3，truncated=true
+        let out = output_json(tool.execute(ctx(), json!({ "limit": 2 })).await.unwrap());
+        assert_eq!(out["success"], true);
+        assert_eq!(out["count"], 2);
+        assert_eq!(out["total"], 3);
+        assert_eq!(out["truncated"], true);
+
+        // 缺省：全部返回，truncated=false
+        let out = output_json(tool.execute(ctx(), json!({})).await.unwrap());
+        assert_eq!(out["count"], 3);
+        assert_eq!(out["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn meta_returns_only_fields_for_query_type() {
+        let provider = make_provider_with_entries(0).await;
+        let tool = provider.list_tools().into_iter()
+            .find(|t| t.name() == "knowledge_meta")
+            .unwrap();
+
+        // overview：只含统计字段
+        let out = output_json(tool.execute(ctx(), json!({ "query_type": "overview" })).await.unwrap());
+        assert_eq!(out["query_type"], "overview");
+        assert!(out["data"]["total_entries"].is_u64());
+        assert!(out["data"].get("tags").is_none(), "overview 不应返回 tags");
+        assert!(out["data"].get("recent_entries").is_none());
+
+        // tags：只含标签列表
+        let out = output_json(tool.execute(ctx(), json!({ "query_type": "tags" })).await.unwrap());
+        assert!(out["data"].get("tags").is_some());
+        assert!(out["data"].get("total_entries").is_none());
+    }
+
+    #[tokio::test]
+    async fn edit_entry_validates_conditional_required_fields() {
+        let provider = make_provider_with_entries(1).await;
+        let tool = provider.list_tools().into_iter()
+            .find(|t| t.name() == "knowledge_edit_entry")
+            .unwrap();
+
+        // search_replace 缺 replace → 前置校验报错
+        let err = tool
+            .execute(ctx(), json!({
+                "wiki_id": "wiki-0000000000000000",
+                "edits": [{ "type": "search_replace", "search": "alpha" }]
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)), "{err:?}");
+        assert!(err.to_string().contains("'replace'"));
+
+        // 非法 type → 前置校验报错
+        let err = tool
+            .execute(ctx(), json!({
+                "wiki_id": "wiki-0000000000000000",
+                "edits": [{ "type": "bogus" }]
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_entry_unifies_not_found_semantics() {
+        let provider = make_provider_with_entries(1).await;
+        let tool = provider.list_tools().into_iter()
+            .find(|t| t.name() == "knowledge_delete_entry")
+            .unwrap();
+
+        // 不存在：found:false（与 get_entry 一致），不报错
+        let out = output_json(
+            tool.execute(ctx(), json!({ "wiki_id": "wiki-doesnotexist0000" }))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(out["found"], false);
+
+        // 存在：删除成功并回显 wiki_id
+        let wiki_id = {
+            // 通过 list 拿一个真实 wiki_id
+            let list_tool = provider.list_tools().into_iter()
+                .find(|t| t.name() == "knowledge_list_entries")
+                .unwrap();
+            let out = output_json(list_tool.execute(ctx(), json!({})).await.unwrap());
+            out["entries"][0]["id"].as_str().unwrap().to_string()
+        };
+        let out = output_json(
+            tool.execute(ctx(), json!({ "wiki_id": wiki_id })).await.unwrap(),
+        );
+        assert_eq!(out["success"], true);
+        assert_eq!(out["wiki_id"], wiki_id);
     }
 }

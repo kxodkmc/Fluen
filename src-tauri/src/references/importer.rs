@@ -204,6 +204,7 @@ impl ReferenceImporter {
             source: None,
             ai_summary: None,
             authors: None,
+            year: None,
             import_mode: mode,
             status: ReferenceStatus::Pending,
             error: None,
@@ -271,6 +272,7 @@ impl ReferenceImporter {
         let title = extract_title(&unwrapped, &entry.original_filename);
         let (frontmatter, body) = ReferenceFrontmatter::split_from_markdown(&unwrapped);
         let authors = frontmatter.authors_for_index();
+        let year = frontmatter.year.clone();
 
         // 归一化落盘：AI 可能用 ```yaml / ```markdown 代码块包裹，这里以标准 `---` 形式重写，
         // 既保证 frontmatter 可被再次解析，也不让包裹代码块以源码形式展示在正文里。
@@ -282,6 +284,7 @@ impl ReferenceImporter {
         let final_entry = ReferenceEntry {
             title,
             authors,
+            year,
             status: ReferenceStatus::Completed,
             error: None,
             ..entry

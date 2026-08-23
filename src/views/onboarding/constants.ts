@@ -6,7 +6,7 @@
  */
 
 import type { ProviderPreset, ThemeOption } from './types';
-import { DEEPSEEK_ICON, XIAOMIMIMO_ICON, KIMI_ICON, AGNES_ICON } from './providerIcons';
+import { DEEPSEEK_ICON, XIAOMIMIMO_ICON, KIMI_ICON, AGNES_ICON, OPENROUTER_ICON, OPENAI_ICON } from './providerIcons';
 
 /* ── 主题模式选项 ────────────────────────────────────────────────────── */
 export const THEME_OPTIONS: ThemeOption[] = [
@@ -18,9 +18,10 @@ export const THEME_OPTIONS: ThemeOption[] = [
 
 /**
  * 预设内容与后端 referee 模块（`referee-ai/src/provider/*`）保持一致：
- * 仅收录 referee 原生适配的提供商（deepseek / xiaomi / moonshot / agnes），
+ * 仅收录 referee 原生适配的提供商（openai / deepseek / xiaomi / moonshot / agnes / openrouter），
  * 其余 OpenAI 兼容服务通过「OpenAI 兼容」自定义入口添加。
  * 模型规格（上下文窗口 / 最大输出 / 多模态能力）以 referee 各适配器为准。
+ * OpenAI / OpenRouter 为聚合或通用兼容网关，模型由用户自行填写（`models` 为空）。
  */
 
 /** DeepSeek 预设模型：上下文 1M，最大输出 384K，均支持思考，纯文本。 */
@@ -131,6 +132,22 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     openaiBaseUrl: 'https://apihub.agnes-ai.com/v1',
     defaultStyle: 'OpenAI',
     models: AGNES_MODELS,
+  },
+  {
+    id: 'openai',
+    icon: OPENAI_ICON,
+    isPreset: true,
+    openaiBaseUrl: 'https://api.openai.com/v1',
+    defaultStyle: 'OpenAI',
+    models: [], // 模型由用户自行填写
+  },
+  {
+    id: 'openrouter',
+    icon: OPENROUTER_ICON,
+    isPreset: true,
+    openaiBaseUrl: 'https://openrouter.ai/api/v1',
+    defaultStyle: 'OpenAI',
+    models: [], // 聚合网关，模型由用户自行填写
   },
   {
     id: 'openai-compatible',

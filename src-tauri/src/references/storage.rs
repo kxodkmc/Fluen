@@ -227,6 +227,7 @@ mod tests {
             source: None,
             ai_summary: None,
             authors: None,
+            year: None,
             import_mode: crate::references::import_mode::ReferenceImportMode::Ocr,
             status: ReferenceStatus::Pending,
             error: None,

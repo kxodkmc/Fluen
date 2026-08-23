@@ -15,6 +15,7 @@
 //! | [`engine`] | 编辑引擎 [`EditorEngine`]（待实现） |
 //! | [`history`] | 双栈历史记录（待实现） |
 //! | [`render`] | `fluen-markup` 渲染封装（待实现） |
+//! | [`reflib`] | 渲染用文献库桥接（索引 → fluen-markup 条目） |
 //! | [`commands`] | Tauri commands 薄封装（待实现） |
 //!
 //! [`EditorConfig`]: config::EditorConfig
@@ -26,4 +27,5 @@ pub mod edit;
 pub mod engine;
 pub mod error;
 pub mod history;
+pub mod reflib;
 pub mod render;

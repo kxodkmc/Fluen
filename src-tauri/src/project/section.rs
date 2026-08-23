@@ -361,12 +361,11 @@ fn read_sections_index(project_dir: &Path) -> Result<Vec<SectionMeta>, ProjectEr
         .map_err(|e| ProjectError::SectionsIndexError(format!("sections.json 解析失败: {}", e)))
 }
 
-/// 写入 `sections.json`。
+/// 写入 `sections.json`（同步原子写，防半写损坏索引）。
 fn write_sections_index(project_dir: &Path, sections: &[SectionMeta]) -> Result<(), ProjectError> {
     let path = sections_dir(project_dir).join("sections.json");
     let json = serde_json::to_string_pretty(sections)?;
-    std::fs::write(path, json)?;
-    Ok(())
+    super::atomic::atomic_write(&path, json.as_bytes())
 }
 
 /// 读取章节文件，分离 front matter 与正文。
@@ -394,7 +393,7 @@ fn read_section_file_parts(
     Ok((front_matter, body.trim().to_string()))
 }
 
-/// 写入单个章节备份文件（front matter + 正文）。
+/// 写入单个章节备份文件（front matter + 正文；同步原子写）。
 fn write_sec_file(
     project_dir: &Path,
     section_id: &str,
@@ -403,8 +402,7 @@ fn write_sec_file(
 ) -> Result<(), ProjectError> {
     let content = frontmatter::join(front_matter, body)?;
     let path = sections_dir(project_dir).join(format!("{}.md", section_id));
-    std::fs::write(path, content)?;
-    Ok(())
+    super::atomic::atomic_write(&path, content.as_bytes())
 }
 
 /// fluen-markup 校验：解析 + lint，存在 `Severity::Error` 硬错误时拒绝保存。

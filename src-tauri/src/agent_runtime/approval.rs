@@ -64,15 +64,22 @@ impl ApprovalGuard {
     }
 }
 
+/// 含审批工具的默认执行器超时（审批等待 300s + 执行余量）。
+///
+/// 适用于无委派场景（学术助手、子智能体等）；Motis 总督因需容纳
+/// 委派 RPC（600s）取更大值，见 `motis_chat::timeouts`。
+pub const APPROVAL_EXECUTOR_TIMEOUT: Duration = Duration::from_secs(360);
+
 /// 构造适用于含审批工具的执行器。
 ///
-/// 审批等待通常最长 5 分钟（业务侧 [`Approver`] 实现约定），
-/// 执行器超时需大于该上限（默认 30 秒会率先超时），此处取 6 分钟。
-pub fn approval_executor() -> referee_ai::tool::ToolExecutor {
+/// `tool_timeout` 须大于审批等待上限（业务侧 [`Approver`] 实现约定
+/// 最长 5 分钟）；无特殊要求时用 [`APPROVAL_EXECUTOR_TIMEOUT`]，
+/// 调用方按场景取值（如 Motis 总督须大于委派 RPC 超时）。
+pub fn approval_executor(tool_timeout: Duration) -> referee_ai::tool::ToolExecutor {
     use referee_ai::tool::{ExecutorConfig, ToolExecutor};
 
     let config = ExecutorConfig {
-        tool_timeout: Duration::from_secs(360),
+        tool_timeout,
         ..ExecutorConfig::default()
     };
     ToolExecutor::new(config)

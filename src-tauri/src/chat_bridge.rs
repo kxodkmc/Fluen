@@ -213,11 +213,13 @@ pub async fn consume_stream(handle: ChatHandle, window: &Window, events: &ChatEv
                 tool_calls,
                 ..
             }) => {
-                if let Some(text) = content {
+                // 空 delta（如工具调用轮次的角色帧 content:""）不 emit，
+                // 避免前端创建空文本消息、隔断活动时间线分组
+                if let Some(text) = content.filter(|t| !t.is_empty()) {
                     full_text.push_str(&text);
                     let _ = window.emit(events.text, payload::Text { delta: &text });
                 }
-                if let Some(thought) = reasoning_content {
+                if let Some(thought) = reasoning_content.filter(|t| !t.is_empty()) {
                     let _ = window.emit(events.thought, payload::Thought { delta: &thought });
                 }
                 if !tool_calls.is_empty() {
@@ -308,8 +310,14 @@ impl ToolCallAccumulator {
     }
 
     /// emit 参数已完整的工具调用（JSON 解析成功即视为完整）。
+    ///
+    /// 按模型声明的 `index` 升序 emit——并行调用时保证时间线顺序稳定
+    /// （HashMap 迭代无序）。
     fn flush_ready(&mut self, window: &Window, events: &ChatEvents) {
-        for call in self.calls.values_mut() {
+        let mut indexes: Vec<u32> = self.calls.keys().copied().collect();
+        indexes.sort_unstable();
+        for idx in indexes {
+            let Some(call) = self.calls.get_mut(&idx) else { continue };
             if call.sent || call.arguments.is_empty() {
                 continue;
             }
@@ -335,7 +343,10 @@ impl ToolCallAccumulator {
 
     /// 流结束时冲刷全部未发送的工具调用（兜底，参数不完整时按原始字符串发）。
     fn flush_all(&mut self, window: &Window, events: &ChatEvents) {
-        for call in self.calls.values_mut() {
+        let mut indexes: Vec<u32> = self.calls.keys().copied().collect();
+        indexes.sort_unstable();
+        for idx in indexes {
+            let Some(call) = self.calls.get_mut(&idx) else { continue };
             if call.sent {
                 continue;
             }

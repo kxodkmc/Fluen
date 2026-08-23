@@ -20,22 +20,29 @@
 //! |--------|------|
 //! | [`error`] | 统一错误类型 [`MotisChatError`] |
 //! | [`events`] | Tauri 事件名常量与 payload 序列化结构 |
+//! | [`timeouts`] | 超时分层单一事实来源（引擎 / HTTP / RPC / 执行器） |
 //! | [`prompt`] | Motis 系统提示词（总督角色文案，纯函数组装） |
 //! | [`approval`] | 工具审批器 [`MotisApprover`]（实现 `Approver` trait） |
-//! | [`runtime`] | referee 运行时构建（provider 解析 + 工具装配 + 子智能体委派） |
+//! | [`runtime`] | referee 运行时构建（provider 解析 + 工具装配 + 内核注入） |
 //! | [`commands`] | Tauri commands（`motis_chat_send` / `motis_chat_cancel`） |
 //! | [`agents`] | 子智能体注册表——定义可调度的子智能体清单与构建逻辑 |
-//! | [`delegate`] | 子智能体委派工具——让 Motis 通过 function calling 调度子智能体 |
+//! | [`federation`] | 子智能体联邦——referee Kernel + AgentRuntime 拓扑，运行时按指纹复用 |
+//! | [`delegate`] | 子智能体委派工具——经内核 RPC 把任务派发为全新子会话 |
+//! | [`agent_reporter`] | 子智能体事件上报器——委派生命周期与内部工具调用透传前端 |
 //!
 //! 流式消费与事件映射由 [`crate::chat_bridge`] 共享层提供。
 
+pub mod agent_reporter;
 pub mod agents;
 pub mod approval;
 pub mod commands;
 pub mod delegate;
 pub mod error;
 pub mod events;
+pub mod federation;
 pub mod prompt;
 pub mod runtime;
+pub mod timeouts;
 
 pub use commands::MotisChatState;
+pub use federation::FederationPool;

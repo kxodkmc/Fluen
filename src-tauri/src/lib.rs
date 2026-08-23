@@ -64,6 +64,7 @@ pub fn run() {
     let mascot_data_storage =
         mascot::storage::MascotDataStorage::new().expect("无法确定宠物数据目录");
     let motis_chat_state = motis_chat::MotisChatState::new();
+    let federation_pool = motis_chat::FederationPool::new();
     let ai_assistant_state = ai_assistant::AiAssistantState::new();
     let editor_state = editor::commands::EditorState::new();
     let ocr_state = ai_services::commands::OcrState::new();
@@ -80,6 +81,7 @@ pub fn run() {
         .manage(mascot_config_storage)
         .manage(mascot_data_storage)
         .manage(motis_chat_state)
+        .manage(federation_pool)
         .manage(ai_assistant_state)
         .manage(editor_state)
         .manage(ocr_state)

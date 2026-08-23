@@ -11,6 +11,7 @@
 //! | [`error`] | 内部错误类型 [`ProjectError`] + 可序列化错误响应 [`ProjectErrorResponse`] |
 //! | [`frontmatter`] | YAML front matter 解析与序列化工具（CRLF 安全） |
 //! | [`validator`] | 项目结构校验（硬校验阻断 / 软校验收集警告） |
+//! | [`atomic`] | 同步原子写（镜像 referee 语义，供持久化链路复用） |
 //! | [`creator`] | 项目创建逻辑 |
 //! | [`loader`] | 项目加载逻辑 |
 //! | [`commands`] | Tauri commands，薄封装层 |
@@ -39,6 +40,7 @@
 //! [`ProjectError`]: error::ProjectError
 //! [`ProjectErrorResponse`]: error::ProjectErrorResponse
 
+pub mod atomic;
 pub mod commands;
 pub mod creator;
 pub mod error;

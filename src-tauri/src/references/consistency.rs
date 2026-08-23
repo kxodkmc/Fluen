@@ -15,7 +15,8 @@
 use std::path::Path;
 
 use super::error::ReferenceError;
-use super::model::{ConsistencyReport, ReferenceStatus};
+use super::frontmatter::ReferenceFrontmatter;
+use super::model::{ConsistencyReport, ReferenceEntry, ReferenceStatus};
 use super::storage::ReferenceIndex;
 
 /// 执行一致性校验并修复孤儿文件。
@@ -93,6 +94,64 @@ pub fn check_and_repair(project_dir: &Path, index: &ReferenceIndex) -> Result<Co
     })
 }
 
+/// 回填索引中缺失的元数据（`authors` / `year`）。
+///
+/// 旧版项目索引不含 `year` 字段，部分导入模式也不写 `authors`；
+/// 而两者均已写入 MD frontmatter。本函数对 `Completed` 且缺字段的条目
+/// 读取其 MD frontmatter 并回填索引（一次事务原子写回）。
+///
+/// - MD 文件缺失或无对应字段 → 跳过该条目，不影响其余；
+/// - 无需回填时直接返回 0，不产生写事务。
+///
+/// 返回回填的条目数。
+pub fn backfill_missing_metadata(
+    project_dir: &Path,
+    index: &ReferenceIndex,
+) -> Result<usize, ReferenceError> {
+    let entries = index.list()?;
+    let candidates: Vec<&ReferenceEntry> = entries
+        .iter()
+        .filter(|e| e.status == ReferenceStatus::Completed && (e.authors.is_none() || e.year.is_none()))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    // 逐条读 MD frontmatter，仅提取缺失字段
+    let mut filled: Vec<(String, Option<Vec<String>>, Option<String>)> = Vec::new();
+    for e in &candidates {
+        let md = match std::fs::read_to_string(project_dir.join(&e.md_path)) {
+            Ok(md) => md,
+            Err(_) => continue, // MD 缺失交由 check_and_repair 标记，此处跳过
+        };
+        let (fm, _) = ReferenceFrontmatter::split_from_markdown(&md);
+        let authors = if e.authors.is_none() { fm.authors_for_index() } else { None };
+        let year = if e.year.is_none() { fm.year.clone() } else { None };
+        if authors.is_some() || year.is_some() {
+            filled.push((e.id.clone(), authors, year));
+        }
+    }
+    if filled.is_empty() {
+        return Ok(0);
+    }
+
+    let count = filled.len();
+    index.update(|entries| {
+        for (id, authors, year) in &filled {
+            if let Some(e) = entries.iter_mut().find(|e| &e.id == id) {
+                if e.authors.is_none() {
+                    e.authors = authors.clone();
+                }
+                if e.year.is_none() {
+                    e.year = year.clone();
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(count)
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -129,6 +188,7 @@ mod tests {
             source: None,
             ai_summary: None,
             authors: None,
+            year: None,
             import_mode: crate::references::import_mode::ReferenceImportMode::Ocr,
             status: ReferenceStatus::Completed,
             error: None,
@@ -190,6 +250,111 @@ mod tests {
         // 条目已标记为 Failed
         let entry = index.find("ref-broken").unwrap().unwrap();
         assert_eq!(entry.status, ReferenceStatus::Failed);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── backfill_missing_metadata ──
+
+    /// 辅助：写一个带 frontmatter 的 MD 文件。
+    fn write_md(dir: &std::path::Path, id: &str, frontmatter: &str) {
+        let md_dir = dir.join("references").join("md");
+        std::fs::create_dir_all(&md_dir).unwrap();
+        std::fs::write(
+            md_dir.join(format!("{id}.md")),
+            format!("{frontmatter}\n# 正文\n内容"),
+        )
+        .unwrap();
+    }
+
+    // 缺失的 authors/year 从 MD frontmatter 回填
+    #[test]
+    fn backfill_fills_missing_metadata_from_frontmatter() {
+        let dir = temp_dir();
+        write_md(&dir, "ref-a", "---\ntitle: 标题\nauthors:\n  - 张三\nyear: '2025'\n---");
+
+        let index = ReferenceIndex::new(&dir);
+        index.upsert(sample_entry("ref-a")).unwrap();
+
+        let filled = backfill_missing_metadata(&dir, &index).unwrap();
+        assert_eq!(filled, 1);
+
+        let entry = index.find("ref-a").unwrap().unwrap();
+        assert_eq!(entry.authors.as_deref(), Some(["张三".to_string()].as_slice()));
+        assert_eq!(entry.year.as_deref(), Some("2025"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 仅回填缺失字段，已有字段不被覆盖
+    #[test]
+    fn backfill_preserves_existing_fields() {
+        let dir = temp_dir();
+        write_md(&dir, "ref-a", "---\ntitle: 标题\nauthors:\n  - 李四\nyear: '1999'\n---");
+
+        let index = ReferenceIndex::new(&dir);
+        let mut entry = sample_entry("ref-a");
+        entry.authors = Some(vec!["张三".into()]);
+        index.upsert(entry).unwrap();
+
+        let filled = backfill_missing_metadata(&dir, &index).unwrap();
+        assert_eq!(filled, 1);
+
+        let entry = index.find("ref-a").unwrap().unwrap();
+        // authors 保持原值，year 被回填
+        assert_eq!(entry.authors.as_deref(), Some(["张三".to_string()].as_slice()));
+        assert_eq!(entry.year.as_deref(), Some("1999"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 全部字段齐全时不产生回填（返回 0）
+    #[test]
+    fn backfill_returns_zero_when_complete() {
+        let dir = temp_dir();
+        write_md(&dir, "ref-a", "---\ntitle: 标题\n---");
+
+        let index = ReferenceIndex::new(&dir);
+        let mut entry = sample_entry("ref-a");
+        entry.authors = Some(vec!["张三".into()]);
+        entry.year = Some("2025".into());
+        index.upsert(entry).unwrap();
+
+        assert_eq!(backfill_missing_metadata(&dir, &index).unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // MD 文件缺失时跳过该条目，不报错
+    #[test]
+    fn backfill_skips_missing_md() {
+        let dir = temp_dir();
+
+        let index = ReferenceIndex::new(&dir);
+        index.upsert(sample_entry("ref-a")).unwrap();
+
+        assert_eq!(backfill_missing_metadata(&dir, &index).unwrap(), 0);
+        let entry = index.find("ref-a").unwrap().unwrap();
+        assert!(entry.authors.is_none());
+        assert!(entry.year.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 非 Completed 状态不回填（其 MD 可能不完整）
+    #[test]
+    fn backfill_ignores_non_completed_entries() {
+        let dir = temp_dir();
+        write_md(&dir, "ref-a", "---\nyear: '2025'\n---");
+
+        let index = ReferenceIndex::new(&dir);
+        let mut entry = sample_entry("ref-a");
+        entry.status = ReferenceStatus::Failed;
+        index.upsert(entry).unwrap();
+
+        assert_eq!(backfill_missing_metadata(&dir, &index).unwrap(), 0);
+        let entry = index.find("ref-a").unwrap().unwrap();
+        assert!(entry.year.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

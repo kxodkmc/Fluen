@@ -169,15 +169,20 @@ impl EditorEngine {
     }
 
     /// 渲染当前 source_md 为 HTML。
+    ///
+    /// 文献库取自绑定项目（未绑定时为空库，引用降级显示）。
     pub fn render_html(&self) -> Result<String> {
-        render_to_html(&self.source_md, &self.config.render_options)
+        let refs = super::reflib::load_for_project(self.project_path.as_deref());
+        render_to_html(&self.source_md, &self.config.render_options, &refs)
     }
 
     /// 渲染任意 MD 文本为 HTML（使用引擎当前配置）。
     ///
     /// 不修改 source_md，仅用于即时预览外部内容。
+    /// 文献库同 [`render_html`](Self::render_html)，取自绑定项目。
     pub fn render_html_with(&self, content: &str) -> Result<String> {
-        render_to_html(content, &self.config.render_options)
+        let refs = super::reflib::load_for_project(self.project_path.as_deref());
+        render_to_html(content, &self.config.render_options, &refs)
     }
 
     /// 保存到 main.md（委托 project 模块）。

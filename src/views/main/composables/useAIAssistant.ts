@@ -115,6 +115,9 @@ export function useAIAssistant() {
 
   /** 收到文本增量：追加到当前 assistant 文本消息。 */
   function onText(payload: TextPayload): void {
+    // 空 delta 忽略；首帧纯空白也忽略（不新建消息，避免产生空气泡）
+    if (payload.delta.length === 0) return;
+    if (currentTextId === null && payload.delta.trim().length === 0) return;
     if (currentTextId === null) {
       const msg: ChatMessage = {
         id: generateId(),

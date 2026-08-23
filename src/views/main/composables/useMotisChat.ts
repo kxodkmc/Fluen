@@ -14,6 +14,8 @@
  * motis:text       →  文本增量（追加到当前 assistant 文本消息）
  * motis:tool-call   →  工具调用（追加 tool_call 消息 + 更新气泡）
  * motis:tool-result →  工具执行结果（按 tool_call_id 关联到工具消息）
+ * motis:agent-*     →  子智能体委派过程（挂到工具消息的 agentRun：
+ *                      started / tool-call / tool-result / finished）
  * motis:finish      →  完成（结束流式状态 + 清空气泡）
  * motis:error      →  错误（追加状态消息 + 标记中断 + 清空气泡）
  * ```
@@ -71,6 +73,40 @@ interface FinishPayload {
 }
 interface ErrorPayload {
   message: string;
+}
+
+/* ── 子智能体事件 payload（与后端 events.rs 对齐） ──────────────────── */
+interface AgentStartedPayload {
+  /** 父级 delegate_agent 工具调用 ID（关联 tool_call 消息）。 */
+  tool_call_id: string;
+  agent_id: string;
+  task: string;
+  timeout_ms: number;
+}
+interface AgentToolCallPayload {
+  tool_call_id: string;
+  agent_id: string;
+  /** 子智能体会话内的工具调用 ID。 */
+  id: string;
+  name: string;
+  input: unknown;
+}
+interface AgentToolResultPayload {
+  tool_call_id: string;
+  agent_id: string;
+  id: string;
+  name: string;
+  ok: boolean;
+  duration_ms: number;
+  result: unknown;
+}
+interface AgentFinishedPayload {
+  tool_call_id: string;
+  agent_id: string;
+  ok: boolean;
+  duration_ms: number;
+  tokens_used?: number;
+  error?: string;
 }
 
 /** 工具审批请求 payload（与后端 events.rs 对齐）。 */
@@ -229,6 +265,9 @@ export function useMotisChat() {
   }
 
   function onThought(payload: ThoughtPayload): void {
+    // 空 delta 忽略；首帧纯空白（如 "\n"）也忽略——避免空思考块隔断活动分组
+    if (payload.delta.length === 0) return;
+    if (currentThinkingId === null && payload.delta.trim().length === 0) return;
     // 始终维护思考状态气泡（若当前无气泡则填入思考文案）
     if (statusBubble.value === null) {
       statusBubble.value = pickThinkingMessage();
@@ -256,6 +295,10 @@ export function useMotisChat() {
 
   /** 处理文本增量 — 追加到当前 assistant 文本消息，同时更新气泡显示实时回复内容。 */
   function onText(payload: TextPayload): void {
+    // 空 delta 忽略；首帧纯空白（如 "\n"）也忽略——空气泡会隔断活动时间线分组，
+    // 后续帧的空白正常拼接（保留词间空格与换行）
+    if (payload.delta.length === 0) return;
+    if (currentTextId === null && payload.delta.trim().length === 0) return;
     // 文本开始 → 关闭当前 thinking 段，切换为"作答"阶段
     if (currentThinkingId !== null) {
       const thinking = messages.value.find((m) => m.id === currentThinkingId);
@@ -312,6 +355,69 @@ export function useMotisChat() {
     }
   }
 
+  /* ── 子智能体事件处理（按父级 tool_call_id 挂到工具消息的 agentRun） ── */
+
+  /** 查找委派目标工具消息（不存在时返回 null）。 */
+  function findDelegationMessage(toolCallId: string) {
+    return messages.value.find((m) => m.kind === 'tool_call' && m.id === toolCallId) ?? null;
+  }
+
+  /** 委派发起 — 初始化工具消息的 agentRun 运行记录。 */
+  function onAgentStarted(payload: AgentStartedPayload): void {
+    const msg = findDelegationMessage(payload.tool_call_id);
+    if (!msg) {
+      log.warn('委派发起事件未找到对应工具消息', { toolCallId: payload.tool_call_id });
+      return;
+    }
+    msg.agentRun = {
+      agentId: payload.agent_id,
+      task: payload.task,
+      status: 'running',
+      startedAt: Date.now(),
+      activities: [],
+    };
+  }
+
+  /** 子智能体内部工具调用 — 追加活动条目（数组引用整体替换）。 */
+  function onAgentToolCall(payload: AgentToolCallPayload): void {
+    const msg = findDelegationMessage(payload.tool_call_id);
+    if (!msg?.agentRun) return;
+    msg.agentRun.activities = [
+      ...msg.agentRun.activities,
+      {
+        id: payload.id,
+        name: payload.name,
+        input: payload.input,
+        running: true,
+      },
+    ];
+  }
+
+  /** 子智能体内部工具调用结束 — 按内部调用 ID 回填结果。 */
+  function onAgentToolResult(payload: AgentToolResultPayload): void {
+    const msg = findDelegationMessage(payload.tool_call_id);
+    const activity = msg?.agentRun?.activities.find((a) => a.id === payload.id);
+    if (!activity) return;
+    activity.running = false;
+    activity.ok = payload.ok;
+    activity.result = payload.result;
+    activity.durationMs = payload.duration_ms;
+  }
+
+  /** 委派结束 — 更新运行状态与统计。 */
+  function onAgentFinished(payload: AgentFinishedPayload): void {
+    const msg = findDelegationMessage(payload.tool_call_id);
+    if (!msg?.agentRun) return;
+    msg.agentRun.status = payload.ok ? 'done' : 'failed';
+    msg.agentRun.durationMs = payload.duration_ms;
+    if (payload.tokens_used !== undefined && payload.tokens_used !== null) {
+      msg.agentRun.tokensUsed = payload.tokens_used;
+    }
+    if (payload.error) {
+      msg.agentRun.error = payload.error;
+    }
+  }
+
   /** 气泡清除延迟（ms）——完成后保留气泡一段时间让用户读完最后回复。 */
   const BUBBLE_CLEAR_DELAY = 5000;
   /** 气泡清除计时器。 */
@@ -364,6 +470,10 @@ export function useMotisChat() {
       listen<ToolCallPayload>('motis:tool-call', (e) => onToolCall(e.payload)),
       listen<ToolResultPayload>('motis:tool-result', (e) => onToolResult(e.payload)),
       listen<ApprovalRequestPayload>('motis:approval-request', (e) => onApprovalRequest(e.payload)),
+      listen<AgentStartedPayload>('motis:agent-started', (e) => onAgentStarted(e.payload)),
+      listen<AgentToolCallPayload>('motis:agent-tool-call', (e) => onAgentToolCall(e.payload)),
+      listen<AgentToolResultPayload>('motis:agent-tool-result', (e) => onAgentToolResult(e.payload)),
+      listen<AgentFinishedPayload>('motis:agent-finished', (e) => onAgentFinished(e.payload)),
       listen<FinishPayload>('motis:finish', (e) => onFinish(e.payload)),
       listen<ErrorPayload>('motis:error', (e) => onError(e.payload)),
     ]);

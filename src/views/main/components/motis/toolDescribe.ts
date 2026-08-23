@@ -65,15 +65,15 @@ const CATEGORY_LABELS: Record<ToolCategory, { verbKey: string; countKey: string 
   },
 };
 
-/** paper_content 的 action → 固定名词对象 i18n key。 */
-const PAPER_ACTION_OBJECT_KEYS: Record<string, string> = {
-  full: 'main.motisPanel.activity.paperFull',
-  outline: 'main.motisPanel.activity.paperOutline',
-  section: 'main.motisPanel.activity.paperSection',
-};
+/** paper_outline 的固定名词对象 i18n key（论文大纲）。 */
+const PAPER_OUTLINE_OBJECT_KEY = 'main.motisPanel.activity.paperOutline';
 
-/** project_file 中属于写操作的 action 集合。 */
-const FILE_WRITE_ACTIONS = new Set(['write', 'edit', 'append']);
+/** agent_id → 智能体显示名 i18n key（settings.motis.agents.*）。 */
+const AGENT_NAME_KEYS: Record<string, string> = {
+  academic_writer: 'settings.motis.agents.academicWriter',
+  knowledge_builder: 'settings.motis.agents.knowledgeBuilder',
+  data_analyst: 'settings.motis.agents.dataAnalyst',
+};
 
 /** 提取路径末段（兼容 / 与 \ 分隔符）。 */
 function pathBasename(path: string): string {
@@ -96,25 +96,28 @@ function makeDisplay(category: ToolCategory, extra?: Partial<ToolDisplay>): Tool
 /**
  * 将单条工具调用消息映射为展示描述。
  *
- * 已知工具（project_file / paper_content / literature_search /
- * manuscript / delegate_agent）给出精确的动词与对象；其余回退 generic。
+ * 已知工具（project_read / project_write / project_edit /
+ * paper_outline / paper_section / literature_search / manuscript /
+ * delegate_agent）给出精确的动词与对象；其余回退 generic。
  */
 export function describeToolCall(msg: ChatMessage): ToolDisplay {
   switch (msg.toolName) {
-    case 'project_file': {
-      const action = inputStr(msg.toolInput, 'action') ?? 'read';
-      const isWrite = FILE_WRITE_ACTIONS.has(action);
+    case 'project_read':
+    case 'project_write':
+    case 'project_edit': {
+      const isWrite = msg.toolName !== 'project_read';
       const path = inputStr(msg.toolInput, 'path');
       return makeDisplay(isWrite ? 'write' : 'read', {
         objectText: path ? pathBasename(path) : undefined,
       });
     }
-    case 'paper_content': {
-      const action = inputStr(msg.toolInput, 'action') ?? 'full';
-      return makeDisplay('paper', {
-        objectKey:
-          PAPER_ACTION_OBJECT_KEYS[action] ?? PAPER_ACTION_OBJECT_KEYS.full,
-      });
+    case 'paper_outline':
+      // 「已读取大纲」固定名词对象
+      return makeDisplay('paper', { objectKey: PAPER_OUTLINE_OBJECT_KEY });
+    case 'paper_section': {
+      // 对象展示章节标题引用（如 "# 引言"）
+      const heading = inputStr(msg.toolInput, 'heading')?.trim();
+      return makeDisplay('paper', { objectText: heading || undefined });
     }
     case 'literature_search': {
       const query = inputStr(msg.toolInput, 'query')?.trim();
@@ -123,8 +126,13 @@ export function describeToolCall(msg: ChatMessage): ToolDisplay {
     case 'manuscript':
       // 「已更新正文」动词已含对象语义，无需附加对象
       return makeDisplay('manuscript');
-    case 'delegate_agent':
-      return makeDisplay('delegate');
+    case 'delegate_agent': {
+      // 对象展示目标智能体显示名（如「已委派 学术撰写助手」）
+      const agentId = inputStr(msg.toolInput, 'agent_id');
+      return makeDisplay('delegate', {
+        objectKey: agentId ? AGENT_NAME_KEYS[agentId] : undefined,
+      });
+    }
     default:
       return makeDisplay('generic', { objectText: msg.toolName });
   }

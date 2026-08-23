@@ -45,10 +45,11 @@ use crate::llm_config::storage::ConfigStorage;
 use crate::mascot::storage::{MascotConfigStorage, MascotDataStorage};
 use referee_ai::session::SessionId;
 
+use super::agent_reporter::AgentReporter;
 use super::approval::{ApprovalMap, ApprovalOutcome, MotisApprover};
-use super::delegate::ToolReporter;
 use super::error::MotisChatError;
-use super::events::{EVENT_APPROVAL_REQUEST, EVENT_TOOL_RESULT, ToolResultPayload};
+use super::events::EVENT_APPROVAL_REQUEST;
+use super::federation::FederationPool;
 use super::prompt;
 use super::runtime::build_runtime;
 
@@ -159,6 +160,7 @@ pub async fn motis_chat_send(
     mascot_data_storage: State<'_, MascotDataStorage>,
     llm_storage: State<'_, ConfigStorage>,
     chat_state: State<'_, MotisChatState>,
+    federation_pool: State<'_, FederationPool>,
 ) -> Result<(), MotisChatError> {
     // 1. 加载配置
     let mascot_config = mascot_storage
@@ -177,27 +179,26 @@ pub async fn motis_chat_send(
         chat_state.approvals_handle(),
         EVENT_APPROVAL_REQUEST,
     ));
-    // 工具结果上报器：把委派结果透传给前端（按 tool_call_id 关联到工具调用消息）
-    let reporter = ToolReporter::new({
-        let window = window.clone();
-        move |tool_call_id, name, result| {
-            let _ = window.emit(
-                EVENT_TOOL_RESULT,
-                ToolResultPayload {
-                    tool_call_id: tool_call_id.to_string(),
-                    name: name.to_string(),
-                    result: result.clone(),
-                },
-            );
-        }
-    });
+    // 子智能体事件上报器：委派生命周期与子代理内部工具调用经统一
+    // emit 回调分发为 Tauri 事件（事件名由上报器侧指定）
+    let agent_reporter = Arc::new(AgentReporter::new(
+        {
+            let window = window.clone();
+            move |event, payload| {
+                let _ = window.emit(event, payload.clone());
+            }
+        },
+        federation_pool.tracker(),
+    ));
     let (thinking_enabled, runtime) = build_runtime(
         &mascot_config,
         &llm_config,
         project_path.as_deref(),
         approver,
-        reporter,
-    )?;
+        agent_reporter,
+        &federation_pool,
+    )
+    .await?;
 
     // 3. 回放历史 + 启动流式回合
     let session_id = SessionId::new_v4();
@@ -232,13 +233,21 @@ pub async fn motis_chat_send(
     chat_bridge::consume_stream(handle, &window, &EVENTS).await;
     chat_state.unregister(&run_id);
 
+    // 兜底清理：父回合被取消/出错时，仍在运行的委派子会话会被中断
+    federation_pool.interrupt_children().await;
+
     Ok(())
 }
 
-/// 取消当前活跃的 Motis 会话。
+/// 取消当前活跃的 Motis 会话（含进行中的委派子会话）。
 #[tauri::command]
-pub fn motis_chat_cancel(chat_state: State<'_, MotisChatState>) -> Result<(), MotisChatError> {
+pub async fn motis_chat_cancel(
+    chat_state: State<'_, MotisChatState>,
+    federation_pool: State<'_, FederationPool>,
+) -> Result<(), MotisChatError> {
     chat_state.cancel_active();
+    // 父回合取消后，已派发但未完成的子会话不会随调用方 future 中止，需显式中断
+    federation_pool.interrupt_children().await;
     Ok(())
 }
 

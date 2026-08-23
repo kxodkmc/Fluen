@@ -14,7 +14,9 @@
  *
  * 大纲跳转由 `useOutline.jumpTo` 内部调用 `useFluenEditor().scrollToLine` 完成。
  */
-import { ref, watch, onMounted, computed, inject } from 'vue';
+import { ref, watch, onMounted, onUnmounted, computed, inject } from 'vue';
+import type { UnlistenFn } from '@tauri-apps/api/event';
+import { listen } from '@tauri-apps/api/event';
 import type { ContentTab } from '../types';
 import { useI18n } from '../../../i18n';
 import { useProject } from '../../../composables/useProject';
@@ -24,7 +26,7 @@ import { ReferenceReader, WikiReader } from './reader';
 import RecentProjects from './welcome/RecentProjects.vue';
 
 const { t } = useI18n();
-const { hasProject, config, mainMd } = useProject();
+const { hasProject, config, mainMd, refreshProject } = useProject();
 
 /* ── 编辑器视图模式（注入 MainView 共享布局实例） ─────────────────── */
 const layout = inject(MAIN_LAYOUT_KEY);
@@ -86,6 +88,29 @@ watch(mainMd, (newMd) => {
 function onDocChange(md: string): void {
   liveMd.value = md;
 }
+
+/* ── AI 写入正文后的自动刷新 ─────────────────────────────────────────── */
+/**
+ * 监听 `motis:project-updated`（AI 经 manuscript 工具写入正文成功）：
+ * 编辑器无未保存修改时重新拉取项目内容——`mainMd` 变化会自动同步到
+ * 编辑器（FluenEditor 的 watch）、预览（liveMd）与大纲。
+ * 用户正在编辑（脏缓冲）时跳过，避免覆盖未保存的内容。
+ */
+let unlistenProjectUpdated: UnlistenFn | null = null;
+
+onMounted(async () => {
+  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+    unlistenProjectUpdated = await listen('motis:project-updated', () => {
+      if (useFluenEditor().isDirty.value) return;
+      void refreshProject();
+    });
+  }
+});
+
+onUnmounted(() => {
+  unlistenProjectUpdated?.();
+  unlistenProjectUpdated = null;
+});
 </script>
 
 <template>

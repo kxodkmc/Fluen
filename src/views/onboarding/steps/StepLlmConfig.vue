@@ -62,7 +62,7 @@ const selectedPreset = computed<ProviderPreset | undefined>(() =>
 /* ── 预设表单状态（通用：DeepSeek / MiMo 等） ─────────────────────────── */
 const presetModelId = ref<string>(
   props.provider && selectedPresetId.value && selectedPresetId.value !== 'openai-compatible'
-    ? (props.activeModelId ?? selectedPreset.value?.models[0]?.id ?? '')
+    ? (props.activeModelId ?? props.provider.models[0]?.id ?? selectedPreset.value?.models[0]?.id ?? '')
     : '',
 );
 const presetApiKey = ref<string>(
@@ -130,20 +130,39 @@ function presetModelCapabilities(model: {
   };
 }
 
-/** 从预设构建 ProviderConfig。 */
+/**
+ * 从预设构建 ProviderConfig。
+ *
+ * 当预设无可选模型（如 OpenRouter 聚合网关）时，使用用户自填的
+ * `userModelId` 生成单个模型条目；未填则模型列表为空。
+ */
 function buildPresetProvider(
   preset: ProviderPreset,
   apiKey: string,
+  userModelId: string,
 ): ProviderConfig {
-  const models: ModelConfig[] = preset.models.map((m) => ({
-    id: m.id,
-    name: m.name,
-    capabilities: presetModelCapabilities(m),
-    max_output_tokens: m.maxOutputTokens,
-    context_window: m.contextWindow,
-    description: null,
-    enabled: true,
-  }));
+  const models: ModelConfig[] =
+    preset.models.length > 0
+      ? preset.models.map((m) => ({
+          id: m.id,
+          name: m.name,
+          capabilities: presetModelCapabilities(m),
+          max_output_tokens: m.maxOutputTokens,
+          context_window: m.contextWindow,
+          description: null,
+          enabled: true,
+        }))
+      : userModelId
+        ? [{
+            id: userModelId,
+            name: userModelId,
+            capabilities: presetModelCapabilities({ thinking: false, vision: false, audio: false, video: false }),
+            max_output_tokens: null,
+            context_window: null,
+            description: null,
+            enabled: true,
+          }]
+        : [];
 
   return {
     id: preset.id,
@@ -202,7 +221,7 @@ function syncEmit(): void {
   if (!preset) return;
 
   if (preset.isPreset) {
-    emit('update:provider', buildPresetProvider(preset, presetApiKey.value));
+    emit('update:provider', buildPresetProvider(preset, presetApiKey.value, presetModelId.value));
     emit('update:activeModelId', presetModelId.value);
   } else {
     emit('update:provider', buildCustomProvider());
@@ -252,8 +271,8 @@ watch(
         </div>
       </div>
 
-      <!-- 模型选择 -->
-      <div class="form-group">
+      <!-- 模型选择（预设内置模型） -->
+      <div v-if="selectedPreset.models.length > 0" class="form-group">
         <label class="form-label">{{ t('onboarding.steps.llmConfig.model') }}</label>
         <div class="model-grid">
           <button
@@ -280,6 +299,17 @@ watch(
             </div>
           </button>
         </div>
+      </div>
+
+      <!-- 模型自填（预设无内置模型，如 OpenRouter 聚合网关） -->
+      <div v-else class="form-group">
+        <label class="form-label">{{ t('onboarding.steps.llmConfig.modelId') }}</label>
+        <input
+          v-model="presetModelId"
+          class="form-input"
+          type="text"
+          :placeholder="t('onboarding.steps.llmConfig.placeholders.modelId')"
+        />
       </div>
 
       <!-- API Key -->

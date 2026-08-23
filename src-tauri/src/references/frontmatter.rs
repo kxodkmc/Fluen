@@ -22,7 +22,7 @@
 //! - `title`：文献标题（与索引条目 `title` 同步）
 //! - `authors`：作者列表（写入索引 `authors` 字段供列表展示）
 //! - `journal`：期刊名（可选，仅写入 MD）
-//! - `year`：发表年份（可选，仅写入 MD）
+//! - `year`：发表年份（可选，同步写入索引 `year` 字段供引用显示）
 
 use serde::{Deserialize, Serialize};
 

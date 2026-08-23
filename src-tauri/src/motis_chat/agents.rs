@@ -9,9 +9,9 @@
 //!
 //! | ID | 名称 | 职责 | 工具集 |
 //! |----|------|------|--------|
-//! | `academic_writer` | 学术撰写助手 | 撰写格式规范的论文正文 | paper_content / literature_search / manuscript / project_file |
-//! | `knowledge_builder` | 知识库构建助手 | 构建与查询文献知识库 | literature_search / project_file |
-//! | `data_analyst` | 数据分析助手 | 统计分析与数据可视化 | data_analysis / project_file |
+//! | `academic_writer` | 学术撰写助手 | 撰写格式规范的论文正文 | paper_outline / paper_section / literature_search / manuscript / project_read / project_write / project_edit |
+//! | `knowledge_builder` | 知识库构建助手 | 构建与查询文献知识库 | literature_search / project_read / project_write / project_edit |
+//! | `data_analyst` | 数据分析助手 | 统计分析与数据可视化 | project_read / project_write / project_edit（数据分析工具为独立 Tauri 命令通道，未注册为智能体工具） |
 //!
 //! ## 扩展
 //!
@@ -22,11 +22,14 @@ use std::sync::Arc;
 
 use referee_ai::tool::ToolRegistry;
 
-use crate::agent_runtime::approval::{ApprovalGuard, Approver};
+use crate::agent_runtime::approval::Approver;
+use crate::agent_runtime::observability::{observe_registry, ToolEventSink};
 use crate::agent_runtime::{FluenRuntime, FluenRuntimeBuilder};
 use crate::agent_tools;
 use crate::llm_chat;
 use crate::llm_config::model::LlmConfig;
+
+use super::timeouts::{motis_engine_config, LLM_HTTP_TIMEOUT, SUBAGENT_TOOL_TIMEOUT};
 
 /// 子智能体 ID（固定字符串，前端配置与后端注册一致）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -103,6 +106,9 @@ pub enum AgentBuildError {
     /// 工具注册失败。
     #[error("工具注册失败: {0}")]
     ToolRegistry(String),
+    /// 联邦内核装配失败（扩展注册等）。
+    #[error("联邦装配失败: {0}")]
+    Kernel(String),
 }
 
 /// 返回全部子智能体定义。
@@ -164,7 +170,7 @@ fn build_knowledge_builder_prompt() -> String {
     "你是 Fluen 学术创作平台的**知识库构建助手**。你的核心职责是帮助用户查询和管理文献知识库。\n\n\
      你可以：\n\
      - 使用 literature_search 工具检索文献知识库（混合检索：关键词 + 语义向量，最多返回 4 条相关条目）\n\
-     - 使用 project_file 工具读写项目内文件（如参考文献索引等）\n\n\
+     - 使用 project_read 读取项目内文件，project_write / project_edit 写入或编辑（如参考文献索引等；写操作需确认）\n\n\
      工作原则：\n\
      - 检索前先理解用户需求，选择合适的查询词和条目类型筛选\n\
      - 结果需结合上下文校验，工具可能返回过时信息\n\
@@ -189,72 +195,58 @@ fn build_data_analyst_prompt() -> String {
 // 工具注册函数
 // ===========================================================================
 
-/// 学术撰写助手工具集：paper_content + literature_search + manuscript + project_file。
+/// 学术撰写助手工具集：paper_outline / paper_section / literature_search /
+/// manuscript / project_read / project_write / project_edit。
 fn build_academic_writer_tools(
     project_path: &str,
     llm: &LlmConfig,
     approver: Arc<dyn Approver>,
 ) -> Result<ToolRegistry, AgentBuildError> {
     let registry = ToolRegistry::with_defaults();
+    let reg_err = |e: referee_ai::tool::RegistryError| {
+        AgentBuildError::ToolRegistry(e.to_string())
+    };
 
-    // 只读：论文内容读取
-    registry
-        .register(Arc::new(agent_tools::paper::PaperContentTool::new(
-            project_path.to_string(),
-        )))
-        .map_err(|e| AgentBuildError::ToolRegistry(e.to_string()))?;
-
-    // 只读：文献知识库搜索
-    register_literature_search(&registry, project_path, llm)?;
+    // 只读：论文大纲与章节读取 + 文献知识库搜索
+    agent_tools::assemble::register_paper_readers(&registry, project_path).map_err(reg_err)?;
+    agent_tools::assemble::register_literature_search(&registry, project_path, llm)
+        .map_err(reg_err)?;
 
     // 写操作：论文正文写入（ApprovalGuard 包装）
-    registry
-        .register(Arc::new(ApprovalGuard::new(
-            Arc::new(agent_tools::manuscript::ManuscriptEditTool::new(
-                project_path.to_string(),
-            )),
-            approver.clone(),
-        )))
-        .map_err(|e| AgentBuildError::ToolRegistry(e.to_string()))?;
+    agent_tools::assemble::register_manuscript(&registry, project_path, approver.clone())
+        .map_err(reg_err)?;
 
-    // 读写：项目内文件
-    registry
-        .register(Arc::new(ApprovalGuard::new(
-            Arc::new(agent_tools::file::ProjectFileTool::new(
-                project_path.to_string(),
-            )),
-            approver,
-        )))
-        .map_err(|e| AgentBuildError::ToolRegistry(e.to_string()))?;
+    // 读写：项目内文件三件套（写/编辑需审批；正文 main.md 写保护）
+    agent_tools::assemble::register_project_files(&registry, project_path, approver)
+        .map_err(reg_err)?;
 
     Ok(registry)
 }
 
-/// 知识库构建助手工具集：literature_search + project_file。
+/// 知识库构建助手工具集：literature_search + project_read / project_write /
+/// project_edit。
 fn build_knowledge_builder_tools(
     project_path: &str,
     llm: &LlmConfig,
     approver: Arc<dyn Approver>,
 ) -> Result<ToolRegistry, AgentBuildError> {
     let registry = ToolRegistry::with_defaults();
+    let reg_err = |e: referee_ai::tool::RegistryError| {
+        AgentBuildError::ToolRegistry(e.to_string())
+    };
 
     // 只读：文献知识库搜索
-    register_literature_search(&registry, project_path, llm)?;
+    agent_tools::assemble::register_literature_search(&registry, project_path, llm)
+        .map_err(reg_err)?;
 
-    // 读写：项目内文件
-    registry
-        .register(Arc::new(ApprovalGuard::new(
-            Arc::new(agent_tools::file::ProjectFileTool::new(
-                project_path.to_string(),
-            )),
-            approver,
-        )))
-        .map_err(|e| AgentBuildError::ToolRegistry(e.to_string()))?;
+    // 读写：项目内文件三件套（写/编辑需审批；正文 main.md 写保护）
+    agent_tools::assemble::register_project_files(&registry, project_path, approver)
+        .map_err(reg_err)?;
 
     Ok(registry)
 }
 
-/// 数据分析助手工具集：project_file（读写数据文件）。
+/// 数据分析助手工具集：project_read / project_write / project_edit（数据文件）。
 fn build_data_analyst_tools(
     project_path: &str,
     _llm: &LlmConfig,
@@ -262,53 +254,11 @@ fn build_data_analyst_tools(
 ) -> Result<ToolRegistry, AgentBuildError> {
     let registry = ToolRegistry::with_defaults();
 
-    // 读写：项目内文件（数据 CSV 等）
-    registry
-        .register(Arc::new(ApprovalGuard::new(
-            Arc::new(agent_tools::file::ProjectFileTool::new(
-                project_path.to_string(),
-            )),
-            approver,
-        )))
+    // 读写：项目内数据文件——只读直装；写/编辑经 referee 原语并 ApprovalGuard 包装
+    agent_tools::assemble::register_project_files(&registry, project_path, approver)
         .map_err(|e| AgentBuildError::ToolRegistry(e.to_string()))?;
 
     Ok(registry)
-}
-
-/// 知识库存在时注册 `literature_search` 工具（打开失败仅告警降级）。
-fn register_literature_search(
-    registry: &ToolRegistry,
-    project_path: &str,
-    llm: &LlmConfig,
-) -> Result<(), AgentBuildError> {
-    let references_dir = std::path::PathBuf::from(project_path).join("references");
-    if !references_dir.join("wiki").join("index.db").is_file() {
-        return Ok(());
-    }
-
-    let kb = match fluen_knowledge::async_kb::AsyncKnowledgeBase::open(&references_dir) {
-        Ok(kb) => kb,
-        Err(e) => {
-            tracing::warn!(
-                references_dir = %references_dir.display(),
-                "文献知识库打开失败，跳过 literature_search 工具: {e}"
-            );
-            return Ok(());
-        }
-    };
-
-    let kb = match crate::builtin_providers::embedding::build_embedding_router(llm) {
-        Some(router) => kb.with_embedding_provider(Arc::new(router)),
-        None => kb,
-    };
-
-    registry
-        .register(Arc::new(agent_tools::literature::LiteratureSearchTool::new(
-            kb,
-        )))
-        .map_err(|e| AgentBuildError::ToolRegistry(e.to_string()))?;
-
-    Ok(())
 }
 
 // ===========================================================================
@@ -318,12 +268,15 @@ fn register_literature_search(
 /// 构建指定子智能体的运行时。
 ///
 /// 使用 LLM 全局激活项（子智能体不覆盖 provider/model），
-/// 装配该智能体专属的工具集与系统提示词。
+/// 装配该智能体专属的工具集与系统提示词；`sink` 非空时
+/// 工具集整体经 [`observe_registry`] 包装，向调用方上报
+/// 工具调用的开始/结束（子智能体运行可观测性）。
 pub fn build_agent_runtime(
     agent_id: &AgentId,
     llm: &LlmConfig,
     project_path: &str,
     approver: Arc<dyn Approver>,
+    sink: Option<Arc<dyn ToolEventSink>>,
 ) -> Result<(bool, FluenRuntime), AgentBuildError> {
     let def = find_agent_def(agent_id).ok_or_else(|| {
         AgentBuildError::LlmConfig(format!("未知子智能体: {}", agent_id))
@@ -336,14 +289,25 @@ pub fn build_agent_runtime(
 
     let thinking_enabled = provider.model_supports_thinking(&model_id);
 
-    let llm_provider = llm_chat::build_llm_provider(provider, &model_id)
-        .map_err(|e| AgentBuildError::LlmConfig(e.to_string()))?;
+    // HTTP 兜底超时大于引擎单轮超时（见 timeouts 分层）
+    let llm_provider = llm_chat::build_llm_provider_with_timeout(
+        provider,
+        &model_id,
+        LLM_HTTP_TIMEOUT,
+    )
+    .map_err(|e| AgentBuildError::LlmConfig(e.to_string()))?;
 
-    // 构建工具集
+    // 构建工具集（可选整体观测包装）
     let registry = (def.build_tools)(project_path, llm, approver)?;
+    let registry = match sink {
+        Some(sink) => observe_registry(&registry, sink),
+        None => registry,
+    };
 
+    // 引擎单轮 LLM 超时放宽至 5 分钟（学术写作长生成），见 timeouts 分层
     let runtime = FluenRuntimeBuilder::new(llm_provider)
-        .with_tools(registry, crate::agent_runtime::approval::approval_executor())
+        .with_config(motis_engine_config())
+        .with_tools(registry, crate::agent_runtime::approval::approval_executor(SUBAGENT_TOOL_TIMEOUT))
         .build();
 
     Ok((thinking_enabled, runtime))

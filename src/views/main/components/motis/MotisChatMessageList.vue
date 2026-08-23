@@ -97,6 +97,9 @@ const showTrailingThinking = computed(() => {
 /**
  * 将消息折叠为渲染块：连续的 thinking / tool_call 合并为一个活动分组，
  * 文本与状态消息保持单条渲染。分组的 key 取组内首条消息 id。
+ *
+ * 纯空白的 assistant 文本消息不生成渲染块（防御性兜底：流式首帧空白
+ * 等场景产生的空消息既无内容又会隔断活动分组的连续性）。
  */
 const blocks = computed<RenderBlock[]>(() => {
   const out: RenderBlock[] = [];
@@ -112,6 +115,9 @@ const blocks = computed<RenderBlock[]>(() => {
       if (activity === null) activity = [];
       activity.push(msg);
     } else {
+      if (msg.kind === 'text' && msg.role === 'assistant' && !msg.content.trim()) {
+        continue;
+      }
       flush();
       out.push({ type: 'msg', key: msg.id, msg });
     }

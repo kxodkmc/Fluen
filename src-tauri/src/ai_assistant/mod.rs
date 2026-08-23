@@ -12,7 +12,7 @@
 //! |------|----------------|----------|
 //! | 模型来源 | MascotConfig 优先，回退全局 | 直接使用 LLM 全局激活项 |
 //! | 提示词 | 宠物人格 + 学术辅助 | 学术写作 profile（fluen-markup 规范） |
-//! | 工具 | paper_content + project_file | 论文写作工具（paper_content / literature_search / manuscript / project_file） |
+//! | 工具 | paper_outline / paper_section + project_read | 论文写作工具（paper_outline / paper_section / literature_search / manuscript / project_read / project_write / project_edit） |
 //! | 审批 | 写操作弹窗确认 | 写操作弹窗确认（共享审批通道） |
 //! | 事件前缀 | `motis:*` | `ai-assistant:*` |
 //!

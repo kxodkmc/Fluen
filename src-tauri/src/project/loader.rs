@@ -204,8 +204,7 @@ fn assemble_main_md(sections: &[SectionMeta], contents: &[SectionContent]) -> St
 /// 将主文档内容写入 `manuscript/main.md`。
 pub fn write_main_md(project_dir: &Path, content: &str) -> Result<(), ProjectError> {
     let path = main_md_path(project_dir);
-    std::fs::write(path, content)?;
-    Ok(())
+    super::atomic::atomic_write(&path, content.as_bytes())
 }
 
 // ---------------------------------------------------------------------------

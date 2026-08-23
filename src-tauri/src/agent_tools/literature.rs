@@ -14,11 +14,13 @@ use fluen_knowledge::types::{RetrievalMethod, WikiType};
 use referee_ai::tool::{Tool, ToolContext, ToolError, ToolOutput};
 use serde_json::{json, Value};
 
+use crate::llm_config::model::LlmConfig;
+
 /// 工具名称。
 pub const LITERATURE_SEARCH_TOOL_NAME: &str = "literature_search";
 
 /// 工具描述。
-const DESCRIPTION: &str = "搜索文献知识库：默认混合检索（关键词 + 语义向量），最多返回 4 条最相关的知识条目（文献综述 / 概念 / 实体），每条含 id、标题、类型与相关性评分。搜索前可先调用 paper_content 了解论文主题。";
+const DESCRIPTION: &str = "搜索文献知识库：默认混合检索（关键词 + 语义向量），最多返回 4 条最相关的知识条目（文献综述 / 概念 / 实体），每条含 id、标题、类型与相关性评分。搜索前可先调用 paper_outline 了解论文主题。";
 
 /// 默认返回结果数上限（最多返回 4 条）。
 const DEFAULT_TOP_K: usize = 4;
@@ -56,6 +58,36 @@ impl LiteratureSearchTool {
 
         Self { parameters, kb }
     }
+}
+
+/// 打开项目文献知识库（供运行时装配使用）。
+///
+/// - `<project>/references/wiki/index.db` 不存在时返回 `None`（知识库尚未构建，
+///   属正常状态，静默跳过）；
+/// - 打开失败（索引损坏等）仅告警并返回 `None`，不阻断助手启动；
+/// - 成功时注入 embedding router 启用语义检索（未配置 embedding 时由
+///   fluen-knowledge 自动降级为关键词检索）。
+pub fn open_kb(project_path: &str, llm: &LlmConfig) -> Option<AsyncKnowledgeBase> {
+    let references_dir = std::path::PathBuf::from(project_path).join("references");
+    if !references_dir.join("wiki").join("index.db").is_file() {
+        return None;
+    }
+
+    let kb = match AsyncKnowledgeBase::open(&references_dir) {
+        Ok(kb) => kb,
+        Err(e) => {
+            tracing::warn!(
+                references_dir = %references_dir.display(),
+                "文献知识库打开失败，跳过 literature_search 工具: {e}"
+            );
+            return None;
+        }
+    };
+
+    Some(match crate::builtin_providers::embedding::build_embedding_router(llm) {
+        Some(router) => kb.with_embedding_provider(std::sync::Arc::new(router)),
+        None => kb,
+    })
 }
 
 #[async_trait]
@@ -128,13 +160,14 @@ impl Tool for LiteratureSearchTool {
             .map_err(|e| ToolError::Execution(format!("文献检索失败: {}", e)))?;
 
         Ok(ToolOutput::from_json(&json!({
+            "success": true,
             "method": result.retrieval_method_used.as_str(),
             "count": result.results.len(),
             "results": result.results.iter().map(|m| json!({
                 "id": m.wiki_id,
                 "type": m.wiki_type,
                 "title": m.title,
-                "score": format!("{:.3}", m.score),
+                "score": (m.score * 1000.0).round() / 1000.0,
                 "content": m.content,
             })).collect::<Vec<_>>()
         })))
@@ -219,6 +252,7 @@ mod tests {
         let tool = LiteratureSearchTool::new(kb);
 
         let result = output_json(tool.execute(ctx(), json!({ "query": "机器学习" })).await.unwrap());
+        assert_eq!(result["success"], true);
         assert_eq!(result["count"], 0);
         assert!(result["results"].as_array().unwrap().is_empty());
 
@@ -254,12 +288,12 @@ mod tests {
         assert!(result["count"].as_u64().unwrap() <= 4);
         assert_eq!(result["count"], result["results"].as_array().unwrap().len() as u64);
 
-        // 每条含 id / title / type / score
+        // 每条含 id / title / type / score（score 为数值，遵循设计约定）
         for item in result["results"].as_array().unwrap() {
             assert!(item["id"].is_string());
             assert!(item["title"].is_string());
             assert!(item["type"].is_string());
-            assert!(item["score"].is_string());
+            assert!(item["score"].is_number(), "score 应为数值: {}", item["score"]);
         }
 
         let _ = fs::remove_dir_all(&dir);
@@ -289,6 +323,22 @@ mod tests {
                 .unwrap(),
         );
         assert!(result["count"].as_u64().unwrap() >= 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_kb_missing_returns_none_and_init_succeeds() {
+        let dir = temp_kb_dir();
+        let llm = LlmConfig::default();
+
+        // 知识库不存在：静默返回 None（正常状态）
+        assert!(open_kb(dir.to_str().unwrap(), &llm).is_none());
+
+        // init 后 wiki/index.db 落位，可正常打开
+        let references = dir.join("references");
+        AsyncKnowledgeBase::init(&references).unwrap();
+        assert!(open_kb(dir.to_str().unwrap(), &llm).is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }

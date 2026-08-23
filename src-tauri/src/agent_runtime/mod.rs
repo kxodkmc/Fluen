@@ -15,11 +15,13 @@
 //! |--------|------|
 //! | [`builder`] | FluenRuntime 构建器（provider + config + 工具注册） |
 //! | [`approval`] | 工具审批装饰器（[`approval::ApprovalGuard`] + [`approval::Approver`]） |
+//! | [`observability`] | 工具观测装饰器（[`observability::ObservedTool`] + [`observability::ToolEventSink`]） |
 //! | [`error`] | 运行时错误类型 |
 
 pub mod approval;
 pub mod builder;
 pub mod error;
+pub mod observability;
 
 #[allow(unused)]
 pub use builder::FluenRuntimeBuilder;

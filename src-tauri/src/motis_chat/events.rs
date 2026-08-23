@@ -14,6 +14,18 @@
 //! motis:finish           →  完成事件（携带最终结果与 token 用量）
 //! motis:error            →  错误事件（流终止时发送）
 //! ```
+//!
+//! ## 子智能体事件（委派过程可观测）
+//!
+//! ```text
+//! motis:agent-started      →  委派发起（目标子智能体 + 任务 + 超时预算）
+//! motis:agent-tool-call    →  子智能体内部工具调用开始
+//! motis:agent-tool-result  →  子智能体内部工具调用结束（含结果/耗时）
+//! motis:agent-finished     →  委派结束（成功带 token，失败带原因与耗时）
+//! ```
+//!
+//! 子智能体事件均携带父级 `delegate_agent` 的 `tool_call_id`，
+//! 前端据此关联到对应工具调用消息（见 `agent_reporter`）。
 
 use serde::Serialize;
 
@@ -39,6 +51,22 @@ pub const EVENT_FINISH: &str = "motis:finish";
 
 /// 错误事件——流式执行中出现错误。
 pub const EVENT_ERROR: &str = "motis:error";
+
+/// 子智能体委派发起事件——目标子智能体开始执行任务。
+pub const EVENT_AGENT_STARTED: &str = "motis:agent-started";
+
+/// 子智能体内部工具调用开始事件。
+pub const EVENT_AGENT_TOOL_CALL: &str = "motis:agent-tool-call";
+
+/// 子智能体内部工具调用结束事件——携带结果与耗时。
+pub const EVENT_AGENT_TOOL_RESULT: &str = "motis:agent-tool-result";
+
+/// 子智能体委派结束事件——成功带 token 用量，失败带原因，均带耗时。
+pub const EVENT_AGENT_FINISHED: &str = "motis:agent-finished";
+
+/// 论文正文变更事件——AI 经 `manuscript` 工具写入正文成功后通知
+/// 前端重新拉取项目内容（编辑器 / 预览 / 大纲自动跟随）。
+pub const EVENT_PROJECT_UPDATED: &str = "motis:project-updated";
 
 // ===== 事件 payload =====
 
@@ -107,4 +135,70 @@ pub struct FinishPayload {
 pub struct ErrorPayload {
     /// 错误信息。
     pub message: String,
+}
+
+// ===== 子智能体事件 payload =====
+
+/// 子智能体委派发起 payload。
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentStartedPayload {
+    /// 父级 `delegate_agent` 工具调用 ID（与 tool-call 事件的 id 一致）。
+    pub tool_call_id: String,
+    /// 目标子智能体 ID（如 `academic_writer`）。
+    pub agent_id: String,
+    /// 派发的任务描述。
+    pub task: String,
+    /// 委派超时预算（毫秒）。
+    pub timeout_ms: u64,
+}
+
+/// 子智能体内部工具调用 payload。
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentToolCallPayload {
+    /// 父级 `delegate_agent` 工具调用 ID。
+    pub tool_call_id: String,
+    /// 子智能体 ID。
+    pub agent_id: String,
+    /// 子智能体会话内的工具调用 ID（与 tool-result 事件关联）。
+    pub id: String,
+    /// 工具名称。
+    pub name: String,
+    /// 工具调用参数（JSON）。
+    pub input: serde_json::Value,
+}
+
+/// 子智能体内部工具调用结果 payload。
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentToolResultPayload {
+    /// 父级 `delegate_agent` 工具调用 ID。
+    pub tool_call_id: String,
+    /// 子智能体 ID。
+    pub agent_id: String,
+    /// 子智能体会话内的工具调用 ID（与 tool-call 事件关联）。
+    pub id: String,
+    /// 工具名称。
+    pub name: String,
+    /// 是否成功。
+    pub ok: bool,
+    /// 执行耗时（毫秒）。
+    pub duration_ms: u64,
+    /// 工具输出（文本或错误信息，超长已截断）。
+    pub result: serde_json::Value,
+}
+
+/// 子智能体委派结束 payload。
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentFinishedPayload {
+    /// 父级 `delegate_agent` 工具调用 ID。
+    pub tool_call_id: String,
+    /// 子智能体 ID。
+    pub agent_id: String,
+    /// 是否成功完成。
+    pub ok: bool,
+    /// 委派总耗时（毫秒）。
+    pub duration_ms: u64,
+    /// 成功时的 token 用量（失败/超时为 `None`）。
+    pub tokens_used: Option<usize>,
+    /// 失败原因（成功为 `None`）。
+    pub error: Option<String>,
 }

@@ -1,6 +1,7 @@
 //! 论文内容解析——从 `main.md` 提取大纲与章节内容的纯函数层。
 //!
-//! 供智能体工具 [`crate::agent_tools::paper::PaperContentTool`] 复用，
+//! 供智能体工具 [`crate::agent_tools::paper::outline::PaperOutlineTool`] /
+//! [`crate::agent_tools::paper::section::PaperSectionTool`] 复用，
 //! 解析规则与前端 `outlineParser.ts` 保持一致：
 //! - 识别 `#` ~ `######` 开头的行为 H1-H6 标题
 //! - 忽略代码块内的 `#` 行（``` / ~~~ 围栏包裹）

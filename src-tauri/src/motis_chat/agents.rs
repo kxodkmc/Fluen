@@ -9,7 +9,9 @@
 //!
 //! | ID | 名称 | 职责 | 工具集 |
 //! |----|------|------|--------|
-//! | `academic_writer` | 学术撰写助手 | 撰写格式规范的论文正文 | paper_outline / paper_section / literature_search / manuscript / project_read / project_write / project_edit |
+//! | `essay_writing` | 论文撰写助手 | 撰写人类式、可通过检验的学术正文（LVRV1 写作规范） | paper_outline / paper_section / literature_search / manuscript / project_read / project_write / project_edit |
+//! | `essay_review` | 论文审核助手 | 论文审核（功能开发中，暂不可用） | paper_outline / paper_section / literature_search / project_read |
+//! | `essay_critique` | 论文思辨助手 | 引导论文思辨讨论，客观基于证据，不负责成文 | paper_outline / paper_section / literature_search / project_read |
 //! | `knowledge_builder` | 知识库构建助手 | 构建与查询文献知识库 | literature_search / project_read / project_write / project_edit |
 //! | `data_analyst` | 数据分析助手 | 统计分析与数据可视化 | project_read / project_write / project_edit（数据分析工具为独立 Tauri 命令通道，未注册为智能体工具） |
 //!
@@ -23,20 +25,27 @@ use std::sync::Arc;
 use referee_ai::tool::ToolRegistry;
 
 use crate::agent_runtime::approval::Approver;
-use crate::agent_runtime::observability::{observe_registry, ToolEventSink};
+use crate::agent_runtime::observability::observe_registry;
 use crate::agent_runtime::{FluenRuntime, FluenRuntimeBuilder};
 use crate::agent_tools;
 use crate::llm_chat;
 use crate::llm_config::model::LlmConfig;
 
-use super::timeouts::{motis_engine_config, LLM_HTTP_TIMEOUT, SUBAGENT_TOOL_TIMEOUT};
+use super::agent_reporter::AgentReporter;
+use super::timeouts::{
+    motis_engine_config, LLM_HTTP_TIMEOUT, SUBAGENT_AWAITING_TIMEOUT, SUBAGENT_TOOL_TIMEOUT,
+};
 
 /// 子智能体 ID（固定字符串，前端配置与后端注册一致）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentId {
-    /// 学术撰写助手——撰写格式规范的论文正文。
-    AcademicWriter,
+    /// 论文撰写助手——撰写人类式、可通过检验的学术正文。
+    EssayWriting,
+    /// 论文审核助手——审核论文（功能开发中，占位）。
+    EssayReview,
+    /// 论文思辨助手——客观引导论文讨论，不负责成文。
+    EssayCritique,
     /// 知识库构建助手——构建与查询文献知识库。
     KnowledgeBuilder,
     /// 数据分析助手——统计分析与数据可视化。
@@ -47,7 +56,9 @@ impl AgentId {
     /// 返回用于工具名与配置文件的字符串 ID。
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::AcademicWriter => "academic_writer",
+            Self::EssayWriting => "essay_writing",
+            Self::EssayReview => "essay_review",
+            Self::EssayCritique => "essay_critique",
             Self::KnowledgeBuilder => "knowledge_builder",
             Self::DataAnalyst => "data_analyst",
         }
@@ -56,7 +67,9 @@ impl AgentId {
     /// 从字符串解析（配置文件中存储为字符串）。
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "academic_writer" => Some(Self::AcademicWriter),
+            "essay_writing" => Some(Self::EssayWriting),
+            "essay_review" => Some(Self::EssayReview),
+            "essay_critique" => Some(Self::EssayCritique),
             "knowledge_builder" => Some(Self::KnowledgeBuilder),
             "data_analyst" => Some(Self::DataAnalyst),
             _ => None,
@@ -66,7 +79,9 @@ impl AgentId {
     /// 返回全部已知子智能体 ID。
     pub fn all() -> &'static [AgentId] {
         &[
-            Self::AcademicWriter,
+            Self::EssayWriting,
+            Self::EssayReview,
+            Self::EssayCritique,
             Self::KnowledgeBuilder,
             Self::DataAnalyst,
         ]
@@ -115,11 +130,25 @@ pub enum AgentBuildError {
 pub fn all_agent_defs() -> &'static [AgentDef] {
     &[
         AgentDef {
-            id: AgentId::AcademicWriter,
-            name: "学术撰写助手",
-            description: "撰写格式规范的论文正文（遵循 fluen-markup 规范），可读取论文内容、检索文献、写入正文。",
-            build_prompt: build_academic_writer_prompt,
-            build_tools: build_academic_writer_tools,
+            id: AgentId::EssayWriting,
+            name: "论文撰写助手",
+            description: "撰写人类式、可通过检验的学术正文（遵循 LVRV1 人类式写作规范与 fluen-markup），可读取论文、检索文献、写入正文。",
+            build_prompt: build_essay_writing_prompt,
+            build_tools: build_essay_writing_tools,
+        },
+        AgentDef {
+            id: AgentId::EssayReview,
+            name: "论文审核助手",
+            description: "审核论文（功能开发中，暂不可用——收到审核任务时如实告知并引导至撰写/思辨助手）。",
+            build_prompt: build_essay_review_prompt,
+            build_tools: build_essay_review_tools,
+        },
+        AgentDef {
+            id: AgentId::EssayCritique,
+            name: "论文思辨助手",
+            description: "客观、基于现实证据地引导论文思辨讨论（梳理论点/结构/争议），不负责成文。",
+            build_prompt: build_essay_critique_prompt,
+            build_tools: build_essay_critique_tools,
         },
         AgentDef {
             id: AgentId::KnowledgeBuilder,
@@ -162,8 +191,16 @@ pub fn enabled_agents_description(enabled_agents: &[String]) -> String {
 // 系统提示词构建
 // ===========================================================================
 
-fn build_academic_writer_prompt() -> String {
-    crate::ai_assistant::prompt::build_system_prompt()
+fn build_essay_writing_prompt() -> String {
+    crate::agent_prompts::writing::system()
+}
+
+fn build_essay_review_prompt() -> String {
+    crate::agent_prompts::review::system()
+}
+
+fn build_essay_critique_prompt() -> String {
+    crate::agent_prompts::critique::system()
 }
 
 fn build_knowledge_builder_prompt() -> String {
@@ -195,9 +232,9 @@ fn build_data_analyst_prompt() -> String {
 // 工具注册函数
 // ===========================================================================
 
-/// 学术撰写助手工具集：paper_outline / paper_section / literature_search /
+/// 论文撰写助手工具集：paper_outline / paper_section / literature_search /
 /// manuscript / project_read / project_write / project_edit。
-fn build_academic_writer_tools(
+fn build_essay_writing_tools(
     project_path: &str,
     llm: &LlmConfig,
     approver: Arc<dyn Approver>,
@@ -219,6 +256,46 @@ fn build_academic_writer_tools(
     // 读写：项目内文件三件套（写/编辑需审批；正文 main.md 写保护）
     agent_tools::assemble::register_project_files(&registry, project_path, approver)
         .map_err(reg_err)?;
+
+    Ok(registry)
+}
+
+/// 论文审核助手工具集（占位）：仅只读——paper_outline / paper_section /
+/// literature_search / project_read，不装配任何写工具。
+fn build_essay_review_tools(
+    project_path: &str,
+    llm: &LlmConfig,
+    approver: Arc<dyn Approver>,
+) -> Result<ToolRegistry, AgentBuildError> {
+    build_readonly_essay_tools(project_path, llm, approver)
+}
+
+/// 论文思辨助手工具集（只读）：paper_outline / paper_section /
+/// literature_search / project_read——不装配任何写工具，恪守"不负责写作"。
+fn build_essay_critique_tools(
+    project_path: &str,
+    llm: &LlmConfig,
+    approver: Arc<dyn Approver>,
+) -> Result<ToolRegistry, AgentBuildError> {
+    build_readonly_essay_tools(project_path, llm, approver)
+}
+
+/// 只读不写工具集公共装配：论文读取 + 文献检索 + 项目只读。
+/// 供审核/思辨等不落盘角色复用，杜绝写工具误配。
+fn build_readonly_essay_tools(
+    project_path: &str,
+    llm: &LlmConfig,
+    approver: Arc<dyn Approver>,
+) -> Result<ToolRegistry, AgentBuildError> {
+    let registry = ToolRegistry::with_defaults();
+    let reg_err = |e: referee_ai::tool::RegistryError| {
+        AgentBuildError::ToolRegistry(e.to_string())
+    };
+
+    agent_tools::assemble::register_paper_readers(&registry, project_path).map_err(reg_err)?;
+    agent_tools::assemble::register_literature_search(&registry, project_path, llm)
+        .map_err(reg_err)?;
+    agent_tools::assemble::register_project_read(&registry, project_path).map_err(reg_err)?;
 
     Ok(registry)
 }
@@ -268,15 +345,16 @@ fn build_data_analyst_tools(
 /// 构建指定子智能体的运行时。
 ///
 /// 使用 LLM 全局激活项（子智能体不覆盖 provider/model），
-/// 装配该智能体专属的工具集与系统提示词；`sink` 非空时
-/// 工具集整体经 [`observe_registry`] 包装，向调用方上报
-/// 工具调用的开始/结束（子智能体运行可观测性）。
+/// 装配该智能体专属的工具集与系统提示词；`reporter` 非空时：
+/// - 工具集整体经 [`observe_registry`] 包装，上报工具调用的开始/结束；
+/// - 引擎注入 [`EngineObserver`](referee_ai::EngineObserver)（即 reporter 本身），
+///   透传子智能体 LLM 思考/文本增量，并兜底上报执行器折叠的工具失败。
 pub fn build_agent_runtime(
     agent_id: &AgentId,
     llm: &LlmConfig,
     project_path: &str,
     approver: Arc<dyn Approver>,
-    sink: Option<Arc<dyn ToolEventSink>>,
+    reporter: Option<Arc<AgentReporter>>,
 ) -> Result<(bool, FluenRuntime), AgentBuildError> {
     let def = find_agent_def(agent_id).ok_or_else(|| {
         AgentBuildError::LlmConfig(format!("未知子智能体: {}", agent_id))
@@ -299,18 +377,20 @@ pub fn build_agent_runtime(
 
     // 构建工具集（可选整体观测包装）
     let registry = (def.build_tools)(project_path, llm, approver)?;
-    let registry = match sink {
-        Some(sink) => observe_registry(&registry, sink),
+    let registry = match reporter {
+        Some(ref r) => observe_registry(&registry, r.clone()),
         None => registry,
     };
 
-    // 引擎单轮 LLM 超时放宽至 5 分钟（学术写作长生成），见 timeouts 分层
-    let runtime = FluenRuntimeBuilder::new(llm_provider)
-        .with_config(motis_engine_config())
-        .with_tools(registry, crate::agent_runtime::approval::approval_executor(SUBAGENT_TOOL_TIMEOUT))
-        .build();
+    let mut builder = FluenRuntimeBuilder::new(llm_provider)
+        // 引擎单轮 LLM 超时放宽至 5 分钟（学术写作长生成），见 timeouts 分层
+        .with_config(motis_engine_config(SUBAGENT_AWAITING_TIMEOUT))
+        .with_tools(registry, crate::agent_runtime::approval::approval_executor(SUBAGENT_TOOL_TIMEOUT));
+    if let Some(reporter) = reporter {
+        builder = builder.with_observer(reporter);
+    }
 
-    Ok((thinking_enabled, runtime))
+    Ok((thinking_enabled, builder.build()))
 }
 
 /// 返回子智能体的系统提示词。
@@ -350,15 +430,17 @@ mod tests {
 
     #[test]
     fn find_def_returns_correct_agent() {
-        let def = find_agent_def(&AgentId::AcademicWriter).unwrap();
-        assert_eq!(def.id, AgentId::AcademicWriter);
+        let def = find_agent_def(&AgentId::EssayWriting).unwrap();
+        assert_eq!(def.id, AgentId::EssayWriting);
         assert!(!def.name.is_empty());
         assert!(!def.description.is_empty());
     }
 
     #[test]
     fn prompts_are_nonempty() {
-        assert!(!build_academic_writer_prompt().is_empty());
+        assert!(!build_essay_writing_prompt().is_empty());
+        assert!(!build_essay_review_prompt().is_empty());
+        assert!(!build_essay_critique_prompt().is_empty());
         assert!(!build_knowledge_builder_prompt().is_empty());
         assert!(!build_data_analyst_prompt().is_empty());
     }

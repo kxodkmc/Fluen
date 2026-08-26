@@ -1,10 +1,17 @@
 //! 工具观测装饰器——把工具执行的开始/结束上报给外部接收器。
 //!
-//! referee 的工具系统没有执行期钩子（`ExecutorConfig` 亦无可注入回调），
-//! 可观测性通过**装饰器**实现：[`ObservedTool`] 包装任意工具，
-//! `execute` 前后调用 [`ToolEventSink`] 上报——对引擎与 LLM 完全透明
-//! （声明信息全部转发被包装工具），与 [`ApprovalGuard`](super::approval::ApprovalGuard)
-//! 同构。
+//! referee 引擎自 0.4 起提供 [`EngineObserver`](referee_ai::EngineObserver)
+//! 事件钩子（回合起止 / LLM 增量 / 工具执行分类），但工具事件**不携带
+//! 输入参数与输出内容**（仅有分类与耗时）——前端时间线所需的完整
+//! 参数/结果数据仍由本装饰器承载，故**保留**：
+//!
+//! - **正常路径**：[`ObservedTool`] 包装任意工具，`execute` 前后调用
+//!   [`ToolEventSink`] 上报完整输入与结果文本——对引擎与 LLM 完全透明
+//!   （声明信息全部转发被包装工具），与 [`ApprovalGuard`](super::approval::ApprovalGuard)
+//!   同构；
+//! - **失败兜底**：执行器层折叠的失败（超时 / panic / 未注册 / 许可不可用 /
+//!   批次收敛）发生在装饰器完成之前或之外，由 `AgentReporter` 的
+//!   `on_tool_finished` 钩子按分类兜底上报（见 `motis_chat::agent_reporter`）。
 //!
 //! ## 注册表级包装
 //!

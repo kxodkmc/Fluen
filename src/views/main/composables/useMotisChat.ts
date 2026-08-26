@@ -15,7 +15,7 @@
  * motis:tool-call   →  工具调用（追加 tool_call 消息 + 更新气泡）
  * motis:tool-result →  工具执行结果（按 tool_call_id 关联到工具消息）
  * motis:agent-*     →  子智能体委派过程（挂到工具消息的 agentRun：
- *                      started / tool-call / tool-result / finished）
+ *                      started / thought / text / tool-call / tool-result / finished）
  * motis:finish      →  完成（结束流式状态 + 清空气泡）
  * motis:error      →  错误（追加状态消息 + 标记中断 + 清空气泡）
  * ```
@@ -82,6 +82,12 @@ interface AgentStartedPayload {
   agent_id: string;
   task: string;
   timeout_ms: number;
+}
+/** 子智能体输出增量（思考 / 文本共用，与后端 events.rs 对齐）。 */
+interface AgentDeltaPayload {
+  tool_call_id: string;
+  agent_id: string;
+  delta: string;
 }
 interface AgentToolCallPayload {
   tool_call_id: string;
@@ -378,6 +384,22 @@ export function useMotisChat() {
     };
   }
 
+  /** 子智能体思考增量 — 依 show_thinking_content 决定是否累积到 agentRun.thought。 */
+  function onAgentThought(payload: AgentDeltaPayload): void {
+    if (!config.show_thinking_content || payload.delta.length === 0) return;
+    const msg = findDelegationMessage(payload.tool_call_id);
+    if (!msg?.agentRun) return;
+    msg.agentRun.thought = (msg.agentRun.thought ?? '') + payload.delta;
+  }
+
+  /** 子智能体文本增量 — 累积到 agentRun.text（实时写作内容）。 */
+  function onAgentText(payload: AgentDeltaPayload): void {
+    if (payload.delta.length === 0) return;
+    const msg = findDelegationMessage(payload.tool_call_id);
+    if (!msg?.agentRun) return;
+    msg.agentRun.text = (msg.agentRun.text ?? '') + payload.delta;
+  }
+
   /** 子智能体内部工具调用 — 追加活动条目（数组引用整体替换）。 */
   function onAgentToolCall(payload: AgentToolCallPayload): void {
     const msg = findDelegationMessage(payload.tool_call_id);
@@ -471,6 +493,8 @@ export function useMotisChat() {
       listen<ToolResultPayload>('motis:tool-result', (e) => onToolResult(e.payload)),
       listen<ApprovalRequestPayload>('motis:approval-request', (e) => onApprovalRequest(e.payload)),
       listen<AgentStartedPayload>('motis:agent-started', (e) => onAgentStarted(e.payload)),
+      listen<AgentDeltaPayload>('motis:agent-thought', (e) => onAgentThought(e.payload)),
+      listen<AgentDeltaPayload>('motis:agent-text', (e) => onAgentText(e.payload)),
       listen<AgentToolCallPayload>('motis:agent-tool-call', (e) => onAgentToolCall(e.payload)),
       listen<AgentToolResultPayload>('motis:agent-tool-result', (e) => onAgentToolResult(e.payload)),
       listen<AgentFinishedPayload>('motis:agent-finished', (e) => onAgentFinished(e.payload)),

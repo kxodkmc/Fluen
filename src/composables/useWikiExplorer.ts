@@ -6,10 +6,14 @@
  *   - 条目详情获取（`knowledge_get_entry`，含正文/标签名/关联标题）
  *   - 关键词/语义/混合检索（`knowledge_query`）
  *   - 元信息查询（`knowledge_meta`：overview / tags / recent）
+ *   - 监听 `kb-build:*` 终态事件自动刷新列表（构建入库后界面实时更新）
  *
  * 设计要点：
  *   - **模块级单例状态**：`entries` / `meta` 跨组件共享，
  *     KnowledgeBasePanel 卸载重建后列表不丢失。
+ *   - **构建后自动刷新**：构建任务是知识库唯一的写入方，
+ *     其终态事件（completed/failed/cancelled，失败也可能已写入部分条目）
+ *     触发后自动重载最近一次加载的项目条目，所有消费方同步更新。
  *   - **无状态查询**：`loadEntry` / `search` 不写入模块级状态，
  *     由调用方（WikiReader 等）自行管理局部状态，避免多实例冲突。
  *   - 非错误：知识库未初始化时 `loadEntries` 返回空数组并标记 `notInitialized`。
@@ -31,6 +35,7 @@
 
 import { ref, readonly } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 import type {
   MetaData,
@@ -68,11 +73,55 @@ const notInitialized = ref(false);
 /** 元信息缓存（overview 查询结果）。 */
 const meta = ref<MetaData | null>(null);
 
+/** 最近一次加载条目的项目路径（构建终态事件触发自动刷新时使用）。 */
+let lastProjectPath: string | null = null;
+
+/** 自动刷新事件监听是否已注册（幂等保护）。 */
+let autoRefreshReady = false;
+
+/** 自动刷新事件监听的取消函数。 */
+const autoRefreshUnlisten: UnlistenFn[] = [];
+
+/**
+ * kb-build 终态事件（与后端 events.rs 保持一致）。
+ *
+ * 构建任务是知识库唯一写入方；失败/取消也可能已写入部分条目，均需刷新。
+ */
+const KB_BUILD_TERMINAL_EVENTS = [
+  'kb-build:completed',
+  'kb-build:failed',
+  'kb-build:cancelled',
+] as const;
+
 // ---------------------------------------------------------------------------
 // Composable
 // ---------------------------------------------------------------------------
 
 export function useWikiExplorer() {
+  /* ── 构建后自动刷新 ─────────────────────────────────────────────────── */
+
+  /**
+   * 注册 kb-build 终态事件监听（幂等，模块级单例）。
+   *
+   * 事件到达时重载最近一次加载的项目的条目列表；
+   * 从未加载过（lastProjectPath 为空）则忽略。
+   */
+  async function setupAutoRefresh(): Promise<void> {
+    if (!isTauriEnvironment() || autoRefreshReady) return;
+    autoRefreshReady = true;
+    for (const event of KB_BUILD_TERMINAL_EVENTS) {
+      autoRefreshUnlisten.push(
+        await listen(event, () => {
+          if (lastProjectPath) {
+            void loadEntries(lastProjectPath);
+          }
+        }),
+      );
+    }
+  }
+
+  void setupAutoRefresh();
+
   /* ── 命令封装 ───────────────────────────────────────────────────────── */
 
   /**
@@ -89,6 +138,7 @@ export function useWikiExplorer() {
       entries.value = [];
       return [];
     }
+    lastProjectPath = projectPath;
     loading.value = true;
     error.value = '';
     notInitialized.value = false;
@@ -214,6 +264,16 @@ export function useWikiExplorer() {
     error.value = '';
     notInitialized.value = false;
     meta.value = null;
+    lastProjectPath = null;
+  }
+
+  /** 清除自动刷新监听（通常仅在应用卸载时调用）。 */
+  function cleanupAutoRefresh(): void {
+    for (const unlisten of autoRefreshUnlisten) {
+      unlisten();
+    }
+    autoRefreshUnlisten.length = 0;
+    autoRefreshReady = false;
   }
 
   return {
@@ -230,5 +290,7 @@ export function useWikiExplorer() {
     search,
     loadMeta,
     reset,
+    // 事件管理
+    cleanupAutoRefresh,
   };
 }

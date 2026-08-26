@@ -70,7 +70,9 @@ const PAPER_OUTLINE_OBJECT_KEY = 'main.motisPanel.activity.paperOutline';
 
 /** agent_id → 智能体显示名 i18n key（settings.motis.agents.*）。 */
 const AGENT_NAME_KEYS: Record<string, string> = {
-  academic_writer: 'settings.motis.agents.academicWriter',
+  essay_writing: 'settings.motis.agents.essayWriting',
+  essay_review: 'settings.motis.agents.essayReview',
+  essay_critique: 'settings.motis.agents.essayCritique',
   knowledge_builder: 'settings.motis.agents.knowledgeBuilder',
   data_analyst: 'settings.motis.agents.dataAnalyst',
 };

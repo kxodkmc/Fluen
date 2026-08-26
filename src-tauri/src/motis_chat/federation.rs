@@ -30,9 +30,9 @@ use referee_core::{CapabilityId, Kernel};
 use tokio::sync::RwLock;
 
 use crate::agent_runtime::approval::Approver;
-use crate::agent_runtime::observability::ToolEventSink;
 use crate::llm_config::model::LlmConfig;
 
+use super::agent_reporter::AgentReporter;
 use super::agents::{self, AgentId, AgentBuildError};
 
 /// 每个扩展的入站队列容量（委派为低频操作，小队列即可）。
@@ -137,8 +137,8 @@ pub struct Federation {
 impl Federation {
     /// 构建联邦：为每个启用的子代理构建引擎并注册为内核扩展。
     ///
-    /// `tracker` 为进程级登记表（跨联邦重建共享）；`sink` 非空时
-    /// 子代理工具集整体观测包装，上报工具调用开始/结束。
+    /// `tracker` 为进程级登记表（跨联邦重建共享）；`reporter` 非空时
+    /// 子代理工具集整体观测包装，并注入引擎观测器（增量透传 + 失败兜底）。
     pub(crate) async fn build(
         llm: &LlmConfig,
         project_path: &str,
@@ -146,7 +146,7 @@ impl Federation {
         enabled_agents: &[String],
         fingerprint: u64,
         tracker: Arc<DelegationTracker>,
-        sink: Option<Arc<dyn ToolEventSink>>,
+        reporter: Option<Arc<AgentReporter>>,
     ) -> Result<Self, AgentBuildError> {
         let ids: Vec<AgentId> = if enabled_agents.is_empty() {
             AgentId::all().to_vec()
@@ -166,8 +166,13 @@ impl Federation {
 
         let mut agents = HashMap::new();
         for id in ids {
-            let (thinking_enabled, runtime) =
-                agents::build_agent_runtime(&id, llm, project_path, approver.clone(), sink.clone())?;
+            let (thinking_enabled, runtime) = agents::build_agent_runtime(
+                &id,
+                llm,
+                project_path,
+                approver.clone(),
+                reporter.clone(),
+            )?;
             let agent_rt =
                 AgentRuntime::new(runtime.engine().clone()).with_artifact_store(store.clone());
             kernel
@@ -274,14 +279,15 @@ impl FederationPool {
 
     /// 取当前指纹匹配的联邦，不存在则构建。
     ///
-    /// `sink` 为子代理工具事件接收器，仅在（重）构建联邦时注入工具集。
+    /// `reporter` 为子代理事件上报器（工具观测 + 引擎观测双通道），
+    /// 仅在（重）构建联邦时注入。
     pub async fn get_or_build(
         &self,
         llm: &LlmConfig,
         project_path: &str,
         approver: Arc<dyn Approver>,
         enabled_agents: &[String],
-        sink: Option<Arc<dyn ToolEventSink>>,
+        reporter: Option<Arc<AgentReporter>>,
     ) -> Result<Arc<Federation>, AgentBuildError> {
         let fp = fingerprint(llm, project_path, enabled_agents);
 
@@ -314,7 +320,7 @@ impl FederationPool {
                 enabled_agents,
                 fp,
                 self.tracker.clone(),
-                sink,
+                reporter,
             )
             .await?,
         );
@@ -364,7 +370,7 @@ mod tests {
         let tracker = DelegationTracker::new();
         let sid = uuid::Uuid::new_v4();
         let info = DelegationInfo {
-            agent_id: AgentId::AcademicWriter,
+            agent_id: AgentId::EssayWriting,
             parent_tool_call_id: "call-1".into(),
             task_preview: "撰写引言".into(),
             started_at: std::time::Instant::now(),
@@ -373,7 +379,7 @@ mod tests {
         tracker.track(sid, info.clone());
         let found = tracker.lookup(&sid).expect("tracked delegation missing");
         assert_eq!(found.parent_tool_call_id, "call-1");
-        assert_eq!(found.agent_id, AgentId::AcademicWriter);
+        assert_eq!(found.agent_id, AgentId::EssayWriting);
 
         let ended = tracker.end(&sid).expect("end returns delegation");
         assert_eq!(ended.parent_tool_call_id, "call-1");

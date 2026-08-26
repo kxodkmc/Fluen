@@ -41,7 +41,9 @@ export interface AgentOption {
 
 /** 内置子智能体选项列表。 */
 const AGENTS: AgentOption[] = [
-  { id: 'academic_writer', labelKey: 'academicWriter', descKey: 'academicWriterDesc' },
+  { id: 'essay_writing', labelKey: 'essayWriting', descKey: 'essayWritingDesc' },
+  { id: 'essay_review', labelKey: 'essayReview', descKey: 'essayReviewDesc' },
+  { id: 'essay_critique', labelKey: 'essayCritique', descKey: 'essayCritiqueDesc' },
   { id: 'knowledge_builder', labelKey: 'knowledgeBuilder', descKey: 'knowledgeBuilderDesc' },
   { id: 'data_analyst', labelKey: 'dataAnalyst', descKey: 'dataAnalystDesc' },
 ];

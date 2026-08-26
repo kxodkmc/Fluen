@@ -2,6 +2,7 @@
 #[allow(dead_code)]
 mod ai_assistant;
 mod ai_services;
+mod agent_prompts;
 mod agent_runtime;
 mod agent_tools;
 #[allow(dead_code)]

@@ -21,6 +21,7 @@
 use referee_ai::engine::EngineConfig;
 use referee_ai::provider::LLMProvider;
 use referee_ai::tool::{Tool, ToolExecutor, ToolRegistry};
+use referee_ai::EngineObserver;
 
 use super::FluenRuntime;
 
@@ -32,6 +33,7 @@ pub struct FluenRuntimeBuilder {
     config: EngineConfig,
     tools: Option<ToolRegistry>,
     executor: Option<ToolExecutor>,
+    observer: Option<std::sync::Arc<dyn EngineObserver>>,
 }
 
 impl std::fmt::Debug for FluenRuntimeBuilder {
@@ -40,6 +42,7 @@ impl std::fmt::Debug for FluenRuntimeBuilder {
             .field("has_provider", &self.provider.is_some())
             .field("config", &self.config)
             .field("has_tools", &self.tools.is_some())
+            .field("has_observer", &self.observer.is_some())
             .finish()
     }
 }
@@ -51,6 +54,7 @@ impl Default for FluenRuntimeBuilder {
             config: EngineConfig::default(),
             tools: None,
             executor: None,
+            observer: None,
         }
     }
 }
@@ -100,6 +104,14 @@ impl FluenRuntimeBuilder {
         self
     }
 
+    /// 注入引擎观测器（回合起止 / LLM 增量 / 工具执行事件钩子）。
+    ///
+    /// 回调在引擎热循环内同步执行，实现方须快速返回。
+    pub fn with_observer(mut self, observer: std::sync::Arc<dyn EngineObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
     /// 构建运行时。
     ///
     /// 未设置 provider 时 panic（编程错误，非运行时错误）。
@@ -110,6 +122,9 @@ impl FluenRuntimeBuilder {
 
         if let (Some(registry), Some(executor)) = (self.tools, self.executor) {
             engine = engine.with_tools(registry, executor);
+        }
+        if let Some(observer) = self.observer {
+            engine = engine.with_observer(observer);
         }
 
         FluenRuntime::from_engine(engine)

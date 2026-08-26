@@ -1474,6 +1474,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-appender",
+ "tracing-core",
  "tracing-subscriber",
  "uuid",
 ]

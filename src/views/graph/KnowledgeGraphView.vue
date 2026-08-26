@@ -26,6 +26,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useI18n } from '../../i18n';
 import { useAppConfig } from '../../composables/useAppConfig';
 import ForceGraph from './components/ForceGraph.vue';
@@ -184,6 +185,16 @@ const appWindow = getCurrentWindow();
 const isMaximized = ref(false);
 let unlistenResize: (() => void) | null = null;
 
+/** kb-build 终态事件名（与后端 events.rs 保持一致；构建后实时刷新图）。 */
+const KB_BUILD_TERMINAL_EVENTS = [
+  'kb-build:completed',
+  'kb-build:failed',
+  'kb-build:cancelled',
+] as const;
+
+/** kb-build 终态事件取消监听函数列表。 */
+const unlistenKbBuild: UnlistenFn[] = [];
+
 function handleMinimize(): void {
   appWindow.minimize();
 }
@@ -213,6 +224,16 @@ onMounted(async () => {
     isMaximized.value = await appWindow.isMaximized();
   });
 
+  // 监听知识库构建终态事件：构建入库后实时刷新图
+  // （构建任务是知识库唯一写入方；失败/取消也可能已写入部分条目）
+  for (const event of KB_BUILD_TERMINAL_EVENTS) {
+    unlistenKbBuild.push(
+      await listen(event, () => {
+        void loadEntries();
+      }),
+    );
+  }
+
   // 加载数据
   await loadEntries();
   // 首次加载后启动仿真（watch immediate=false，需手动触发一次）
@@ -229,6 +250,10 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unlistenResize?.();
+  for (const unlisten of unlistenKbBuild) {
+    unlisten();
+  }
+  unlistenKbBuild.length = 0;
   sim.destroy();
 });
 

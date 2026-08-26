@@ -16,8 +16,10 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use referee_ai::provider::{
-    ChatRequest, LLMProvider, Message, MessageContent, ThinkingConfig, ToolChoice,
+    ChatRequest, ChatResponse, FinishReason, LLMProvider, Message, MessageContent, Role,
+    StreamChunk, ThinkingConfig, ToolChoice,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -135,18 +137,13 @@ impl AiCorrector {
         );
 
         // 通过 select! 响应取消信号
-        let result = tokio::select! {
-            r = self.provider.chat(req) => r,
+        let response = tokio::select! {
+            r = self.correct_stream(req) => r,
             _ = cancel_token.cancelled() => {
                 tracing::warn!(scope = "references", "AI 校正被取消");
                 return Err(ReferenceError::Cancelled);
             }
-        };
-
-        let response = result.map_err(|e| {
-            tracing::error!(scope = "references", error = %e, "AI 校正调用失败");
-            ReferenceError::AiCorrection(e.to_string())
-        })?;
+        }?;
 
         let content = response
             .message
@@ -170,6 +167,72 @@ impl AiCorrector {
         );
 
         Ok(content)
+    }
+
+    /// 流式收敛：经 `chat_stream` 取回响应并累积为完整 [`ChatResponse`]。
+    ///
+    /// 实测发现 MiMo 等推理网关的非流式端点（`stream=false`）在长输出时服务端会
+    /// 挂起、永不完成响应，而流式端点正常。此处内部走流式、对外仍返回单次完整
+    /// 响应，调用语义与直调 `chat()` 一致。
+    async fn correct_stream(&self, req: ChatRequest) -> Result<ChatResponse, ReferenceError> {
+        let mut stream = self.provider.chat_stream(req).await.map_err(|e| {
+            tracing::error!(scope = "references", error = %e, "AI 校正流启动失败");
+            ReferenceError::AiCorrection(e.to_string())
+        })?;
+
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut role = None;
+        let mut finish_reason = FinishReason::Stop;
+        let mut usage = None;
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(StreamChunk::Delta {
+                    content: delta,
+                    reasoning_content,
+                    tool_calls: _,
+                    role: r,
+                }) => {
+                    if let Some(c) = delta {
+                        content.push_str(&c);
+                    }
+                    if let Some(rc) = reasoning_content {
+                        reasoning.push_str(&rc);
+                    }
+                    if let Some(r) = r {
+                        role = Some(r);
+                    }
+                }
+                Ok(StreamChunk::Finish {
+                    finish_reason: fr,
+                    usage: u,
+                }) => {
+                    finish_reason = fr;
+                    usage = u;
+                }
+                Err(e) => {
+                    return Err(ReferenceError::AiCorrection(e.to_string()));
+                }
+            }
+        }
+
+        let message = Message {
+            role: role.unwrap_or(Role::Assistant),
+            content: MessageContent::text(content),
+            reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            usage: None,
+        };
+
+        Ok(ChatResponse {
+            id: self.provider.id().to_string(),
+            model: self.model_id.clone(),
+            message,
+            finish_reason,
+            usage,
+        })
     }
 }
 

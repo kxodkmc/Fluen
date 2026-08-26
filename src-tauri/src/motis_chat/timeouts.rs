@@ -8,14 +8,18 @@
 //! ```text
 //! 审批等待 300s            （motis_chat/approval.rs，写工具前的用户确认）
 //!   < 子代理工具 360s        （审批 300s + 执行余量）
+//!   ≤ 子代理批次 540s        （awaiting_calls_timeout：单轮等待类工具批次总 deadline，
+//!                             ≥ 单工具上界、< 委派 RPC，保证慢批次在预算内降级）
 //!   < 引擎单轮 LLM 300s      （thinking_timeout，主/子引擎每轮生成上限）
 //!   < LLM HTTP 360s          （请求层兜底，引擎超时先触发并可走引擎重试）
 //!   < 委派 RPC 600s          （一次委派的总预算：多轮 LLM + 多轮工具）
-//!   < Motis 工具 660s        （执行器包裹 delegate_agent，须大于 RPC）
+//!   < Motis 工具/批次 660s   （执行器包裹 delegate_agent，须大于 RPC；
+//!                             批次 deadline = 单工具上界，仅约束多工具批次）
 //! ```
 //!
-//! 引擎默认 `thinking_timeout = 30s`（为轻量对话设计），学术写作的
-//! 长文本生成远超该值，故 Motis 域统一经 [`motis_engine_config`] 放宽。
+//! 引擎默认 `thinking_timeout = 30s`、`awaiting_calls_timeout = 60s`
+//! （为轻量对话设计），学术写作的长文本与审批型长工具远超该值，
+//! 故 Motis 域统一经 [`motis_engine_config`] 放宽。
 
 use std::time::Duration;
 
@@ -48,18 +52,53 @@ pub const MOTIS_TOOL_TIMEOUT: Duration = Duration::from_secs(660);
 /// referee 默认的 30 秒远不够，放宽至 10 分钟。
 pub const DELEGATE_RPC_TIMEOUT_MS: u64 = 600_000;
 
-/// 构建 Motis 域引擎配置——仅放宽单轮 LLM 超时，其余保持默认。
+/// 子智能体引擎的等待类工具批次总 deadline（`awaiting_calls_timeout`）。
 ///
-/// Motis 总督与全部子智能体共用（见 `runtime.rs` / `agents.rs`）。
-pub fn motis_engine_config() -> EngineConfig {
+/// referee 0.4 起该配置实际生效：约束单轮等待类工具批次的总时长，
+/// 超时项收敛、会话恢复一致状态。取值须 ≥ 单工具上界
+/// [`SUBAGENT_TOOL_TIMEOUT`]（360s），且 < [`DELEGATE_RPC_TIMEOUT_MS`]
+/// （600s），保证慢批次在委派预算内先降级（留 60s 回信余量）。
+pub const SUBAGENT_AWAITING_TIMEOUT: Duration = Duration::from_secs(540);
+
+/// Motis 总督引擎的等待类工具批次总 deadline。
+///
+/// 取 [`MOTIS_TOOL_TIMEOUT`]（660s）：与单工具执行器超时持平，
+/// 单工具行为不变，仅对「多工具慢批次」新增总上限
+/// （主会话无外层 RPC 预算，无需再留回信余量）。
+pub const MOTIS_AWAITING_TIMEOUT: Duration = MOTIS_TOOL_TIMEOUT;
+
+/// 构建 Motis 域引擎配置——放宽单轮 LLM 超时与等待类批次 deadline。
+///
+/// Motis 总督与全部子智能体共用（见 `runtime.rs` / `agents.rs`），
+/// 仅 `awaiting_calls_timeout` 按域取值不同。
+pub fn motis_engine_config(awaiting_calls_timeout: Duration) -> EngineConfig {
     EngineConfig {
         session: SessionConfig {
             timeout: TimeoutConfig {
                 thinking_timeout: LLM_TURN_TIMEOUT,
+                awaiting_calls_timeout,
                 ..TimeoutConfig::default()
             },
             ..SessionConfig::default()
         },
         ..EngineConfig::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn awaiting_timeouts_respect_layering() {
+        // 子代理：单工具 ≤ 批次 deadline < 委派 RPC（留回信余量）
+        assert!(SUBAGENT_AWAITING_TIMEOUT >= SUBAGENT_TOOL_TIMEOUT);
+        assert!((SUBAGENT_AWAITING_TIMEOUT.as_millis() as u64) < DELEGATE_RPC_TIMEOUT_MS);
+        // 主会话：批次 deadline = 单工具上界，仅约束多工具批次
+        assert_eq!(MOTIS_AWAITING_TIMEOUT, MOTIS_TOOL_TIMEOUT);
     }
 }

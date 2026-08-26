@@ -108,6 +108,37 @@ pub fn resolve_kb_provider<'a>(
 /// `submit_plan` 工具的名称。
 pub const SUBMIT_PLAN_TOOL_NAME: &str = "submit_plan";
 
+/// 占位/待补充标记——计划文本中命中任一即判定无效，触发模型重新提取。
+///
+/// 目的：杜绝"AI 产出占位型计划仍被当成功"的假成功综述/条目（历史上曾出现
+/// 综述页与实体名"文献作者/机构（待补充）"这类占位结果）。命中后返回
+/// `InvalidArguments`，`chat_until_captured` 会催促模型基于文献正文重提。
+const PLAN_PLACEHOLDER_MARKERS: [&str; 5] = ["待补全", "待补充", "占位", "占位性", "TBD"];
+
+/// 检测计划是否含占位式内容；返回命中的第一个标记（`None` 表示内容有效）。
+fn plan_has_placeholder(plan: &ExtractionPlan) -> Option<&'static str> {
+    let marker_in = |s: &str| {
+        PLAN_PLACEHOLDER_MARKERS
+            .iter()
+            .copied()
+            .find(|m| s.contains(*m))
+    };
+    for point in &plan.summary_points {
+        if let Some(m) = marker_in(point) {
+            return Some(m);
+        }
+    }
+    for entry in plan.concepts.iter().chain(plan.entities.iter()) {
+        if let Some(m) = marker_in(&entry.title) {
+            return Some(m);
+        }
+        if let Some(m) = marker_in(&entry.brief) {
+            return Some(m);
+        }
+    }
+    None
+}
+
 /// Planning 阶段用于接收 AI 产出的 ExtractionPlan 的工具。
 ///
 /// AI 在 Planning 阶段必须调用此工具提交计划，后端从 tool_call 中解析出
@@ -203,6 +234,14 @@ impl Tool for SubmitPlanTool {
             ));
         }
 
+        // 校验计划不含占位/待补充内容：占位即假成功，须拒绝并催促重新提取
+        if let Some(marker) = plan_has_placeholder(&plan) {
+            tracing::warn!(marker, "AI 提交的 ExtractionPlan 含占位内容");
+            return Err(ToolError::InvalidArguments(format!(
+                "plan 含占位内容「{marker}」：不得使用占位/待补充措辞，请基于文献正文重新提取具体要点"
+            )));
+        }
+
         tracing::info!(
             summary_points = plan.summary_points.len(),
             concepts = plan.concepts.len(),
@@ -281,6 +320,58 @@ impl Tool for EntryCaptureGuard {
 }
 
 // ---------------------------------------------------------------------------
+// ForceWaitGuard — 强制工具为同步等待语义
+// ---------------------------------------------------------------------------
+
+/// 装饰器：覆写 `default_wait() → true`，强制工具按「等待类」执行。
+///
+/// referee 引擎按 wait 语义分流工具调用：**纯派发轮（本轮全部为不等待工具）
+/// 会立即结束回合并返回模型原文，绝不主动发起下一轮 LLM 调用**。
+/// 知识库工具未覆写 `default_wait`（trait 默认 false = 派发），若模型先调用
+/// `knowledge_query` 查重再提交计划，回合在查询派发后即被终结，模型永远没有
+/// 机会调用 `submit_plan` / `create_entry`，流水线随即报"AI 未调用 xxx 工具"。
+///
+/// 知识库构建是严格顺序的单发智能体循环（每次 `run_chat` 后立即读 capture），
+/// 所有工具必须同步收敛结果，故注册时统一包装强制等待。
+pub struct ForceWaitGuard {
+    inner: Arc<dyn Tool>,
+}
+
+impl ForceWaitGuard {
+    /// 构造装饰器。
+    pub fn new(inner: Arc<dyn Tool>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl Tool for ForceWaitGuard {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn input_schema(&self) -> Value {
+        self.inner.input_schema()
+    }
+
+    fn category(&self) -> ToolCategory {
+        self.inner.category()
+    }
+
+    fn default_wait(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        self.inner.execute(ctx, args).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Runtime 构建
 // ---------------------------------------------------------------------------
 
@@ -296,8 +387,9 @@ pub fn new_session_id() -> SessionId {
 /// 装配：
 /// - LLMProvider（基于场景模型，通过 `llm_chat::build_llm_provider`）
 /// - 知识库工具（5 个：query/query_batch/create/edit/get_entry）
-///   - `create_entry` / `edit_entry` 经 [`EntryCaptureGuard`] 包装捕获 `wiki_id`
-/// - `submit_plan` 工具（Planning 阶段捕获 ExtractionPlan）
+///   - 全部经 [`ForceWaitGuard`] 强制同步等待（避免纯派发轮被引擎立即终结回合）
+///   - `create_entry` / `edit_entry` 另经 [`EntryCaptureGuard`] 包装捕获 `wiki_id`
+/// - `submit_plan` 工具（Planning 阶段捕获 ExtractionPlan，自带 `default_wait=true`）
 ///
 /// `plan_capture` / `entry_capture` 由调用方创建并传入，
 /// pipeline 在对应阶段执行后从中读取结果。
@@ -330,18 +422,20 @@ pub fn build_kb_runtime(
     // 装配工具注册表
     let registry = referee_ai::tool::ToolRegistry::with_defaults();
 
-    // 注册知识库工具：create_entry / edit_entry 经 EntryCaptureGuard 包装
+    // 注册知识库工具：统一经 ForceWaitGuard 强制同步等待；
+    // create_entry / edit_entry 另经 EntryCaptureGuard 捕获 wiki_id
     for tool in kb_provider.list_tools() {
         let tool_name = tool.name().to_string();
-        if tool_name == CREATE_ENTRY_TOOL_NAME || tool_name == EDIT_ENTRY_TOOL_NAME {
-            registry
-                .register(Arc::new(EntryCaptureGuard::new(tool, entry_capture.clone())))
-                .map_err(|e| KnowledgeBuilderError::Config(format!("工具注册失败: {e}")))?;
+        let tool: Arc<dyn Tool> = if tool_name == CREATE_ENTRY_TOOL_NAME
+            || tool_name == EDIT_ENTRY_TOOL_NAME
+        {
+            Arc::new(EntryCaptureGuard::new(tool, entry_capture.clone()))
         } else {
-            registry
-                .register(tool)
-                .map_err(|e| KnowledgeBuilderError::Config(format!("工具注册失败: {e}")))?;
-        }
+            tool
+        };
+        registry
+            .register(Arc::new(ForceWaitGuard::new(tool)))
+            .map_err(|e| KnowledgeBuilderError::Config(format!("工具注册失败: {e}")))?;
     }
 
     // 注册 submit_plan 工具
@@ -352,7 +446,20 @@ pub fn build_kb_runtime(
     tracing::debug!(model_id = %model_ref.model_id, "装配 FluenRuntime（知识库构建）");
 
     let executor = referee_ai::tool::ToolExecutor::with_defaults();
+
+    // 知识库构建是超长多轮任务（Planning 多轮检索 + 多阶段创建），
+    // 单会话累计 token 易突破默认 10 万会话预算；覆盖为 1M 会话预算避免中途中断。
+    // global_limit 保持默认 1M（单会话任务下与 session 对齐）。
+    let mut engine_config = referee_ai::engine::EngineConfig::default();
+    engine_config.budget.session_limit = 1_000_000;
+    // 会话 prompt 预算采用 referee 默认（128K token）：上游已保证"当前轮核心输入恒完整交付、
+    // 超预算仅告警"，规划阶段的完整文献不会再被截断，无需在此覆写。
+    // KB 构建的 planning 需注入整篇文献并做深度思考，单回合远超默认 30s 的 thinking 超时；
+    // 抬高到与传输层 llm_chat::DEFAULT_REQUEST_TIMEOUT(240s) 一致，避免规划回合被过早掐断。
+    engine_config.session.timeout.thinking_timeout = std::time::Duration::from_secs(240);
+    engine_config.session.timeout.awaiting_calls_timeout = std::time::Duration::from_secs(120);
     let runtime = FluenRuntimeBuilder::new(llm_provider)
+        .with_config(engine_config)
         .with_tools(registry, executor)
         .build();
 
@@ -577,6 +684,51 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test]
+    async fn submit_plan_tool_rejects_placeholder_points() {
+        // 占位要点虽"非空"，也必须被拒绝（防假成功占位综述）
+        let tool = SubmitPlanTool::new(test_capture());
+        let ctx = ToolContext {
+            tool_call_id: "test".into(),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
+        };
+        let input = json!({
+            "summary_points": ["该文献研究通用人工智能驱动的多智能体仿真，具体方法与结论待补全"],
+            "concepts": [],
+            "entities": []
+        });
+        let err = tool.execute(ctx, input).await.unwrap_err().to_string();
+        assert!(err.contains("占位"), "应为占位错误，得到: {err}");
+        assert!(err.contains("待补全"), "应指出命中标记，得到: {err}");
+    }
+
+    #[tokio::test]
+    async fn submit_plan_tool_rejects_placeholder_entry_title() {
+        // 实体/概念标题也不允许占位（如"文献作者/机构（待补充）"）
+        let tool = SubmitPlanTool::new(test_capture());
+        let ctx = ToolContext {
+            tool_call_id: "test".into(),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
+        };
+        let input = json!({
+            "summary_points": ["要点1"],
+            "concepts": [],
+            "entities": [{"title": "文献作者/机构（待补充）", "brief": "作者信息"}]
+        });
+        let err = tool.execute(ctx, input).await.unwrap_err().to_string();
+        assert!(err.contains("待补充"), "实体占位标题应被拒绝，得到: {err}");
+    }
+
     #[test]
     fn entry_capture_guard_extracts_wiki_id() {
         let output = ToolOutput::from_json(&json!({
@@ -594,6 +746,52 @@ mod tests {
         }));
         let wiki_id = EntryCaptureGuard::extract_wiki_id(&output);
         assert!(wiki_id.is_none());
+    }
+
+    /// 默认不等待的工具（模拟未覆写 default_wait 的知识库工具）
+    struct AsyncByDefaultTool;
+
+    #[async_trait]
+    impl Tool for AsyncByDefaultTool {
+        fn name(&self) -> &str {
+            "async_default"
+        }
+        fn description(&self) -> &str {
+            "dispatched by default"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        async fn execute(&self, _ctx: ToolContext, _args: Value) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("ok"))
+        }
+    }
+
+    #[test]
+    fn force_wait_guard_overrides_default_wait_and_delegates_metadata() {
+        let inner = AsyncByDefaultTool;
+        assert!(!inner.default_wait(), "前置：未覆写的工具默认派发");
+
+        let guard = ForceWaitGuard::new(Arc::new(inner));
+        assert!(guard.default_wait(), "装饰后必须强制等待");
+        assert_eq!(guard.name(), "async_default");
+        assert_eq!(guard.description(), "dispatched by default");
+    }
+
+    #[tokio::test]
+    async fn force_wait_guard_delegates_execute() {
+        let guard = ForceWaitGuard::new(Arc::new(AsyncByDefaultTool));
+        let ctx = ToolContext {
+            tool_call_id: "test".into(),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
+        };
+        let output = guard.execute(ctx, json!({})).await.unwrap();
+        assert_eq!(output.content, "ok");
     }
 
     #[test]

@@ -277,7 +277,6 @@ watch(
         <RightPanel
           :active-right-panel="layout.activeRightPanel.value"
           :style="{ width: `${layout.aiPanelWidth.value}px` }"
-          @select-panel="layout.setActiveRightPanel"
           @close="layout.toggleRightPanel"
         />
       </template>

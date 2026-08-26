@@ -12,20 +12,6 @@
 use super::index_snapshot::IndexSnapshot;
 use super::types::KnowledgeBuildOptions;
 
-/// 长文献阈值（超过此长度先摘要预处理）。
-pub const LONG_DOC_THRESHOLD: usize = 50_000;
-
-/// 摘要预处理 prompt（长文献压缩）。
-pub const SUMMARIZE_FOR_PLANNING_PROMPT: &str = r#"你是学术文献摘要助手。请将以下文献压缩为结构化摘要，要求：
-- 保留核心研究问题、方法、关键概念、重要实体（人物/机构/项目）
-- 丢弃细节论述与重复内容
-- 输出 1500-3000 字的中文摘要
-- 末尾列出文献中出现的 5-15 个核心概念和 3-10 个重要实体（仅列名称）
-
-文献内容：
-{md_content}
-"#;
-
 /// Planning 阶段 prompt 模板。
 ///
 /// 占位符：
@@ -65,6 +51,7 @@ pub const PLANNING_PROMPT: &str = r#"你是学术文献知识库的规划助手�
 - 去重判断要严格：宁可合并到已有条目，也不要新建近似条目
   例如"机器学习"/"机器学习技术"/"ML"应合并到同一个 concept
 - brief 字段要具体（用于第二阶段生成正文），不要仅复制标题
+- **原文优先提取**：summary_points 与 brief 应尽量保留文献原文的关键表述（术语/界定/数据/原句），供执行阶段按"原文优先"组织条目；原文有明确出处时优先摘录原意，避免仅凭印象泛泛概括
 - 提交前自查：concepts 与 entities 中每个元素均包含 title 和 brief，JSON 结构完整无缺漏
 
 ## 已有知识库条目（Index 快照）
@@ -96,6 +83,7 @@ pub const CREATE_SUMMARY_PROMPT: &str = r#"为以下文献创建综述页（summ
 - source 字段必须为 `raw/{ref_id}.pdf`
 - title 用文献标题（若已知）或"文献综述-{ref_id}"
 - content 写 200-400 字综述，涵盖研究问题、方法、结论
+- **原文优先（忠实科学）**：综述文字以文献原文为基准——凡原文已明确的概念界定、方法、数据与结论，**优先沿用原文表述/关键句子/术语**，必要处裁剪、衔接、润色以保证通顺；确需概括时再用自己的话小结；**不得**编造或歪曲原文没有的内容，不得为"像综述"而改写原意
 - 可输出自由文本，但**必须以一次 `knowledge_create_entry` 或 `knowledge_edit_entry` 工具调用结束**：
   - 候选中无相似条目 → 调用 `knowledge_create_entry`（wiki_type=summary）
   - 候选中存在相似条目 → 调用 `knowledge_edit_entry` 合并补充内容
@@ -122,6 +110,7 @@ pub const CREATE_CONCEPT_PROMPT: &str = r#"为以下概念创建知识库条目�
 - 否则调用 `knowledge_create_entry`，wiki_type=concept
 - title 用概念全称（如"数智化技术"而非"数智化"）
 - content 包含：概念定义 + 该文献中的具体应用/贡献
+- **原文优先**：概念界定与应用尽量沿用文献原文的表述（优先原句/术语），可润色衔接，不得偏离或编造
 - **禁止在 content 中写入 `## 关联页面` 区**：关联关系由后续阶段统一建立，AI 不得自行写入
 - 可输出自由文本，但**必须以一次 `knowledge_create_entry` 或 `knowledge_edit_entry` 工具调用结束**（二选一，不可漏调）
 "#;
@@ -146,7 +135,7 @@ pub const CREATE_ENTITY_PROMPT: &str = r#"为以下实体创建知识库条目�
 - 否则调用 `knowledge_create_entry`，wiki_type=entity
 - title 用人物全名或机构全名
 - content 包含：身份/性质 + 与该文献的关系/贡献
-- **仅基于文献明确陈述的内容**，不得推断或幻觉
+- **原文优先、忠实原意**：身份与贡献尽量沿用文献原文表述（优先原句/术语）；仅基于文献明确陈述的内容，不得推断或幻觉
   若文献信息不足，在 content 中注明"待补充"
 - **禁止在 content 中写入 `## 关联页面` 区**：关联关系由后续阶段统一建立，AI 不得自行写入
 - 可输出自由文本，但**必须以一次 `knowledge_create_entry` 或 `knowledge_edit_entry` 工具调用结束**（二选一，不可漏调）
@@ -202,11 +191,6 @@ pub fn render_planning(
         .replace("{max_entities}", &max_entities.to_string())
         .replace("{index_snapshot}", &snapshot_str)
         .replace("{md_content}", md_content)
-}
-
-/// 渲染摘要预处理 prompt。
-pub fn render_summarize(md_content: &str) -> String {
-    SUMMARIZE_FOR_PLANNING_PROMPT.replace("{md_content}", md_content)
 }
 
 /// 渲染创建 summary 的 prompt（V2.1：注入 L2 候选）。

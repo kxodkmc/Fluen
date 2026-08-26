@@ -3,8 +3,8 @@
 //! 让 Motis（总督角色）通过 **function calling** 调度子智能体执行任务。
 //!
 //! Motis 自身不负责编写、计算等具体工作，而是通过 `delegate_agent` 工具
-//! 将任务派发给注册的子智能体（学术撰写助手 / 知识库构建助手 / 数据分析助手），
-//! 子智能体独立运行后返回结果，由 Motis 汇总。
+//! 将任务派发给注册的子智能体（论文撰写 / 论文审核 / 论文思辨 / 知识库构建 /
+//! 数据分析助手），子智能体独立运行后返回结果，由 Motis 汇总。
 //!
 //! ## 工具接口
 //!
@@ -31,9 +31,11 @@
 //!
 //! ## 可观测性
 //!
-//! 委派生命周期（started / finished）与子智能体内部工具调用
-//! （`agent-tool-call` / `agent-tool-result`，经联邦注入的观测装饰器）
-//! 均经 [`AgentReporter`](super::agent_reporter::AgentReporter) 上报前端。
+//! 委派生命周期（started / finished）、子智能体 LLM 输出增量
+//! （`agent-thought` / `agent-text`，经引擎观测钩子透传）与子智能体
+//! 内部工具调用（`agent-tool-call` / `agent-tool-result`，观测装饰器 +
+//! 引擎执行器失败兜底）均经 [`AgentReporter`](super::agent_reporter::AgentReporter)
+//! 上报前端。回信错误按 `ErrorKind` 类型化分类后转人读文案。
 //!
 //! 子代理运行时的构建与复用见 [`super::federation`]；本工具只做
 //! 协议组合与结果整形，不管理任何生命周期。
@@ -43,7 +45,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use referee_ai::provider::{Message, ThinkingConfig};
-use referee_ai::session::{ChatOptions, ChatPayload, SessionId, SessionMessage, SessionReply};
+use referee_ai::session::{ChatOptions, ChatPayload, ErrorKind, SessionId, SessionMessage, SessionReply};
 use referee_ai::tool::{Tool, ToolCategory, ToolContext, ToolError, ToolOutput};
 use serde_json::{json, Value};
 
@@ -56,7 +58,7 @@ use super::timeouts::DELEGATE_RPC_TIMEOUT_MS;
 pub const DELEGATE_AGENT_TOOL_NAME: &str = "delegate_agent";
 
 /// 工具描述。
-const DESCRIPTION: &str = "将任务派发给子智能体执行。Motis（总督角色）自身不负责编写、计算等具体工作，而是通过此工具将任务委派给合适的子智能体（如学术撰写助手、知识库构建助手、数据分析助手），子智能体独立执行后返回结果。";
+const DESCRIPTION: &str = "将任务派发给子智能体执行。Motis（总督角色）自身不负责编写、计算等具体工作，而是通过此工具将任务委派给合适的子智能体（如论文撰写助手、论文思辨助手、知识库构建助手、数据分析助手），子智能体独立执行后返回结果。";
 
 /// 大结果落库阈值（字节）——与 referee 对等工具一致。
 const LARGE_RESULT_THRESHOLD: usize = 4096;
@@ -106,7 +108,7 @@ impl DelegateAgentTool {
                 "agent_id": {
                     "type": "string",
                     "enum": available_ids,
-                    "description": "目标子智能体 ID：academic_writer=学术撰写助手；knowledge_builder=知识库构建助手；data_analyst=数据分析助手"
+                    "description": "目标子智能体 ID：essay_writing=论文撰写助手；essay_review=论文审核助手（开发中）；essay_critique=论文思辨助手；knowledge_builder=知识库构建助手；data_analyst=数据分析助手"
                 },
                 "task": {
                     "type": "string",
@@ -339,11 +341,34 @@ impl Tool for DelegateAgentTool {
             }
             SessionReply::Busy { .. } => Err(fail("子智能体会话忙碌，请稍后重试".into())),
             SessionReply::Cancelled => Err(fail("子智能体会话被取消".into())),
-            SessionReply::Error { message } => Err(fail(format!("子智能体执行出错: {message}"))),
+            SessionReply::Error {
+                kind,
+                message,
+                retry_after_ms,
+            } => Err(fail(classify_reply_error(kind, message, retry_after_ms))),
             SessionReply::Unhandled { reason } => {
                 Err(fail(format!("子智能体无法处理该消息: {reason}")))
             }
         }
+    }
+}
+
+/// 把子代理回信的类型化错误分类转为人读文案。
+///
+/// 上游（Motis LLM）据此可决定重试策略：限流附退避建议、
+/// 超时建议拆分任务，其余直接透传原因。
+fn classify_reply_error(kind: ErrorKind, message: String, retry_after_ms: Option<u64>) -> String {
+    match kind {
+        ErrorKind::Timeout => format!("子智能体执行超时: {message}"),
+        ErrorKind::RateLimited => {
+            let hint = retry_after_ms
+                .map(|ms| format!("（建议 {} 秒后重试）", ms / 1000))
+                .unwrap_or_default();
+            format!("子智能体被模型限流{hint}: {message}")
+        }
+        ErrorKind::Llm => format!("子智能体 LLM 调用失败: {message}"),
+        ErrorKind::Budget => format!("子智能体预算耗尽: {message}"),
+        ErrorKind::Internal => format!("子智能体执行出错: {message}"),
     }
 }
 
@@ -456,7 +481,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_task_rejected_before_kernel_access() {
-        let err = execute_with(json!({ "agent_id": "academic_writer" })).await;
+        let err = execute_with(json!({ "agent_id": "essay_writing" })).await;
         assert!(matches!(err, ToolError::InvalidArguments(_)), "{err:?}");
     }
 
@@ -477,7 +502,7 @@ mod tests {
     async fn disabled_agent_rejected_before_rpc() {
         let err = execute_enabled_with(
             vec!["data_analyst".to_string()],
-            json!({ "agent_id": "academic_writer", "task": "x" }),
+            json!({ "agent_id": "essay_writing", "task": "x" }),
         )
         .await;
         // 启用清单检查先于联邦查找
@@ -487,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn unregistered_agent_reports_federation_miss_without_kernel() {
         // 联邦中无任何子代理：应在访问内核前报「未在联邦中注册」
-        let err = execute_with(json!({ "agent_id": "academic_writer", "task": "x" })).await;
+        let err = execute_with(json!({ "agent_id": "essay_writing", "task": "x" })).await;
         assert!(err.to_string().contains("未在联邦中注册"), "{err:?}");
     }
 
@@ -497,7 +522,8 @@ mod tests {
         let all = DelegateAgentTool::new(Vec::new(), noop_reporter(), fed.clone());
         let schema = all.input_schema();
         let enum_vals = schema["properties"]["agent_id"]["enum"].as_array().unwrap();
-        assert_eq!(enum_vals.len(), 3);
+        // 空启用列表 = 全部子智能体可用，数量以 AgentId::all() 为准（不硬编码）
+        assert_eq!(enum_vals.len(), AgentId::all().len());
 
         let restricted = DelegateAgentTool::new(
             vec!["data_analyst".to_string()],

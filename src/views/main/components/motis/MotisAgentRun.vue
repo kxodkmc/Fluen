@@ -7,12 +7,14 @@
  *
  *   - 头部：目标智能体名 + 任务描述 + 状态（运行中点点动画 /
  *     完成耗时与 token / 失败原因）
+ *   - 思考过程 / 实时输出：子智能体 LLM 增量流（agent-thought /
+ *     agent-text 事件累积，流式追加并自动贴底）
  *   - 活动列表：子智能体内部工具调用（名称 + 状态 + 耗时），
  *     行可展开查看参数与结果详情
  *
  * 数据由 `motis:agent-*` 事件流维护（见 useMotisChat），组件纯展示。
  */
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { useI18n } from '../../../../i18n';
 import type { AgentRun } from '../../types';
 
@@ -25,7 +27,9 @@ const { t } = useI18n();
 
 /** 智能体显示名 i18n key（settings.motis.agents.*，与设置页一致）。 */
 const AGENT_NAME_KEYS: Record<string, string> = {
-  academic_writer: 'settings.motis.agents.academicWriter',
+  essay_writing: 'settings.motis.agents.essayWriting',
+  essay_review: 'settings.motis.agents.essayReview',
+  essay_critique: 'settings.motis.agents.essayCritique',
   knowledge_builder: 'settings.motis.agents.knowledgeBuilder',
   data_analyst: 'settings.motis.agents.dataAnalyst',
 };
@@ -52,6 +56,21 @@ const doneSummary = computed(() => {
   }
   return parts.filter(Boolean).join(' · ');
 });
+
+/* ── 思考 / 实时输出流（增量追加时贴底） ─────────────────────────────── */
+
+/** 思考与输出的滚动容器引用。 */
+const thoughtEl = ref<HTMLElement | null>(null);
+const textEl = ref<HTMLElement | null>(null);
+
+watch(
+  () => [props.run.thought?.length ?? 0, props.run.text?.length ?? 0],
+  async () => {
+    await nextTick();
+    if (thoughtEl.value) thoughtEl.value.scrollTop = thoughtEl.value.scrollHeight;
+    if (textEl.value) textEl.value.scrollTop = textEl.value.scrollHeight;
+  },
+);
 
 /* ── 活动详情展开 ─────────────────────────────────────────────────────── */
 
@@ -119,6 +138,18 @@ function detailText(activityIndex: number): string {
 
     <!-- 失败原因 -->
     <div v-if="isFailed && run.error" class="agent-run__error">{{ run.error }}</div>
+
+    <!-- 思考过程（依配置收集，流式追加） -->
+    <div v-if="run.thought" class="agent-run__stream">
+      <div class="agent-run__stream-label">{{ t('main.motisPanel.agentRun.thought') }}</div>
+      <pre ref="thoughtEl" class="agent-run__stream-body">{{ run.thought }}</pre>
+    </div>
+
+    <!-- 实时输出 -->
+    <div v-if="run.text" class="agent-run__stream">
+      <div class="agent-run__stream-label">{{ t('main.motisPanel.agentRun.output') }}</div>
+      <pre ref="textEl" class="agent-run__stream-body agent-run__stream-body--text">{{ run.text }}</pre>
+    </div>
 
     <!-- 内部工具调用活动列表 -->
     <ul v-if="run.activities.length > 0" class="agent-run__activities">
@@ -209,6 +240,38 @@ function detailText(activityIndex: number): string {
   word-break: break-word;
   max-height: 80px;
   overflow-y: auto;
+}
+
+/* ── 思考 / 实时输出流 ─────────────────────────────────────────────── */
+.agent-run__stream {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.agent-run__stream-label {
+  font-size: 10px;
+  color: var(--fluen-muted);
+}
+
+.agent-run__stream-body {
+  margin: 0;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: var(--fluen-surface);
+  border: 1px solid var(--fluen-hairline);
+  font-family: var(--fluen-font-mono);
+  font-size: 10px;
+  line-height: 1.55;
+  color: var(--fluen-stone);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.agent-run__stream-body--text {
+  color: var(--fluen-slate);
 }
 
 /* ── 活动列表 ────────────────────────────────────────────────────────── */

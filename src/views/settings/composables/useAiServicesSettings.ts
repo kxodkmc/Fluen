@@ -82,9 +82,9 @@ export function useAiServicesSettings() {
     () => config.value?.default_reference_import_mode ?? 'ocr_with_ai_correction',
   );
 
-  /** 文献导入 AI 校正最大响应时间（秒，默认 240）。 */
+  /** 文献导入 AI 校正最大响应时间（秒，默认 600）。 */
   const referenceImportTimeoutSecs = computed<number>(
-    () => config.value?.reference_import_timeout_secs ?? 240,
+    () => config.value?.reference_import_timeout_secs ?? 600,
   );
 
   /** 当前选中的提供商对象。 */
@@ -232,7 +232,7 @@ export function useAiServicesSettings() {
     if (!config.value) return;
     // 防止非法值（负数 / 非有限）落盘，最低 1 秒
     config.value.reference_import_timeout_secs =
-      Number.isFinite(secs) && secs >= 1 ? Math.floor(secs) : 240;
+      Number.isFinite(secs) && secs >= 1 ? Math.floor(secs) : 600;
     await persist();
   }
 

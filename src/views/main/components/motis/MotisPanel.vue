@@ -18,12 +18,15 @@
  *
  * @emits close - 关闭按钮点击时触发（由 RightPanel 收起面板）
  */
-import { computed, inject } from 'vue';
+import { computed, inject, watch } from 'vue';
 import { useMotisChat } from '../../composables/useMotisChat';
+import { useChatToolbar } from '../../composables/useChatToolbar';
+import { useMainLayout, MAIN_LAYOUT_KEY } from '../../composables/useMainLayout';
 import { MOTIS_CHAT_KEY } from './symbols';
 import MotisChatHeader from './MotisChatHeader.vue';
 import MotisChatMessageList from './MotisChatMessageList.vue';
 import MotisChatInput from './MotisChatInput.vue';
+import ChatInputToolbar from '../ChatInputToolbar.vue';
 import ApprovalDialog from '../ApprovalDialog.vue';
 
 defineEmits<{
@@ -33,6 +36,12 @@ defineEmits<{
 /* ── 注入 useMotisChat 实例 ──────────────────────────────────────────── */
 // 优先使用 MainView 提供的共享实例；未提供时创建独立实例（兼容独立使用场景）
 const motisChat = inject(MOTIS_CHAT_KEY, () => useMotisChat(), true);
+
+/* ── 注入布局状态（用于底部工具栏切换模式） ─────────────────────────── */
+const layout = inject(MAIN_LAYOUT_KEY, () => useMainLayout(), true);
+
+/* ── 聊天工具栏状态（模块级单例，跨面板共享） ───────────────────────── */
+const toolbar = useChatToolbar();
 
 /* ── 解构状态与方法（顶层绑定 → 模板中自动解包 ref） ────────────────── */
 const { messages, isGenerating, pendingApprovals, draftMessage, send, cancel, resolveApproval } =
@@ -46,12 +55,30 @@ const draft = computed({
   },
 });
 
-/** 发送当前草稿消息（MotisChatInput 的 send 事件无 payload，需主动传入草稿内容）。 */
+/** 发送当前草稿消息。 */
 function handleSend(): void {
   send(draftMessage.value);
-  // 发送后清空草稿
   draftMessage.value = '';
 }
+
+/** 工具栏模式切换时同步到布局状态。 */
+watch(
+  () => toolbar.mode.value,
+  (next) => {
+    layout.setActiveRightPanel(next);
+  },
+);
+
+/** 外部切换面板时（如标题栏 Mascot 点击）同步回工具栏。 */
+watch(
+  () => layout.activeRightPanel.value,
+  (next) => {
+    if (next && next !== toolbar.mode.value) {
+      toolbar.mode.value = next;
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -77,6 +104,22 @@ function handleSend(): void {
       :is-generating="isGenerating"
       @send="handleSend"
       @cancel="cancel"
+    />
+
+    <!-- 底部工具栏 -->
+    <ChatInputToolbar
+      :mode="toolbar.mode.value"
+      :thinking-intensity="toolbar.thinkingIntensity.value"
+      :model-label="toolbar.activeModelLabel.value"
+      :models="toolbar.modelOptions.value"
+      :can-send="draft.trim().length > 0 && !isGenerating"
+      :is-generating="isGenerating"
+      @update:mode="toolbar.mode.value = $event"
+      @update:thinking-intensity="toolbar.thinkingIntensity.value = $event"
+      @add-file="toolbar.addAttachment"
+      @select-model="toolbar.selectModel"
+      @send="handleSend"
+      @stop="cancel"
     />
   </div>
 </template>

@@ -38,7 +38,9 @@ use super::agent_reporter::AgentReporter;
 use super::delegate::DelegateAgentTool;
 use super::error::MotisChatError;
 use super::federation::FederationPool;
-use super::timeouts::{motis_engine_config, LLM_HTTP_TIMEOUT, MOTIS_TOOL_TIMEOUT};
+use super::timeouts::{
+    motis_engine_config, LLM_HTTP_TIMEOUT, MOTIS_AWAITING_TIMEOUT, MOTIS_TOOL_TIMEOUT,
+};
 
 /// 构建 Motis 运行时。
 ///
@@ -83,7 +85,8 @@ pub async fn build_runtime(
     .map_err(map_llm_chat_error)?;
 
     // 3. 装配 Motis 总督角色工具集（引擎单轮 LLM 超时放宽至 5 分钟）
-    let mut builder = FluenRuntimeBuilder::new(llm_provider).with_config(motis_engine_config());
+    let mut builder = FluenRuntimeBuilder::new(llm_provider)
+        .with_config(motis_engine_config(MOTIS_AWAITING_TIMEOUT));
     if mascot.function_calling_enabled {
         if let Some(project_path) = project_path {
             // 确保子智能体联邦就绪（按指纹复用/重建），并把内核注入执行器，
@@ -94,7 +97,7 @@ pub async fn build_runtime(
                     project_path,
                     approver.clone(),
                     &mascot.enabled_agents,
-                    Some(reporter.clone() as Arc<dyn crate::agent_runtime::observability::ToolEventSink>),
+                    Some(reporter.clone()),
                 )
                 .await
                 .map_err(|e| MotisChatError::Runtime(e.to_string()))?;

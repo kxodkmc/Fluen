@@ -228,6 +228,11 @@ pub async fn consume_stream(handle: ChatHandle, window: &Window, events: &ChatEv
                 }
             }
             Ok(StreamChunk::Finish { usage, .. }) => {
+                // 回合边界：tool_calls 的 index 每回合从 0 重计，累积器跨回合复用
+                // 会把后续回合的调用并入已发送条目而被静默吞掉（委派/读板等
+                // 第二回合之后的工具行从时间线消失）。先冲刷本回合残余再重置。
+                acc.flush_all(window, events);
+                acc = ToolCallAccumulator::default();
                 last_usage = usage.map(|u| u.total_tokens);
             }
             Err(e) => {
@@ -309,58 +314,57 @@ impl ToolCallAccumulator {
         }
     }
 
-    /// emit 参数已完整的工具调用（JSON 解析成功即视为完整）。
+    /// 取出未发送的工具调用（按 `index` 升序）并标记已发送。
     ///
-    /// 按模型声明的 `index` 升序 emit——并行调用时保证时间线顺序稳定
-    /// （HashMap 迭代无序）。
-    fn flush_ready(&mut self, window: &Window, events: &ChatEvents) {
+    /// `complete_only = true` 时仅取参数可解析为完整 JSON 的条目
+    /// （流式增量阶段，避免把半截参数当字符串发出）；`false` 为流结束
+    /// 兜底（参数不完整按原始字符串发）。返回后调用即视为已处理。
+    fn take_unsent(&mut self, complete_only: bool) -> Vec<payload::ToolCall> {
         let mut indexes: Vec<u32> = self.calls.keys().copied().collect();
         indexes.sort_unstable();
-        for idx in indexes {
-            let Some(call) = self.calls.get_mut(&idx) else { continue };
-            if call.sent || call.arguments.is_empty() {
-                continue;
-            }
-            if let Ok(input) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
-                call.sent = true;
-                tracing::debug!(
-                    target = "fluen_chat_bridge",
-                    tool_name = %call.name,
-                    tool_call_id = %call.id,
-                    "模型发起工具调用"
-                );
-                let _ = window.emit(
-                    events.tool_call,
-                    payload::ToolCall {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        input,
-                    },
-                );
-            }
-        }
-    }
-
-    /// 流结束时冲刷全部未发送的工具调用（兜底，参数不完整时按原始字符串发）。
-    fn flush_all(&mut self, window: &Window, events: &ChatEvents) {
-        let mut indexes: Vec<u32> = self.calls.keys().copied().collect();
-        indexes.sort_unstable();
+        let mut out = Vec::new();
         for idx in indexes {
             let Some(call) = self.calls.get_mut(&idx) else { continue };
             if call.sent {
                 continue;
             }
+            if complete_only && call.arguments.is_empty() {
+                continue;
+            }
+            let parsed = serde_json::from_str::<serde_json::Value>(&call.arguments);
+            if complete_only && parsed.is_err() {
+                continue;
+            }
             call.sent = true;
-            let input = serde_json::from_str::<serde_json::Value>(&call.arguments)
-                .unwrap_or(serde_json::Value::String(call.arguments.clone()));
-            let _ = window.emit(
-                events.tool_call,
-                payload::ToolCall {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    input,
-                },
+            out.push(payload::ToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                input: parsed.unwrap_or(serde_json::Value::String(call.arguments.clone())),
+            });
+        }
+        out
+    }
+
+    /// emit 参数已完整的工具调用（JSON 解析成功即视为完整）。
+    ///
+    /// 按模型声明的 `index` 升序 emit——并行调用时保证时间线顺序稳定
+    /// （HashMap 迭代无序）。
+    fn flush_ready(&mut self, window: &Window, events: &ChatEvents) {
+        for call in self.take_unsent(true) {
+            tracing::debug!(
+                target = "fluen_chat_bridge",
+                tool_name = %call.name,
+                tool_call_id = %call.id,
+                "模型发起工具调用"
             );
+            let _ = window.emit(events.tool_call, call);
+        }
+    }
+
+    /// 流结束时冲刷全部未发送的工具调用（兜底，参数不完整时按原始字符串发）。
+    fn flush_all(&mut self, window: &Window, events: &ChatEvents) {
+        for call in self.take_unsent(false) {
+            let _ = window.emit(events.tool_call, call);
         }
     }
 
@@ -403,5 +407,62 @@ mod tests {
     #[test]
     fn empty_history_maps_to_empty() {
         assert!(to_referee_messages(&[]).is_empty());
+    }
+
+    use referee_ai::provider::{ToolCallDelta, ToolCallFunctionDelta};
+
+    /// 构造一条工具调用增量分片。
+    fn delta(index: u32, id: &str, name: &str, args: &str) -> ToolCallDelta {
+        ToolCallDelta {
+            index,
+            id: Some(id.into()),
+            function: Some(ToolCallFunctionDelta {
+                name: Some(name.into()),
+                arguments: Some(args.into()),
+            }),
+        }
+    }
+
+    #[test]
+    fn turn_reset_allows_index_reuse_across_turns() {
+        // 回合 1：index 0/1 两个工具调用，全部发出
+        let mut acc = ToolCallAccumulator::default();
+        acc.merge(vec![
+            delta(0, "c1", "paper_outline", r#"{"title":"大纲"}"#),
+            delta(1, "c2", "paper_section", r#"{"title":"一、引言"}"#),
+        ]);
+        let sent = acc.take_unsent(true);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].name, "paper_outline");
+        assert_eq!(sent[1].name, "paper_section");
+
+        // 回合边界（Finish 分片处理）：冲刷残余并重置累积器
+        acc = ToolCallAccumulator::default();
+
+        // 回合 2：index 从 0 重计——delegate_agent 必须正常发出
+        acc.merge(vec![delta(
+            0,
+            "c3",
+            "delegate_agent",
+            r#"{"agent_id":"essay_writing","task":"扩写研究现状"}"#,
+        )]);
+        let sent = acc.take_unsent(true);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].name, "delegate_agent");
+        assert_eq!(sent[0].input["agent_id"], "essay_writing");
+    }
+
+    #[test]
+    fn missing_turn_reset_swallows_next_turn_calls() {
+        // 回归锚点：不重置时（旧行为），第二回合同 index 的调用
+        // 并入已发送条目被静默吞掉——委派面板消失的根因
+        let mut acc = ToolCallAccumulator::default();
+        acc.merge(vec![delta(0, "c1", "paper_outline", r#"{"title":"大纲"}"#)]);
+        assert_eq!(acc.take_unsent(true).len(), 1);
+
+        acc.merge(vec![delta(0, "c2", "delegate_agent", r#"{"task":"扩写"}"#)]);
+        assert!(acc.take_unsent(true).is_empty(), "未重置时第二回合调用应被吞掉");
+        // 且参数被污染：原条目参数已不再是合法 JSON
+        assert!(!acc.calls[&0].sent || acc.calls[&0].arguments.contains("扩写"));
     }
 }

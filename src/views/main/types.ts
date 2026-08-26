@@ -73,7 +73,7 @@ export interface AgentActivity {
 
 /** 子智能体委派运行记录（挂在 delegate_agent 工具调用消息上）。 */
 export interface AgentRun {
-  /** 目标子智能体 ID（如 `academic_writer`）。 */
+  /** 目标子智能体 ID（如 `essay_writing`）。 */
   agentId: string;
   /** 派发的任务描述。 */
   task: string;
@@ -87,6 +87,13 @@ export interface AgentRun {
   tokensUsed?: number;
   /** 失败原因（失败时填充）。 */
   error?: string;
+  /**
+   * 子智能体思考过程累积文本（`motis:agent-thought` 增量追加；
+   * 依 MascotConfig.show_thinking_content 决定是否收集）。
+   */
+  thought?: string;
+  /** 子智能体实时输出累积文本（`motis:agent-text` 增量追加）。 */
+  text?: string;
   /**
    * 内部工具调用活动列表（按时间追加）。元素属性随事件更新、
    * 数组引用整体替换（只读数组契约，兼容 readonly 消息源）。

@@ -10,17 +10,43 @@
  *     用户点击「应用」才真正写入
  *   - 输入区：发送 / 停止（生成中）
  */
-import { ref, nextTick, watch, computed } from 'vue';
+import { ref, nextTick, watch, computed, inject } from 'vue';
 import MarkdownIt from 'markdown-it';
 import { useI18n } from '../../../i18n';
 import { useAIAssistant } from '../composables/useAIAssistant';
+import { useChatToolbar } from '../composables/useChatToolbar';
+import { useMainLayout, MAIN_LAYOUT_KEY } from '../composables/useMainLayout';
 import type { ChatMessage } from '../types';
 import ApprovalDialog from './ApprovalDialog.vue';
+import ChatInputToolbar from './ChatInputToolbar.vue';
 
 const { t } = useI18n();
 const ai = useAIAssistant();
 
 const { messages, isGenerating, pendingApprovals, send, cancel, resolveApproval } = ai;
+
+/* ── 布局与工具栏状态（模块级单例，与 MotisPanel 共享） ─────────────── */
+const layout = inject(MAIN_LAYOUT_KEY, () => useMainLayout(), true);
+const toolbar = useChatToolbar();
+
+/** 工具栏模式切换时同步到布局状态。 */
+watch(
+  () => toolbar.mode.value,
+  (next) => {
+    layout.setActiveRightPanel(next);
+  },
+);
+
+/** 外部切换面板时同步回工具栏。 */
+watch(
+  () => layout.activeRightPanel.value,
+  (next) => {
+    if (next && next !== toolbar.mode.value) {
+      toolbar.mode.value = next;
+    }
+  },
+  { immediate: true },
+);
 
 /* ── Markdown 渲染（助手消息） ───────────────────────────────────────── */
 /**
@@ -200,27 +226,23 @@ const showGeneratingIndicator = computed(() => isGenerating.value && messages.va
           rows="1"
           @keydown="handleKeydown"
         />
-        <button
-          v-if="isGenerating"
-          class="ai-panel__send ai-panel__stop"
-          :title="t('main.aiPanel.stop')"
-          @click="handleStop"
-        >
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-            <rect x="6" y="6" width="12" height="12" rx="2" />
-          </svg>
-        </button>
-        <button
-          v-else
-          class="ai-panel__send"
-          :disabled="!inputText.trim()"
-          @click="handleSend"
-        >
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 19V5M5 12l7-7 7 7" />
-          </svg>
-        </button>
       </div>
+
+      <!-- 底部工具栏 -->
+      <ChatInputToolbar
+        :mode="toolbar.mode.value"
+        :thinking-intensity="toolbar.thinkingIntensity.value"
+        :model-label="toolbar.activeModelLabel.value"
+        :models="toolbar.modelOptions.value"
+        :can-send="inputText.trim().length > 0 && !isGenerating"
+        :is-generating="isGenerating"
+        @update:mode="toolbar.mode.value = $event"
+        @update:thinking-intensity="toolbar.thinkingIntensity.value = $event"
+        @add-file="toolbar.addAttachment"
+        @select-model="toolbar.selectModel"
+        @send="handleSend"
+        @stop="handleStop"
+      />
     </div>
   </div>
 </template>
@@ -545,12 +567,6 @@ const showGeneratingIndicator = computed(() => isGenerating.value && messages.va
 }
 
 /* ── 输入区 ───────────────────────────────────────────────────────────── */
-.ai-panel__input-area {
-  flex-shrink: 0;
-  padding: 12px;
-  border-top: 1px solid var(--fluen-hairline);
-}
-
 .ai-panel__input-wrapper {
   display: flex;
   align-items: flex-end;
@@ -584,36 +600,12 @@ const showGeneratingIndicator = computed(() => isGenerating.value && messages.va
   color: var(--fluen-stone);
 }
 
-.ai-panel__send {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
+.ai-panel__input-area {
   flex-shrink: 0;
-  border: none;
-  border-radius: 8px;
-  background: var(--fluen-accent);
-  color: var(--fluen-on-accent);
-  cursor: pointer;
-  transition: opacity 0.15s ease, background 0.15s ease;
-}
-
-.ai-panel__send:hover:not(:disabled) {
-  background: var(--fluen-accent-hover);
-}
-
-.ai-panel__send:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.ai-panel__stop {
-  background: var(--fluen-danger, #d64545);
-}
-
-.ai-panel__stop:hover {
-  background: var(--fluen-danger, #d64545);
-  opacity: 0.85;
+  padding: 12px 12px 0;
+  border-top: 1px solid var(--fluen-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 </style>

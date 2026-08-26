@@ -19,6 +19,8 @@
 //!
 //! ```text
 //! motis:agent-started      →  委派发起（目标子智能体 + 任务 + 超时预算）
+//! motis:agent-thought      →  子智能体 LLM 思考增量（依配置收集）
+//! motis:agent-text         →  子智能体 LLM 输出增量（实时写作内容）
 //! motis:agent-tool-call    →  子智能体内部工具调用开始
 //! motis:agent-tool-result  →  子智能体内部工具调用结束（含结果/耗时）
 //! motis:agent-finished     →  委派结束（成功带 token，失败带原因与耗时）
@@ -54,6 +56,13 @@ pub const EVENT_ERROR: &str = "motis:error";
 
 /// 子智能体委派发起事件——目标子智能体开始执行任务。
 pub const EVENT_AGENT_STARTED: &str = "motis:agent-started";
+
+/// 子智能体思考增量事件——子智能体 LLM 推理过程的增量文本
+/// （引擎 `EngineObserver` 钩子透传，仅委派子会话产生）。
+pub const EVENT_AGENT_THOUGHT: &str = "motis:agent-thought";
+
+/// 子智能体文本增量事件——子智能体最终输出的增量文本（实时写作内容）。
+pub const EVENT_AGENT_TEXT: &str = "motis:agent-text";
 
 /// 子智能体内部工具调用开始事件。
 pub const EVENT_AGENT_TOOL_CALL: &str = "motis:agent-tool-call";
@@ -144,12 +153,23 @@ pub struct ErrorPayload {
 pub struct AgentStartedPayload {
     /// 父级 `delegate_agent` 工具调用 ID（与 tool-call 事件的 id 一致）。
     pub tool_call_id: String,
-    /// 目标子智能体 ID（如 `academic_writer`）。
+    /// 目标子智能体 ID（如 `essay_writing`）。
     pub agent_id: String,
     /// 派发的任务描述。
     pub task: String,
     /// 委派超时预算（毫秒）。
     pub timeout_ms: u64,
+}
+
+/// 子智能体输出增量 payload（思考 / 文本增量事件共用）。
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentDeltaPayload {
+    /// 父级 `delegate_agent` 工具调用 ID（与 agent-started 事件的 id 一致）。
+    pub tool_call_id: String,
+    /// 子智能体 ID。
+    pub agent_id: String,
+    /// 本帧增量文本。
+    pub delta: String,
 }
 
 /// 子智能体内部工具调用 payload。

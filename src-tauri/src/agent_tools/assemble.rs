@@ -38,6 +38,14 @@ pub fn register_manuscript(
     )))
 }
 
+/// 注册只读项目文件读取工具 `project_read`（讨论/审核类角色的只读取用）。
+pub fn register_project_read(
+    registry: &ToolRegistry,
+    project_path: &str,
+) -> Result<(), RegistryError> {
+    registry.register(Arc::new(ProjectReadTool::new(project_path.to_string())))
+}
+
 /// 注册项目文件三件套：`project_read` 只读直装；`project_write` /
 /// `project_edit` 经 referee 原语并由 ApprovalGuard 包装（正文 main.md 写保护）。
 pub fn register_project_files(
@@ -45,7 +53,7 @@ pub fn register_project_files(
     project_path: &str,
     approver: Arc<dyn Approver>,
 ) -> Result<(), RegistryError> {
-    registry.register(Arc::new(ProjectReadTool::new(project_path.to_string())))?;
+    register_project_read(registry, project_path)?;
     registry.register(Arc::new(ApprovalGuard::new(
         Arc::new(ProjectWriteTool::new(project_path.to_string())),
         approver.clone(),
@@ -123,6 +131,19 @@ mod tests {
             assert!(registry.get(name).is_some(), "缺少工具 {name}");
         }
         assert!(registry.get("literature_search").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn register_project_read_only_excludes_write_tools() {
+        let dir = temp_dir("readonly");
+        let registry = ToolRegistry::with_defaults();
+        register_project_read(&registry, dir.to_str().unwrap()).unwrap();
+
+        assert!(registry.get("project_read").is_some());
+        assert!(registry.get("project_write").is_none());
+        assert!(registry.get("project_edit").is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }

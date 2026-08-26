@@ -297,9 +297,11 @@ fn default_version() -> String {
     "1.0.0".to_string()
 }
 
-/// 文献导入 AI 校正默认超时（秒）——4 分钟。
+/// 文献导入 AI 校正默认超时（秒）——10 分钟。
+///
+/// 长文献全文校正（MiMo 等推理模型）生成可能超过 4 分钟，默认值需留有足够余量。
 fn default_reference_import_timeout() -> u64 {
-    240
+    600
 }
 
 /// 文献导入产品默认模式——OCR + AI 校正（质量优先，图片保留 + 格式校正 + 作者解析）。
@@ -449,8 +451,8 @@ mod tests {
     }
 
     #[test]
-    fn default_reference_import_timeout_is_240() {
-        assert_eq!(AiServicesConfig::default().reference_import_timeout_secs, 240);
+    fn default_reference_import_timeout_is_600() {
+        assert_eq!(AiServicesConfig::default().reference_import_timeout_secs, 600);
     }
 
     #[test]
@@ -467,7 +469,7 @@ mod tests {
             parsed.default_reference_import_mode,
             crate::references::import_mode::ReferenceImportMode::OcrWithAiCorrection
         );
-        // 旧版配置无超时字段时回退到默认 240
-        assert_eq!(parsed.reference_import_timeout_secs, 240);
+        // 旧版配置无超时字段时回退到默认 600
+        assert_eq!(parsed.reference_import_timeout_secs, 600);
     }
 }

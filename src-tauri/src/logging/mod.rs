@@ -11,6 +11,20 @@
 //! - 环境变量 `FLUEN_LOG` 覆盖级别（最高优先，便于临时调试）
 //! - 前端日志经 [`commands::log_frontend`] 桥接到同一文件
 //!
+//! ## 输出格式（[`CompactFormat`]）
+//!
+//! 统一使用精简格式：`时间 级别 target: 消息 字段…`。**不渲染 span 上下文**，
+//! 消除 referee_ai 等产生的超长 span 前缀（如 `base_turn{…}:execute_single{…}:`），
+//! 降低噪声、突出级别、模块与关键结构化字段，便于定位。文件纯文本，控制台可配 ANSI。
+//!
+//! ## 接入约定
+//!
+//! - 模块内部用 `tracing::{info,debug,warn,error,trace}`（target 默认取模块路径）。
+//! - 关键阶段里程碑用 `info`；过程/检索细节用 `debug`；更细粒度用 `trace`。
+//! - 关键结构化字段（如 `task_id`、`ref_id`、`wiki_id`）以 `field` 形式随日志事件给出，
+//!   供复盘与 `EnvFilter` 按字段/模块筛选。默认级别为 `info`，需要明细时用
+//!   `FLUEN_LOG=fluen_lib::knowledge_builder=debug,info` 调级，避免全局噪声。
+//!
 //! ## 文件命名
 //!
 //! - 首个文件：`fluen_YYYYMMDDHHMMSS.log`
@@ -27,7 +41,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tracing::{field::{Field, Visit}, Event, Level};
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_core::Subscriber;
+use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
+use tracing_subscriber::fmt::FmtContext;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::platform;
@@ -186,20 +205,16 @@ pub fn init_logging(config: &LogConfig) -> Result<WorkerGuard, LogError> {
         .or_else(|_| EnvFilter::try_new(&config.level))
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
-    // 文件 layer（非阻塞、无 ANSI 颜色码）
+    // 文件 layer（非阻塞、纯文本、精简格式）
     let file_layer = fmt::layer()
-        .with_target(true)
-        .with_level(true)
-        .with_ansi(false)
+        .event_format(CompactFormat::default())
         .with_writer(non_blocking);
 
     let registry = tracing_subscriber::registry().with(filter).with(file_layer);
 
     if config.console_enabled {
         let console_layer = fmt::layer()
-            .with_target(true)
-            .with_level(true)
-            .with_ansi(true)
+            .event_format(CompactFormat::default().with_ansi(true))
             .with_writer(std::io::stdout);
         registry.with(console_layer).init();
     } else {
@@ -217,6 +232,126 @@ pub fn init_logging(config: &LogConfig) -> Result<WorkerGuard, LogError> {
     );
 
     Ok(guard)
+}
+
+// ===========================================================================
+// 自定义紧凑事件格式器
+// ===========================================================================
+
+/// 精简日志事件格式：`时间 级别 target: 消息 字段…`，不渲染 span 上下文。
+///
+/// 相比默认 `tracing_subscriber` 输出，去掉 `referee_ai` 等产生的超长 span 前缀
+/// （如 `base_turn{…}:execute_single{…}:`），显著降低噪声、突出真实信息。
+/// 控制台可启用 ANSI 颜色，日志文件保持纯文本。
+#[derive(Clone, Copy)]
+struct CompactFormat {
+    ansi: bool,
+}
+
+impl Default for CompactFormat {
+    fn default() -> Self {
+        Self { ansi: false }
+    }
+}
+
+impl CompactFormat {
+    fn with_ansi(mut self, on: bool) -> Self {
+        self.ansi = on;
+        self
+    }
+}
+
+/// 写入本地时间前缀：`YYYY-MM-DD HH:MM:SS.mmm`。
+fn write_timestamp(w: &mut dyn std::fmt::Write) -> std::fmt::Result {
+    let now = chrono::Local::now();
+    write!(w, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))
+}
+
+/// 级别标签（可选 ANSI 着色）。
+fn level_label(level: &Level, ansi: bool) -> String {
+    let (text, code) = match *level {
+        Level::ERROR => ("ERROR", "31"),
+        Level::WARN => ("WARN", "33"),
+        Level::INFO => ("INFO", "32"),
+        Level::DEBUG => ("DEBUG", "36"),
+        Level::TRACE => ("TRACE", "90"),
+    };
+    if ansi {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// 将事件字段渲染为 `key=value`（`message` 字段仅输出文本，不带键名）。
+struct FieldRenderer<'w> {
+    w: &'w mut dyn std::fmt::Write,
+    first: bool,
+}
+
+impl FieldRenderer<'_> {
+    fn put(&mut self, field: &Field, args: std::fmt::Arguments<'_>) {
+        let sep = if self.first { "" } else { " " };
+        if field.name() == "message" {
+            let _ = write!(self.w, "{sep}{args}");
+        } else {
+            let _ = write!(self.w, "{sep}{}={args}", field.name());
+        }
+        self.first = false;
+    }
+}
+
+impl Visit for FieldRenderer<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.put(field, format_args!("{value:?}"));
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.put(field, format_args!("{value}"));
+    }
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.put(field, format_args!("{value}"));
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.put(field, format_args!("{value}"));
+    }
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.put(field, format_args!("{value}"));
+    }
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.put(field, format_args!("{value}"));
+    }
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.put(field, format_args!("{value}"));
+    }
+}
+
+impl<S, N> FormatEvent<S, N> for CompactFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        let meta = event.metadata();
+
+        write_timestamp(&mut writer)?;
+        write!(writer, "{} ", level_label(meta.level(), self.ansi))?;
+        write!(writer, "{}: ", meta.target())?;
+
+        {
+            let mut renderer = FieldRenderer {
+                w: &mut writer,
+                first: true,
+            };
+            event.record(&mut renderer);
+        }
+        writeln!(writer)?;
+        Ok(())
+    }
 }
 
 // ===========================================================================
@@ -383,6 +518,28 @@ mod tests {
         assert!(cfg.log_dir.is_none());
         assert_eq!(cfg.max_entries_per_file, DEFAULT_MAX_ENTRIES_PER_FILE);
         assert_eq!(cfg.max_file_count, DEFAULT_MAX_FILE_COUNT);
+    }
+
+    #[test]
+    fn level_label_plain_and_ansi() {
+        assert_eq!(level_label(&Level::INFO, false), "INFO");
+        assert_eq!(level_label(&Level::ERROR, true), "\x1b[31mERROR\x1b[0m");
+    }
+
+    #[test]
+    fn compact_format_ansi_flag() {
+        assert!(!CompactFormat::default().ansi);
+        assert!(CompactFormat::default().with_ansi(true).ansi);
+    }
+
+    #[test]
+    fn write_timestamp_emits_datetime_prefix() {
+        let mut out = String::new();
+        write_timestamp(&mut out).unwrap();
+        assert!(out.len() >= 20);
+        // 形如 YYYY-MM-DD HH:MM:SS.mmm
+        assert_eq!(out.chars().nth(4), Some('-'));
+        assert_eq!(out.chars().nth(10), Some(' '));
     }
 
     #[test]

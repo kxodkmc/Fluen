@@ -52,7 +52,7 @@ export interface AiServicesConfig {
   providers: AiServiceProvider[];
   /** 文献导入默认模式（设置页可配置，默认纯 OCR）。 */
   default_reference_import_mode: ReferenceImportMode;
-  /** 文献导入时 AI 校正的最大响应时间（秒），默认 240。 */
+  /** 文献导入时 AI 校正的最大响应时间（秒），默认 600。 */
   reference_import_timeout_secs: number;
 }
 

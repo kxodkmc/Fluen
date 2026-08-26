@@ -120,7 +120,7 @@ const MOTIS_TOOLS_BODY: &str = "工具使用规则：\n- 调用前评估风险�
 
 /// SubAgents：可用子智能体清单（动态注入，根据 `enabled_agents` 过滤）。
 fn sub_agents_section(agents_desc: &str) -> String {
-    format!("## 可用子智能体\n\n你可以通过 `delegate_agent` 工具调用以下子智能体执行任务：\n\n{agents_desc}\n\n**使用建议**：\n- 撰写论文正文 → `academic_writer`\n- 检索文献知识 → `knowledge_builder`\n- 统计分析数据 → `data_analyst`\n\n委派时请在 `task` 参数中提供清晰、完整的任务描述，包含必要的上下文、约束和期望输出格式。")
+    format!("## 可用子智能体\n\n你可以通过 `delegate_agent` 工具调用以下子智能体执行任务：\n\n{agents_desc}\n\n**使用建议**：\n- 撰写论文正文 → `essay_writing`\n- 引导论文思辨讨论 → `essay_critique`\n- 审核论文 → `essay_review`（当前开发中）\n- 检索文献知识 → `knowledge_builder`\n- 统计分析数据 → `data_analyst`\n\n委派时请在 `task` 参数中提供清晰、完整的任务描述，包含必要的上下文、约束和期望输出格式。")
 }
 
 // ===========================================================================
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn prompt_contains_all_sections() {
-        let agents_desc = "- `academic_writer`: 撰写助手\n- `knowledge_builder`: 知识库助手\n- `data_analyst`: 数据分析助手";
+        let agents_desc = "- `essay_writing`: 论文撰写助手\n- `essay_review`: 论文审核助手（开发中）\n- `essay_critique`: 论文思辨助手\n- `knowledge_builder`: 知识库助手\n- `data_analyst`: 数据分析助手";
         let prompt = build_system_prompt(&sample_config(), &sample_data(), agents_desc, true);
         // 每段的关键锚点
         assert!(prompt.contains("你是 Motis"));
@@ -239,7 +239,9 @@ mod tests {
         assert!(prompt.contains("对话策略"));
         assert!(prompt.contains("工具使用规则"));
         assert!(prompt.contains("可用子智能体"));
-        assert!(prompt.contains("academic_writer"));
+        assert!(prompt.contains("essay_writing"));
+        assert!(prompt.contains("essay_critique"));
+        assert!(prompt.contains("essay_review"));
         assert!(prompt.contains("knowledge_builder"));
         assert!(prompt.contains("data_analyst"));
     }
@@ -256,7 +258,7 @@ mod tests {
         assert!(!prompt.contains("project_read"));
         assert!(!prompt.contains("工具使用规则"));
         assert!(!prompt.contains("可用子智能体"));
-        assert!(!prompt.contains("academic_writer"));
+        assert!(!prompt.contains("essay_writing"));
         // 直接答疑模式文案存在
         assert!(prompt.contains("直接给出回答"));
         assert!(prompt.contains("当前模式"));

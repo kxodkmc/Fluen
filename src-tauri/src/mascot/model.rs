@@ -70,7 +70,7 @@ pub struct MascotConfig {
     /// 已启用的子智能体 ID 列表（空列表 = 全部可用）。
     ///
     /// 控制 Motis 总督角色可通过 `delegate_agent` 调度的子智能体集合。
-    /// 在设置页面可逐个开关。值为子智能体 ID 字符串（如 `"academic_writer"`）。
+    /// 在设置页面可逐个开关。值为子智能体 ID 字符串（如 `"essay_writing"`）。
     #[serde(default)]
     pub enabled_agents: Vec<String>,
 }
@@ -241,7 +241,7 @@ mod tests {
             personality: "calm".into(),
             show_thinking_content: true,
             professional_expression: true,
-            enabled_agents: vec!["academic_writer".into(), "data_analyst".into()],
+            enabled_agents: vec!["essay_writing".into(), "data_analyst".into()],
         };
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: MascotConfig = serde_json::from_str(&json).unwrap();
@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(parsed.personality, "calm");
         assert!(parsed.show_thinking_content);
         assert!(parsed.professional_expression);
-        assert_eq!(parsed.enabled_agents, vec!["academic_writer", "data_analyst"]);
+        assert_eq!(parsed.enabled_agents, vec!["essay_writing", "data_analyst"]);
     }
 
     #[test]

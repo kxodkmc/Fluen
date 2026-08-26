@@ -40,9 +40,11 @@
 //! | [`events`] | Tauri 事件常量与 payload 结构 |
 //! | [`prompts`] | 两阶段 prompt 模板与渲染（V2.1 含 candidates 渲染） |
 //! | [`llm_helper`] | LLM 客户端与运行时构建（含 `submit_plan` 工具 + UsageObserver） |
+//! | [`chat_retry`] | 工具凭证催促重试（capture 为空时强制模型回到工具调用路径） |
 //! | [`pipeline`] | 两阶段流水线主入口（V2.1 注入快照 + L2 检索 + usage 更新） |
 //! | [`commands`] | Tauri commands，供前端调用 |
 
+pub mod chat_retry;
 pub mod commands;
 pub mod config;
 pub mod context_budget;

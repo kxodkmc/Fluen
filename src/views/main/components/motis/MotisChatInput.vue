@@ -2,11 +2,10 @@
 /**
  * MotisChatInput — Motis 对话输入区。
  *
- * 文本输入框 + 发送/停止按钮：
- *   - 生成中显示停止按钮（触发 cancel）
- *   - 非生成中显示发送按钮（触发 send）
+ * 仅保留多行文本输入框：
  *   - 回车发送，Shift+回车换行
  *   - 使用 v-model 双向绑定草稿消息
+ *   - 发送/停止等操作由外层 ChatInputToolbar 提供
  */
 import { ref, watch, nextTick, onMounted } from 'vue';
 import { useI18n } from '../../../../i18n';
@@ -80,11 +79,6 @@ onMounted(() => {
     nextTick(() => textareaRef.value?.focus());
   }
 });
-
-/** 是否可发送（有内容且未在生成中）。 */
-function canSend(): boolean {
-  return props.modelValue.trim().length > 0 && !props.isGenerating;
-}
 </script>
 
 <template>
@@ -99,28 +93,6 @@ function canSend(): boolean {
         @input="onInput"
         @keydown="onKeydown"
       />
-      <!-- 发送 / 停止按钮 -->
-      <button
-        v-if="!isGenerating"
-        class="motis-input__btn motis-input__btn--send"
-        :disabled="!canSend()"
-        :title="t('main.motisPanel.sendMessage')"
-        @click="handleSend"
-      >
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 19V5M5 12l7-7 7 7" />
-        </svg>
-      </button>
-      <button
-        v-else
-        class="motis-input__btn motis-input__btn--stop"
-        :title="t('main.motisPanel.stop')"
-        @click="$emit('cancel')"
-      >
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-          <rect x="6" y="6" width="12" height="12" rx="2" />
-        </svg>
-      </button>
     </div>
   </div>
 </template>
@@ -128,8 +100,7 @@ function canSend(): boolean {
 <style scoped>
 .motis-input {
   flex-shrink: 0;
-  padding: 12px;
-  border-top: 1px solid var(--fluen-hairline);
+  padding: 12px 12px 0;
   background: var(--fluen-surface);
 }
 
@@ -165,41 +136,4 @@ function canSend(): boolean {
   color: var(--fluen-stone);
 }
 
-.motis-input__btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
-  transition: opacity 0.15s ease, background 0.15s ease;
-}
-
-.motis-input__btn--send {
-  background: var(--fluen-brand-coral);
-  color: var(--fluen-on-dark);
-}
-
-.motis-input__btn--send:hover:not(:disabled) {
-  opacity: 0.85;
-}
-
-.motis-input__btn--send:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-
-.motis-input__btn--stop {
-  background: var(--fluen-surface);
-  color: var(--fluen-slate);
-  border: 1px solid var(--fluen-hairline);
-}
-
-.motis-input__btn--stop:hover {
-  background: var(--fluen-hover);
-  color: var(--fluen-ink);
-}
 </style>

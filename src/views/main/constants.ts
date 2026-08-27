@@ -65,7 +65,7 @@ export const FILE_MENU_ITEM_IDS = [
 ] as const;
 
 /** 帮助菜单子项 ID。 */
-export const HELP_MENU_ITEM_IDS = ['openLogsDir'] as const;
+export const HELP_MENU_ITEM_IDS = ['about', 'openLogsDir'] as const;
 
 /** 标题栏响应式断点（px）。 */
 export const TITLE_BAR_BREAKPOINTS = {

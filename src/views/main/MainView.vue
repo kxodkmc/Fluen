@@ -28,6 +28,7 @@ import { RightPanel } from './components/rightpanel';
 import StatusBar from './components/statusbar/StatusBar.vue';
 import { useProjectStatus } from './components/statusbar';
 import NewProjectDialog from '../../components/NewProjectDialog.vue';
+import AboutDialog from '../../components/AboutDialog.vue';
 import { useMainLayout, MAIN_LAYOUT_KEY } from './composables/useMainLayout';
 import { useMotisChat } from './composables/useMotisChat';
 import { MOTIS_CHAT_KEY } from './components/motis';
@@ -35,10 +36,7 @@ import { useProject } from '../../composables/useProject';
 import { useFluenEditor } from './components/editor/composables/useFluenEditor';
 import { registerCommand, unregisterCommand, bindShortcut, unbindShortcut } from '../../shortcuts';
 import { PANEL_CONSTRAINTS } from './constants';
-import { useI18n } from '../../i18n';
-import type { ContentTab, EditorLayoutMode } from './types';
-
-const { t } = useI18n();
+import type { EditorLayoutMode } from './types';
 
 /* ── 布局状态 ─────────────────────────────────────────────────────────── */
 const layout = useMainLayout();
@@ -68,7 +66,7 @@ const SAVE_DOCUMENT_COMMAND = 'save-document';
 /** 编辑器视图模式 → 快捷键映射（Mod+1/2/3）。 */
 const EDITOR_LAYOUT_SHORTCUTS: ReadonlyArray<readonly [EditorLayoutMode, string]> = [
   ['source', 'Mod-1'],
-  ['split', 'Mod-2'],
+  ['live', 'Mod-2'],
   ['preview', 'Mod-3'],
 ];
 
@@ -83,7 +81,7 @@ onMounted(() => {
   });
   bindShortcut('Mod-s', SAVE_DOCUMENT_COMMAND);
 
-  // 编辑器视图切换（Mod+1 仅源码 / Mod+2 双栏 / Mod+3 仅渲染）
+  // 编辑器视图切换（Mod+1 仅源码 / Mod+2 半预览 / Mod+3 仅渲染）
   for (const [mode, key] of EDITOR_LAYOUT_SHORTCUTS) {
     registerCommand(layoutCommandId(mode), () => layout.setEditorLayout(mode));
     bindShortcut(key, layoutCommandId(mode));
@@ -152,20 +150,11 @@ defineEmits<{
   (e: 'navigate-settings'): void;
 }>();
 
-/* ── 标签页操作占位 ───────────────────────────────────────────────────── */
-function openPlaceholderTab(): void {
-  const id = `tab-${Date.now()}`;
-  const tab: ContentTab = {
-    id,
-    title: t('main.content.newDocName'),
-    type: 'file',
-    dirty: true,
-  };
-  layout.openTab(tab);
-}
-
 /* ── 新建文章对话框 ───────────────────────────────────────────────────── */
 const showNewProjectDialog = ref(false);
+
+/** “关于”对话框显示状态。 */
+const showAboutDialog = ref(false);
 
 /** 处理标题栏菜单选择。 */
 async function handleMenuSelect(itemId: string): Promise<void> {
@@ -175,6 +164,8 @@ async function handleMenuSelect(itemId: string): Promise<void> {
     await handleOpenArticle();
   } else if (itemId === 'openLogsDir') {
     await handleOpenLogsDir();
+  } else if (itemId === 'about') {
+    showAboutDialog.value = true;
   }
 }
 
@@ -288,16 +279,17 @@ watch(
     <!-- 拖拽遮罩：阻止 iframe / contenteditable 抢占 mousemove -->
     <div v-if="isResizing" class="main-view__resize-mask"></div>
 
-    <!-- 开发辅助：打开占位标签页按钮（后续移除） -->
-    <button class="main-view__dev-btn" @click="openPlaceholderTab">
-      {{ t('main.dev.openTabPlaceholder') }}
-    </button>
-
     <!-- 新建文章对话框 -->
     <NewProjectDialog
       :visible="showNewProjectDialog"
       @close="showNewProjectDialog = false"
       @created="handleProjectCreated"
+    />
+
+    <!-- “关于”对话框 -->
+    <AboutDialog
+      :visible="showAboutDialog"
+      @close="showAboutDialog = false"
     />
   </div>
 </template>
@@ -349,28 +341,5 @@ watch(
   cursor: col-resize;
   background: transparent;
   user-select: none;
-}
-
-/* ── 开发辅助按钮 ─────────────────────────────────────────────────────── */
-.main-view__dev-btn {
-  position: fixed;
-  bottom: 32px;
-  right: 50%;
-  transform: translateX(50%);
-  padding: 6px 14px;
-  border: 1px solid var(--fluen-hairline);
-  border-radius: 9999px;
-  background: var(--fluen-surface);
-  color: var(--fluen-slate);
-  font-family: var(--fluen-font-sans);
-  font-size: 12px;
-  cursor: pointer;
-  z-index: 100;
-  opacity: 0.6;
-  transition: opacity 0.2s ease;
-}
-
-.main-view__dev-btn:hover {
-  opacity: 1;
 }
 </style>

@@ -1,5 +1,5 @@
 项目名称:Fluen
-版本:0.1.0
+版本:0.0.1-beta
 时间:2026年7月
 运行在Windows和MacOS、Linux
 本项目是使用LLM、OCR等技术辅助学术创作的平台，基于tauri开发，使用Vue3和Rust开发

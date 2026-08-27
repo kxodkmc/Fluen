@@ -97,6 +97,7 @@ export default {
           recentArticles: 'Recent',
         },
         helpItems: {
+          about: 'About',
           openLogsDir: 'Open Logs Directory',
         },
       },
@@ -429,7 +430,7 @@ export default {
       newDocName: 'New Document.md',
       view: {
         label: 'Editor view',
-        split: 'Split',
+        live: 'Live Preview',
         source: 'Source',
         preview: 'Preview',
       },
@@ -454,8 +455,13 @@ export default {
       projectOpen: 'Open: {title}',
       projectClosed: 'No article open',
     },
-    dev: {
-      openTabPlaceholder: '+ Open Tab (Dev Placeholder)',
+    about: {
+      title: 'About',
+      description: 'An academic writing platform powered by LLM and OCR technologies.',
+      loading: 'Loading…',
+      runtime: 'Runtime',
+      libraries: 'Core Libraries',
+      close: 'Close',
     },
     taskQueue: {
       title: 'Task Queue',

@@ -97,6 +97,7 @@ export default {
           recentArticles: '最近打开',
         },
         helpItems: {
+          about: '关于',
           openLogsDir: '打开日志目录',
         },
       },
@@ -429,7 +430,7 @@ export default {
       newDocName: '新文档.md',
       view: {
         label: '编辑器视图',
-        split: '双栏',
+        live: '半预览',
         source: '仅源码',
         preview: '仅渲染',
       },
@@ -454,8 +455,13 @@ export default {
       projectOpen: '已打开：{title}',
       projectClosed: '未打开文章',
     },
-    dev: {
-      openTabPlaceholder: '+ 打开标签页（开发占位）',
+    about: {
+      title: '关于',
+      description: '基于 LLM 与 OCR 技术的学术创作平台。',
+      loading: '读取中…',
+      runtime: '运行环境',
+      libraries: '核心依赖库',
+      close: '关闭',
     },
     taskQueue: {
       title: '任务队列',

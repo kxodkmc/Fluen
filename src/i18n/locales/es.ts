@@ -97,6 +97,7 @@ export default {
           recentArticles: 'Recientes',
         },
         helpItems: {
+          about: 'Acerca de',
           openLogsDir: 'Abrir directorio de registros',
         },
       },
@@ -429,7 +430,7 @@ export default {
       newDocName: 'Nuevo documento.md',
       view: {
         label: 'Vista del editor',
-        split: 'Dividido',
+        live: 'Vista previa en vivo',
         source: 'Solo código',
         preview: 'Solo vista',
       },
@@ -454,8 +455,13 @@ export default {
       projectOpen: 'Abierto: {title}',
       projectClosed: 'Ningún artículo abierto',
     },
-    dev: {
-      openTabPlaceholder: '+ Abrir pestaña (marcador de desarrollo)',
+    about: {
+      title: 'Acerca de',
+      description: 'Una plataforma de escritura académica impulsada por LLM y OCR.',
+      loading: 'Cargando…',
+      runtime: 'Entorno de ejecución',
+      libraries: 'Bibliotecas principales',
+      close: 'Cerrar',
     },
     taskQueue: {
       title: 'Cola de tareas',

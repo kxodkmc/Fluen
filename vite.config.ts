@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
+import pkg from "./package.json";
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 const host = process.env.TAURI_DEV_HOST;
@@ -13,6 +14,9 @@ export default defineConfig(() => ({
   // consulted by vitest when a dedicated vitest.config.ts exists.
   define: {
     'import.meta.vitest': 'false',
+    // “关于”对话框的版本信息来源：package.json 是唯一维护点，构建期注入。
+    __APP_VERSION__: JSON.stringify(pkg.version),
+    __APP_LIB_VERSIONS__: JSON.stringify(pkg.dependencies),
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

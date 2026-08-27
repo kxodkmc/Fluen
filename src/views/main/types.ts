@@ -10,11 +10,11 @@ export type PanelId = 'function' | 'content' | 'ai';
 
 /**
  * 编辑器视图模式。
- * - `split`：双栏（左 MD 源码 + 右 HTML 预览）
  * - `source`：仅显示 MD 源码
+ * - `live`：半预览（同一编辑器开启实时渲染，WYSIWYG 所见即所得编辑）
  * - `preview`：仅显示 HTML 预览
  */
-export type EditorLayoutMode = 'split' | 'source' | 'preview';
+export type EditorLayoutMode = 'live' | 'source' | 'preview';
 
 /** 活动栏项目 — 左侧功能区中的导航条目。 */
 export interface ActivityItem {

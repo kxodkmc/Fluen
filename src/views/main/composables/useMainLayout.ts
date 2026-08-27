@@ -34,7 +34,7 @@ export function useMainLayout() {
   const aiPanelWidth = ref<number>(DEFAULT_PANEL_SIZES.aiPanel);
 
   /* ── 编辑器视图模式 ─────────────────────────────────────────────────── */
-  /** 默认进入预览视图（仅渲染 HTML），源码/双栏可通过切换控件或 Mod+1/2 进入。 */
+  /** 默认进入预览视图（仅渲染 HTML），源码/半预览可通过切换控件或 Mod+1/2 进入。 */
   const editorLayout = ref<EditorLayoutMode>('preview');
 
   /* ── 活动栏 ─────────────────────────────────────────────────────────── */
@@ -104,7 +104,7 @@ export function useMainLayout() {
 
   /* ── 活动栏 ─────────────────────────────────────────────────────────── */
 
-  /** 切换编辑器视图模式（split 双栏 / source 仅源码 / preview 仅渲染）。 */
+  /** 切换编辑器视图模式（source 仅源码 / live 半预览 / preview 仅渲染）。 */
   function setEditorLayout(mode: EditorLayoutMode): void {
     editorLayout.value = mode;
   }

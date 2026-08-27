@@ -1,9 +1,10 @@
 /**
- * CodeMirror 6 装配——双栏 MD 源码编辑器的扩展组合。
+ * CodeMirror 6 装配——MD 源码编辑器的扩展组合。
  *
- * 仅负责 CM6 实例的创建与默认扩展装配（history、markdown、f- 标签/脚注语法高亮、
- * keymap、update listener），不引入任何渲染/装饰逻辑——预览由独立的 FluenPreview
- * 组件经后端 `editor_render_html` 完成。
+ * 仅负责 CM6 实例的创建与默认扩展装配（history、markdown、f- 标签/脚注/数学
+ * 语法高亮、半预览扩展、keymap、update listener）。HTML 级渲染仍由独立的
+ * FluenPreview 组件经后端 `editor_render_html` 完成；半预览（live）视图
+ * 由 livePreview 扩展包在同一编辑器实例上动态开关实现。
  *
  * 这是唯一知道 CM6 导入的模块，其他编辑器模块均消费这里的工厂函数。
  */
@@ -11,7 +12,7 @@
 import { EditorState } from '@codemirror/state';
 import { EditorView, keymap, drawSelection } from '@codemirror/view';
 import { defaultKeymap, historyKeymap, history, undo, redo } from '@codemirror/commands';
-import { markdown } from '@codemirror/lang-markdown';
+import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import {
   syntaxHighlighting,
   defaultHighlightStyle,
@@ -21,6 +22,7 @@ import {
 import { ftagExtension } from './ftagSyntax';
 import { footnoteExtension } from './footnoteSyntax';
 import { hideSectionMarkers } from './markerDecoration';
+import { fluenMathExtension, livePreviewExtension } from './livePreview';
 
 /**
  * CM6 update listener 转发的回调集合。composable 订阅这些回调以同步响应式状态。
@@ -49,10 +51,16 @@ export function createEditorState(doc: string, callbacks: EditorCallbacks): Edit
       drawSelection(),
       bracketMatching(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-      // 启用 f- 标签与脚注语法扩展（语法高亮，非装饰渲染）
-      markdown({ extensions: [ftagExtension, footnoteExtension] }),
+      // 启用 f- 标签、脚注与数学公式语法扩展；base 采用 GFM 方言
+      // （表格 / 删除线 / 任务列表 / 上下标），与半预览渲染规则对齐
+      markdown({
+        base: markdownLanguage,
+        extensions: [ftagExtension, footnoteExtension, fluenMathExtension],
+      }),
       // 隐藏章节标记行（<!-- @sec_id:xxx -->），对用户不可见但保留在文档中
       hideSectionMarkers,
+      // 半预览扩展包：默认关闭，经 useFluenEditor().setLivePreview() 动态开启
+      ...livePreviewExtension,
       keymap.of([
         // Ctrl/Cmd+S → save（return true 阻止浏览器默认行为）。
         // 注：全局快捷键模块（src/shortcuts）在 document capture 阶段已接管 Mod-s，

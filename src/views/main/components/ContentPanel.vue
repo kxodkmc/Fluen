@@ -4,7 +4,10 @@
  *
  * 两层结构：
  *   标签栏（Tab Bar）   — 已打开文件的标签页列表
- *   编辑区（Editor）    — 双栏：左 MD 源码编辑（FluenEditor）+ 右实时 HTML 预览（FluenPreview）
+ *   编辑区（Editor）    — 三视图互斥：仅源码 / 半预览(live) / 仅渲染
+ *     · 仅源码：FluenEditor 源码形态
+ *     · 半预览：同一 FluenEditor 开启实时渲染（WYSIWYG，由 livePreview 扩展实现）
+ *     · 仅渲染：FluenPreview 后端 HTML 预览
  *
  * 无标签页时展示欢迎页（Welcome）。
  * 项目打开后，自动创建一个以项目标题命名的标签页，编辑区渲染 `main.md`。
@@ -31,11 +34,19 @@ const { hasProject, config, mainMd, refreshProject } = useProject();
 /* ── 编辑器视图模式（注入 MainView 共享布局实例） ─────────────────── */
 const layout = inject(MAIN_LAYOUT_KEY);
 const editorLayout = computed(() => layout?.editorLayout.value ?? 'preview');
+const editor = useFluenEditor();
 
-// 视图切换（v-show 显隐）后让 CM6 立即重新测量，避免容器尺寸从 0 恢复时的测量延迟
-watch(editorLayout, () => {
-  useFluenEditor().requestMeasure();
-});
+// 视图切换语义：
+//   - 进入/离开半预览时驱动同一 CM6 实例的实时渲染开关（StateEffect，零损耗）
+//   - v-show 显隐后让 CM6 立即重新测量，避免容器尺寸从 0 恢复时的测量延迟
+watch(
+  editorLayout,
+  (mode) => {
+    editor.setLivePreview(mode === 'live');
+    editor.requestMeasure();
+  },
+);
+
 
 const props = defineProps<{
   /** 已打开的标签页列表 */
@@ -180,18 +191,19 @@ onUnmounted(() => {
         @close="$emit('close-tab', activeTab.id)"
       />
 
-      <!-- 双栏/视图模式（有项目时）：左 MD 源码 + 右 HTML 预览，按 editorLayout 显隐 -->
-      <div v-else-if="hasProject" class="content-split">
-        <!-- 源码侧：顶部工具栏 + MD 编辑器（预览模式下整体隐藏） -->
-        <div v-show="editorLayout !== 'preview'" class="content-split__source">
+      <!-- 三视图编辑区（有项目时）：源码 / 半预览共用同一编辑器，按 editorLayout 显隐 -->
+      <div v-else-if="hasProject" class="content-editor">
+        <!-- 编辑器侧（source 与 live 模式均可见；live 下为实时渲染形态） -->
+        <div v-show="editorLayout !== 'preview'" class="content-editor__editing">
           <EditorToolbar />
           <FluenEditor
             :md="mainMd"
-            class="content-split__editor"
+            class="content-editor__canvas"
             @doc-change="onDocChange"
           />
         </div>
-        <FluenPreview v-show="editorLayout !== 'source'" :md="liveMd" class="content-split__preview" />
+        <!-- 仅渲染侧：后端 HTML 预览 -->
+        <FluenPreview v-show="editorLayout === 'preview'" :md="liveMd" class="content-editor__preview" />
         <!-- 视图模式切换（仅编辑视图显示，阅读器不挂载本组件） -->
         <EditorLayoutSwitch />
       </div>
@@ -325,31 +337,34 @@ onUnmounted(() => {
   color: var(--fluen-stone);
 }
 
-/* ── 分栏视图 ─────────────────────────────────────────────────────────── */
-.content-split {
+/* ── 三视图编辑区（source / live / preview 互斥） ─────────────────────── */
+.content-editor {
   flex: 1;
   display: flex;
+  flex-direction: column;
   height: 100%;
   width: 100%;
   overflow: hidden;
   position: relative; /* 供 EditorLayoutSwitch 右上角浮动定位 */
 }
 
-/* ── 源码侧（工具栏 + 编辑器） ─────────────────────────────────────── */
-.content-split__source {
+.content-editor__editing {
   flex: 1;
   min-width: 0;
+  /* 关键：flex 列项默认 min-height:auto，会被编辑器内容（cm-scroller 的
+     min-content = 全文高度）撑开，导致 .cm-scroller 失去视口约束、
+     滚轮无法滚动。置 0 让 height:100% 链重新生效。 */
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--fluen-hairline);
 }
 
-.content-split__editor {
+.content-editor__canvas {
   flex: 1;
   min-width: 0;
 }
 
-.content-split__preview {
+.content-editor__preview {
   flex: 1;
   min-width: 0;
 }

@@ -18,3 +18,9 @@ declare module "*.vue" {
 interface ImportMeta {
   readonly vitest?: typeof import('vitest');
 }
+
+/** 应用版本号（构建期由 vite 从 package.json 注入）。 */
+declare const __APP_VERSION__: string;
+
+/** 前端运行时依赖库的版本映射（构建期由 vite 从 package.json dependencies 注入）。 */
+declare const __APP_LIB_VERSIONS__: Record<string, string>;

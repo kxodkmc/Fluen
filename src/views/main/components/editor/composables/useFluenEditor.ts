@@ -26,6 +26,7 @@ import type { ChangeSpec } from '@codemirror/state';
 import { undo, redo, undoDepth, redoDepth } from '@codemirror/commands';
 import { createEditorState, createEditorView, type EditorCallbacks } from '../codemirror/setup';
 import { applyMarkdownFormat, type MarkdownFormatKind, type HeadingLevel } from '../codemirror/formatting';
+import { setLivePreviewEffect } from '../codemirror/livePreview';
 import { useProject } from '../../../../../composables/useProject';
 
 // ── 模块级状态（单例） ──────────────────────────────────────────────
@@ -40,6 +41,12 @@ const _isDirty = ref(false);
 const _isSaving = ref(false);
 const _canUndo = ref(false);
 const _canRedo = ref(false);
+
+/**
+ * 半预览（live）模式偏好。跨 mount/unmount 保留——
+ * 这是「用户希望的编辑形态」，与具体项目无关。
+ */
+const _isLivePreview = ref(false);
 
 /** 活动行（光标行）订阅者集合。0-based 行号。 */
 const _activeLineCallbacks = new Set<(line: number) => void>();
@@ -96,6 +103,10 @@ function mount(el: HTMLElement, md: string): void {
   _isDirty.value = false;
   const state = createEditorState(md, callbacks);
   _view = createEditorView(el, state);
+  // 记忆的半预览偏好跨项目保留：挂载后立即以 effect 恢复开关
+  if (_isLivePreview.value) {
+    _view.dispatch({ effects: setLivePreviewEffect.of(true) });
+  }
   _updateHistoryFlags();
 }
 
@@ -128,6 +139,10 @@ function setMd(md: string): void {
   if (!_view) return;
   const state = createEditorState(md, callbacks);
   _view.setState(state);
+  // 重建的状态其字段回到默认（关闭）——恢复半预览偏好，保持视图模式不漂移
+  if (_isLivePreview.value) {
+    _view.dispatch({ effects: setLivePreviewEffect.of(true) });
+  }
   _savedMd = md;
   _isDirty.value = false;
   _updateHistoryFlags();
@@ -149,6 +164,20 @@ function dispatchChanges(changes: ChangeSpec[]): boolean {
 }
 
 // ── 编辑命令 ───────────────────────────────────────────────────────
+
+/**
+ * 切换半预览（live）渲染开关。
+ *
+ * 以 StateEffect 实现，不重建 EditorState：撤销历史、光标位置、
+ * 滚动偏移全部保留。未挂载时仅记录偏好，下次挂载自动生效。
+ *
+ * @param enabled true 进入半预览渲染形态，false 回到源码形态。
+ */
+function setLivePreview(enabled: boolean): void {
+  if (_isLivePreview.value === enabled) return;
+  _isLivePreview.value = enabled;
+  _view?.dispatch({ effects: setLivePreviewEffect.of(enabled) });
+}
 
 /** 撤销。CM6 `undo` 在历史栈为空时为 no-op。 */
 function undoEd(): void {
@@ -285,6 +314,7 @@ export function useFluenEditor() {
     isSaving: readonly(_isSaving),
     canUndo: readonly(_canUndo),
     canRedo: readonly(_canRedo),
+    isLivePreview: readonly(_isLivePreview),
 
     // 生命周期
     mount,
@@ -297,6 +327,7 @@ export function useFluenEditor() {
     redo: redoEd,
     toggleFormat,
     dispatchChanges,
+    setLivePreview,
 
     // 保存
     save,

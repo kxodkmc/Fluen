@@ -4,14 +4,15 @@
  *
  * 提供三种视图模式（见 `EditorLayoutMode`）：
  *   - source   仅源码：只显示 MD 编辑器
- *   - split    双栏：左 MD 源码 + 右 HTML 预览
+ *   - live     半预览：同一编辑器开启实时渲染（WYSIWYG 所见即所得，光标处
+ *              露出原始语法），由 livePreview 扩展实现
  *   - preview  仅渲染：只显示 HTML 预览（默认）
  *
  * 状态由 `useMainLayout` 单例统一管理（`editorLayout`），
  * 与快捷键（Mod+1/2/3，见 MainView 注册）共享同一数据源，
  * 保证 UI 点击与快捷键操作完全同步。
  *
- * 仅在编辑类标签页（content-split 渲染时）由 ContentPanel 挂载，
+ * 仅在编辑类标签页（ContentPanel 的 content-editor 视图）挂载，
  * 文献/知识库阅读器不显示。
  */
 import { computed, inject } from 'vue';
@@ -25,7 +26,7 @@ const { t } = useI18n();
 /** 当前激活的视图模式（未注入布局实例时按预览处理，与 useMainLayout 默认一致）。 */
 const active = computed<EditorLayoutMode>(() => layout?.editorLayout.value ?? 'preview');
 
-/** 三个模式按钮：顺序为 源码 → 双栏 → 预览。 */
+/** 三个模式按钮：顺序为 源码 → 半预览 → 预览。 */
 const modes = computed(() => [
   {
     id: 'source' as const,
@@ -33,9 +34,10 @@ const modes = computed(() => [
     label: t('main.content.view.source'),
   },
   {
-    id: 'split' as const,
-    icon: 'M4 4h16v16H4zM12 4v16',
-    label: t('main.content.view.split'),
+    id: 'live' as const,
+    // 铅笔（可编辑）+ 基线（排版渲染）：所见即所得的实时编辑
+    icon: 'M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3zM14 21h8',
+    label: t('main.content.view.live'),
   },
   {
     id: 'preview' as const,

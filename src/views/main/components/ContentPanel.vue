@@ -30,7 +30,7 @@ const { hasProject, config, mainMd, refreshProject } = useProject();
 
 /* ── 编辑器视图模式（注入 MainView 共享布局实例） ─────────────────── */
 const layout = inject(MAIN_LAYOUT_KEY);
-const editorLayout = computed(() => layout?.editorLayout.value ?? 'split');
+const editorLayout = computed(() => layout?.editorLayout.value ?? 'preview');
 
 // 视图切换（v-show 显隐）后让 CM6 立即重新测量，避免容器尺寸从 0 恢复时的测量延迟
 watch(editorLayout, () => {

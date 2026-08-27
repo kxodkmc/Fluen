@@ -59,37 +59,97 @@
         </div>
 
         <!-- 关联条目侧边栏 -->
-        <aside class="wiki-reader__relations">
-          <h3 class="wiki-reader__relations-title">
-            {{ t('main.sidebar.knowledge.reader.relations') }}
-          </h3>
-          <ul v-if="detail.relation_titles?.length" class="wiki-reader__relations-list">
-            <li
-              v-for="(title, idx) in detail.relation_titles"
-              :key="detail.relations?.[idx] ?? title"
-              class="wiki-reader__relation"
-              :title="title"
-              @click="openRelation(detail.relations?.[idx] ?? '', title)"
-            >
-              <span class="wiki-reader__relation-text">{{ title }}</span>
-              <svg
-                class="wiki-reader__relation-icon"
-                viewBox="0 0 24 24"
-                width="12"
-                height="12"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
+        <aside
+          class="wiki-reader__relations"
+          :class="{'wiki-reader__relations--collapsed': relationsCollapsed}"
+        >
+          <template v-if="!relationsCollapsed">
+            <div class="wiki-reader__relations-header">
+              <h3 class="wiki-reader__relations-title">
+                {{ t('main.sidebar.knowledge.reader.relations') }}
+                <span v-if="relationTotal" class="wiki-reader__relations-count">{{ relationTotal }}</span>
+              </h3>
+              <button
+                class="wiki-reader__relations-toggle"
+                :title="t('main.sidebar.knowledge.reader.collapseRelations')"
+                @click="relationsCollapsed = true"
               >
-                <path d="M9 18l6-6-6-6" />
-              </svg>
-            </li>
-          </ul>
-          <p v-else class="wiki-reader__relations-empty">
-            {{ t('main.sidebar.knowledge.reader.noRelations') }}
-          </p>
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="m15 18-6-6 6-6" />
+                </svg>
+              </button>
+            </div>
+            <ul v-if="detail.relation_titles?.length" class="wiki-reader__relations-list">
+              <li
+                v-for="(title, idx) in detail.relation_titles"
+                :key="detail.relations?.[idx] ?? title"
+                class="wiki-reader__relation"
+                :title="title"
+                @click="openRelation(detail.relations?.[idx] ?? '', title)"
+              >
+                <i
+                  v-if="relationTypeOf(detail.relations?.[idx] ?? '')"
+                  class="wiki-reader__relation-dot"
+                  :class="'wiki-reader__relation-dot--' + relationTypeOf(detail.relations?.[idx] ?? '')"
+                ></i>
+                <span class="wiki-reader__relation-text">{{ title }}</span>
+                <svg
+                  class="wiki-reader__relation-icon"
+                  viewBox="0 0 24 24"
+                  width="12"
+                  height="12"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M9 18l6-6-6-6" />
+                </svg>
+              </li>
+            </ul>
+            <p v-else class="wiki-reader__relations-empty">
+              {{ t('main.sidebar.knowledge.reader.noRelations') }}
+            </p>
+          </template>
+
+          <!-- 折叠态：关联条目类型统计摘要 -->
+          <button
+            v-else
+            class="wiki-reader__relations-collapsed"
+            :title="t('main.sidebar.knowledge.reader.expandRelations')"
+            @click="relationsCollapsed = false"
+          >
+            <svg
+              class="wiki-reader__collapsed-link"
+              viewBox="0 0 24 24"
+              width="13"
+              height="13"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+            </svg>
+            <span v-if="relationStats.length" class="wiki-reader__collapsed-stats">
+              <span
+                v-for="stat in relationStats"
+                :key="stat.type"
+                class="wiki-reader__collapsed-stat"
+                :title="typeLabel(stat.type) + ' ×' + stat.count"
+              >
+                <i
+                  class="wiki-reader__stat-dot"
+                  :class="'wiki-reader__stat-dot--' + stat.type"
+                ></i>
+                <span class="wiki-reader__stat-num">{{ stat.count }}</span>
+              </span>
+            </span>
+            <span v-else class="wiki-reader__collapsed-empty">—</span>
+          </button>
         </aside>
       </div>
     </template>
@@ -136,7 +196,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const { loadEntry } = useWikiExplorer();
+const { loadEntry, entries, loadEntries } = useWikiExplorer();
 const { currentProject } = useProject();
 const layout = inject(MAIN_LAYOUT_KEY, null);
 
@@ -149,6 +209,43 @@ const detail = ref<WikiEntryDetail | null>(null);
 const loading = ref(false);
 /** 错误信息。 */
 const error = ref('');
+
+/** 关联条目侧边栏是否折叠（折叠时展示关联类型统计摘要）。 */
+const relationsCollapsed = ref(false);
+
+/** `wikiID → 条目类型` 映射（来自模块级条目列表，用于关联条目分类统计）。 */
+const typeById = computed(() => {
+  const map = new Map<string, WikiType>();
+  for (const entry of entries.value) map.set(entry.id, entry.wiki_type);
+  return map;
+});
+
+/** 关联条目按类型计数（类型未知的 ID 忽略）。 */
+const relationTypeCounts = computed(() => {
+  const counts = new Map<WikiType, number>();
+  for (const id of detail.value?.relations ?? []) {
+    const type = typeById.value.get(id);
+    if (!type) continue;
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  return counts;
+});
+
+/** 折叠态统计条目（固定 概念 → 实体 → 综述 顺序，仅含非零类型）。 */
+const relationStats = computed(() => {
+  const order: WikiType[] = ['concept', 'entity', 'summary'];
+  return order
+    .map((type) => ({ type, count: relationTypeCounts.value.get(type) ?? 0 }))
+    .filter((item) => item.count > 0);
+});
+
+/** 关联条目总数（含类型未知者）。 */
+const relationTotal = computed(() => detail.value?.relations?.length ?? 0);
+
+/** 关联跳转时点击的条目类型（未加载列表时可能为 undefined）。 */
+function relationTypeOf(wikiId: string): WikiType | undefined {
+  return typeById.value.get(wikiId);
+}
 
 /** iframe 引用。 */
 const iframeRef = ref<HTMLIFrameElement | null>(null);
@@ -270,6 +367,13 @@ watch(
     }
   },
 );
+
+// 条目列表未加载（直接打开 wiki tab 时）补拉一次，供关联类型统计使用
+watch(detail, (d) => {
+  if (d?.relations?.length && entries.value.length === 0 && projectPath.value) {
+    void loadEntries(projectPath.value);
+  }
+});
 
 onMounted(() => {
   iframeReady = true;
@@ -418,14 +522,136 @@ onBeforeUnmount(() => {
 }
 
 .wiki-reader__relations-title {
-  margin: 0 0 8px;
-  padding: 0 14px;
+  margin: 0;
+  padding: 0 0 0 14px;
   font-family: var(--fluen-font-sans);
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--fluen-stone);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wiki-reader__relations-count {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 9999px;
+  background: var(--fluen-hover);
+  color: var(--fluen-steel);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.wiki-reader__relations-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding-right: 8px;
+}
+
+.wiki-reader__relations-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fluen-stone);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.wiki-reader__relations-toggle:hover {
+  background: var(--fluen-hover);
+  color: var(--fluen-ink);
+}
+
+/* 折叠态：窄条，展示关联条目类型统计摘要 */
+.wiki-reader__relations--collapsed {
+  width: 36px;
+  padding: 8px 0;
+  display: flex;
+  align-items: stretch;
+}
+
+.wiki-reader__relations-collapsed {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border: none;
+  background: transparent;
+  color: var(--fluen-stone);
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.wiki-reader__relations-collapsed:hover {
+  background: var(--fluen-hover);
+  color: var(--fluen-ink);
+}
+
+.wiki-reader__collapsed-link {
+  flex-shrink: 0;
+  color: var(--fluen-steel);
+}
+
+.wiki-reader__collapsed-stats {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.wiki-reader__collapsed-stat {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.wiki-reader__stat-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.wiki-reader__stat-dot--concept {
+  background: var(--fluen-info-text);
+}
+
+.wiki-reader__stat-dot--entity {
+  background: var(--fluen-warning-text);
+}
+
+.wiki-reader__stat-dot--summary {
+  background: var(--fluen-success-text);
+}
+
+.wiki-reader__stat-num {
+  font-family: var(--fluen-font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fluen-steel);
+}
+
+.wiki-reader__collapsed-empty {
+  font-family: var(--fluen-font-sans);
+  font-size: 11px;
+  color: var(--fluen-steel);
+  opacity: 0.6;
 }
 
 .wiki-reader__relations-list {
@@ -445,6 +671,25 @@ onBeforeUnmount(() => {
 
 .wiki-reader__relation:hover {
   background: var(--fluen-hover);
+}
+
+.wiki-reader__relation-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.wiki-reader__relation-dot--concept {
+  background: var(--fluen-info-text);
+}
+
+.wiki-reader__relation-dot--entity {
+  background: var(--fluen-warning-text);
+}
+
+.wiki-reader__relation-dot--summary {
+  background: var(--fluen-success-text);
 }
 
 .wiki-reader__relation-text {

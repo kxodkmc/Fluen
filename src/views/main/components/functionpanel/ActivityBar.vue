@@ -60,13 +60,14 @@ function isActiveAndShown(id: string): boolean {
         :aria-pressed="item.id === activeActivity"
         @click="$emit('select-activity', item.id)"
       >
+        <!-- 填充式图标（filled）整体着色，线条图标保持 1.8 描边 -->
         <svg
-          viewBox="0 0 24 24"
+          :viewBox="item.viewBox ?? '0 0 24 24'"
           width="22"
           height="22"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.8"
+          :fill="item.filled ? 'currentColor' : 'none'"
+          :stroke="item.filled ? undefined : 'currentColor'"
+          :stroke-width="item.filled ? undefined : 1.8"
           stroke-linecap="round"
           stroke-linejoin="round"
           aria-hidden="true"
@@ -90,12 +91,12 @@ function isActiveAndShown(id: string): boolean {
         @click="$emit('select-activity', item.id)"
       >
         <svg
-          viewBox="0 0 24 24"
+          :viewBox="item.viewBox ?? '0 0 24 24'"
           width="22"
           height="22"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.8"
+          :fill="item.filled ? 'currentColor' : 'none'"
+          :stroke="item.filled ? undefined : 'currentColor'"
+          :stroke-width="item.filled ? undefined : 1.8"
           stroke-linecap="round"
           stroke-linejoin="round"
           aria-hidden="true"

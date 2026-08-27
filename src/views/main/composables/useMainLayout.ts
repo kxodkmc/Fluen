@@ -34,7 +34,8 @@ export function useMainLayout() {
   const aiPanelWidth = ref<number>(DEFAULT_PANEL_SIZES.aiPanel);
 
   /* ── 编辑器视图模式 ─────────────────────────────────────────────────── */
-  const editorLayout = ref<EditorLayoutMode>('split');
+  /** 默认进入预览视图（仅渲染 HTML），源码/双栏可通过切换控件或 Mod+1/2 进入。 */
+  const editorLayout = ref<EditorLayoutMode>('preview');
 
   /* ── 活动栏 ─────────────────────────────────────────────────────────── */
   const activeActivity = ref<string>('outline');
@@ -74,6 +75,16 @@ export function useMainLayout() {
   }
 
   /**
+   * 幂等地激活并展开右侧面板（程序化同步用，永不收起）。
+   * 已激活且可见时为无操作；已激活但被收起时重新展开。
+   */
+  function showRightPanel(panel: RightPanelId): void {
+    if (activeRightPanel.value === panel && rightPanelVisible.value) return;
+    activeRightPanel.value = panel;
+    rightPanelVisible.value = true;
+  }
+
+  /**
    * 设置激活的右侧面板并展开面板。
    * 若点击已激活的面板，则切换收起/展开。
    */
@@ -82,8 +93,7 @@ export function useMainLayout() {
       // 已激活且可见 → 收起
       rightPanelVisible.value = false;
     } else {
-      activeRightPanel.value = panel;
-      rightPanelVisible.value = true;
+      showRightPanel(panel);
     }
   }
 
@@ -179,6 +189,7 @@ export function useMainLayout() {
     toggleFunctionPanelCollapsed,
     setFunctionPanelCollapsed,
     toggleRightPanel,
+    showRightPanel,
     setActiveRightPanel,
     toggleAIPanel,
 

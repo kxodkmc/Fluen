@@ -5,12 +5,14 @@
  * 从左到右依次提供：添加文件、模式切换、模型切换、思考强度切换、发送/停止。
  * 仅负责展示与事件发射，状态由父组件或 useChatToolbar 管理。
  *
- * 响应式策略：
- *   - 默认：文字 + 图标并列
- *   - 窄面板：仅显示图标，下拉按钮保留简短文字
- *   - 超窄：隐藏思考强度下拉，只保留添加文件/模式/发送
+ * 响应式策略（完整排布约需 450px，按可用宽度阶梯降级）：
+ *   - ≥420px：全部控件带文字
+ *   - <420px：「添加文件」退化为纯图标（tooltip 提示）
+ *   - <350px：隐藏思考强度下拉（低频操作）
+ *   - <270px：「添加文件」与「思考强度」均隐藏，模型标签自由截断，
+ *             保证发送键永不溢出；药丸按钮标签同时支持 flex 收缩截断兜底
  */
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { useI18n } from '../../../i18n';
 import type { RightPanelId } from '../types';
 import type { ToolbarModelOption, ThinkingIntensity } from '../composables/useChatToolbar';
@@ -41,10 +43,14 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 
-/* ── 响应式断点 ─────────────────────────────────────────────────────── */
+/* ── 响应式断点（完整排布约需 450px） ───────────────────────────────── */
 const toolbarWidth = ref(0);
-const isCompact = computed(() => toolbarWidth.value < 340);
-const isUltraCompact = computed(() => toolbarWidth.value < 260);
+/** 窄面板：「添加文件」退化为纯图标。 */
+const isCompact = computed(() => toolbarWidth.value < 420);
+/** 更窄：隐藏低频的思考强度下拉。 */
+const isNarrow = computed(() => toolbarWidth.value < 350);
+/** 超窄：只保留模式/模型/发送，标签自由截断。 */
+const isUltraCompact = computed(() => toolbarWidth.value < 270);
 
 let resizeObserver: ResizeObserver | null = null;
 const rootRef = ref<HTMLElement | null>(null);
@@ -87,6 +93,39 @@ function selectThinking(intensity: ThinkingIntensity): void {
   closeMenus();
 }
 
+/* ── 模型菜单：搜索 + 按提供商分组 ───────────────────────────────────── */
+const modelSearch = ref('');
+const modelSearchRef = ref<HTMLInputElement | null>(null);
+
+const groupedModels = computed<{ provider: string; items: ToolbarModelOption[] }[]>(() => {
+  const kw = modelSearch.value.trim().toLowerCase();
+  const groups: { provider: string; items: ToolbarModelOption[] }[] = [];
+  for (const opt of props.models) {
+    if (
+      kw &&
+      !opt.name.toLowerCase().includes(kw) &&
+      !opt.providerName.toLowerCase().includes(kw)
+    ) {
+      continue;
+    }
+    let group = groups.find((g) => g.provider === opt.providerName);
+    if (!group) {
+      group = { provider: opt.providerName, items: [] };
+      groups.push(group);
+    }
+    group.items.push(opt);
+  }
+  return groups;
+});
+
+// 打开模型菜单时重置搜索词并聚焦输入框。
+watch(openMenu, (menu) => {
+  if (menu === 'model') {
+    modelSearch.value = '';
+    nextTick(() => modelSearchRef.value?.focus());
+  }
+});
+
 function handleSend(): void {
   if (!props.canSend || props.isGenerating) return;
   emit('send');
@@ -95,6 +134,11 @@ function handleSend(): void {
 /* ── 文案映射 ───────────────────────────────────────────────────────── */
 const modeLabel = computed(() =>
   props.mode === 'motis' ? t('main.chatToolbar.modeMotis') : t('main.chatToolbar.modeAssistant'),
+);
+
+/** 当前模式对应的图标路径（超窄面板下按钮退化为纯图标时使用）。 */
+const currentModeIcon = computed(
+  () => modeOptions.find((opt) => opt.value === props.mode)?.icon ?? '',
 );
 
 const thinkingLabelMap: Record<ThinkingIntensity, string> = {
@@ -117,8 +161,9 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
 
 <template>
   <div ref="rootRef" class="chat-toolbar">
-    <!-- 添加文件 -->
+    <!-- 添加文件（≥420px 显示文字，<270px 整体隐藏，为模型切换器让位） -->
     <button
+      v-if="!isUltraCompact"
       class="chat-toolbar__btn chat-toolbar__btn--icon"
       :title="t('main.chatToolbar.addFile')"
       @click="$emit('add-file')"
@@ -134,9 +179,16 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
       <button
         class="chat-toolbar__btn chat-toolbar__btn--pill"
         :class="{ 'chat-toolbar__btn--active': openMenu === 'mode' }"
+        :title="isUltraCompact ? modeLabel : undefined"
         @click="toggleMenu('mode')"
       >
-        <span class="chat-toolbar__label">{{ modeLabel }}</span>
+        <svg
+          v-if="isUltraCompact && currentModeIcon"
+          viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+        >
+          <path :d="currentModeIcon" />
+        </svg>
+        <span v-else class="chat-toolbar__label">{{ modeLabel }}</span>
         <svg class="chat-toolbar__caret" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M6 9l6 6 6-6" />
         </svg>
@@ -157,8 +209,8 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
       </div>
     </div>
 
-    <!-- 模型切换 -->
-    <div v-if="!isUltraCompact" class="chat-toolbar__dropdown">
+    <!-- 模型切换（任何宽度都保留，窄面板下仅截断标签） -->
+    <div class="chat-toolbar__dropdown">
       <button
         class="chat-toolbar__btn chat-toolbar__btn--pill"
         :class="{ 'chat-toolbar__btn--active': openMenu === 'model' }"
@@ -172,25 +224,42 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
           <path d="M6 9l6 6 6-6" />
         </svg>
       </button>
-      <div v-if="openMenu === 'model'" class="chat-toolbar__menu" @click.stop>
-        <button
-          v-for="opt in models"
-          :key="opt.id"
-          class="chat-toolbar__menu-item"
-          :class="{ 'chat-toolbar__menu-item--active': modelLabel === opt.name }"
-          @click="selectModel(opt)"
-        >
-          <span class="chat-toolbar__menu-title">{{ opt.name }}</span>
-          <span class="chat-toolbar__menu-sub">{{ opt.providerName }}</span>
-        </button>
-        <div v-if="models.length === 0" class="chat-toolbar__menu-empty">
-          {{ t('main.chatToolbar.noModels') }}
+      <div v-if="openMenu === 'model'" class="chat-toolbar__menu chat-toolbar__menu--end chat-toolbar__menu--model" @click.stop>
+        <div class="chat-toolbar__search">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M21 21l-4.35-4.35" />
+          </svg>
+          <input
+            ref="modelSearchRef"
+            v-model="modelSearch"
+            class="chat-toolbar__search-input"
+            type="text"
+            :placeholder="t('main.chatToolbar.searchModel')"
+          />
+        </div>
+        <div class="chat-toolbar__menu-scroll">
+          <template v-for="group in groupedModels" :key="group.provider">
+            <div class="chat-toolbar__menu-group">{{ group.provider }}</div>
+            <button
+              v-for="opt in group.items"
+              :key="opt.id"
+              class="chat-toolbar__menu-item"
+              :class="{ 'chat-toolbar__menu-item--active': modelLabel === opt.name }"
+              @click="selectModel(opt)"
+            >
+              {{ opt.name }}
+            </button>
+          </template>
+          <div v-if="groupedModels.length === 0" class="chat-toolbar__menu-empty">
+            {{ t('main.chatToolbar.noModels') }}
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- 思考强度 -->
-    <div v-if="!isUltraCompact" class="chat-toolbar__dropdown">
+    <!-- 思考强度（<350px 隐藏，属低频操作） -->
+    <div v-if="!isNarrow" class="chat-toolbar__dropdown">
       <button
         class="chat-toolbar__btn chat-toolbar__btn--pill"
         :class="{ 'chat-toolbar__btn--active': openMenu === 'thinking' }"
@@ -201,7 +270,7 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
           <path d="M6 9l6 6 6-6" />
         </svg>
       </button>
-      <div v-if="openMenu === 'thinking'" class="chat-toolbar__menu" @click.stop>
+      <div v-if="openMenu === 'thinking'" class="chat-toolbar__menu chat-toolbar__menu--end" @click.stop>
         <button
           v-for="opt in thinkingOptions"
           :key="opt.value"
@@ -255,6 +324,8 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
   background: var(--fluen-surface);
   flex-shrink: 0;
   min-width: 0;
+  /* 尺寸容器：供下拉菜单以 cqw 兜底宽度，确保任何窄面板下都不越界 */
+  container-type: inline-size;
 }
 
 .chat-toolbar__spacer {
@@ -291,8 +362,11 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
   color: var(--fluen-brand-coral);
 }
 
+/* 药丸按钮允许收缩，标签随可用宽度截断（断点降级之外的兜底缓冲） */
 .chat-toolbar__btn--pill {
   padding-right: 6px;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .chat-toolbar__btn-text {
@@ -300,6 +374,8 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
 }
 
 .chat-toolbar__label {
+  min-width: 0;
+  flex: 0 1 auto;
   max-width: 110px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -319,6 +395,7 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
   position: relative;
   display: inline-flex;
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .chat-toolbar__menu {
@@ -327,7 +404,7 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
   left: 0;
   z-index: 20;
   min-width: 160px;
-  max-width: 240px;
+  max-width: calc(100cqw - 16px);
   max-height: 240px;
   overflow-y: auto;
   padding: 4px;
@@ -338,6 +415,64 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* 右锚定：模型/思考强度按钮位于工具栏偏右侧，菜单向左展开避免被面板右缘裁切 */
+.chat-toolbar__menu--end {
+  left: auto;
+  right: 0;
+}
+
+.chat-toolbar__menu--model {
+  min-width: min(220px, calc(100cqw - 16px));
+  max-width: calc(100cqw - 16px);
+  padding: 6px;
+  gap: 4px;
+  max-height: 320px;
+  overflow: hidden;
+}
+
+.chat-toolbar__search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--fluen-canvas);
+  color: var(--fluen-stone);
+  flex-shrink: 0;
+}
+
+.chat-toolbar__search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fluen-ink);
+  font-family: var(--fluen-font-sans);
+  font-size: 12px;
+}
+
+.chat-toolbar__search-input::placeholder {
+  color: var(--fluen-stone);
+}
+
+.chat-toolbar__menu-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+  max-height: 210px;
+}
+
+.chat-toolbar__menu-group {
+  padding: 6px 8px 2px;
+  color: var(--fluen-stone);
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .chat-toolbar__menu-item {
@@ -364,19 +499,6 @@ const thinkingOptions: { value: ThinkingIntensity; label: string }[] = [
 .chat-toolbar__menu-item--active {
   color: var(--fluen-brand-coral);
   background: color-mix(in srgb, var(--fluen-brand-coral) 8%, transparent);
-}
-
-.chat-toolbar__menu-title {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-toolbar__menu-sub {
-  flex-shrink: 0;
-  color: var(--fluen-stone);
-  font-size: 11px;
 }
 
 .chat-toolbar__menu-empty {

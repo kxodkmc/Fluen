@@ -18,6 +18,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useI18n } from '../../../i18n';
 import { useAppConfig } from '../../../composables/useAppConfig';
 import type { LogConfig } from '../../../types/app';
+import RangeSlider from '../components/RangeSlider.vue';
 
 const { t } = useI18n();
 const { loadConfig, saveConfig } = useAppConfig();
@@ -143,21 +144,11 @@ async function onResetDir(): Promise<void> {
 }
 
 /* ── 单文件最大条目数 ─────────────────────────────────────────────── */
-function onEntriesInput(event: Event): void {
-  const target = event.target as HTMLInputElement;
-  maxEntries.value = clamp(Number(target.value), MIN_ENTRIES, MAX_ENTRIES, 4096);
-}
-
 async function onEntriesChange(): Promise<void> {
   await persistLogging({ max_entries_per_file: maxEntries.value });
 }
 
 /* ── 累计文件数 ───────────────────────────────────────────────────── */
-function onFilesInput(event: Event): void {
-  const target = event.target as HTMLInputElement;
-  maxFiles.value = clamp(Number(target.value), MIN_FILES, MAX_FILES, 64);
-}
-
 async function onFilesChange(): Promise<void> {
   await persistLogging({ max_file_count: maxFiles.value });
 }
@@ -257,22 +248,15 @@ async function onOpenLogsDir(): Promise<void> {
         </label>
         <span class="form-row__value">{{ maxEntries }}</span>
       </div>
-      <input
+      <RangeSlider
         id="log-max-entries"
-        type="range"
-        class="slider"
+        v-model="maxEntries"
         :min="MIN_ENTRIES"
         :max="MAX_ENTRIES"
-        step="128"
-        :value="maxEntries"
+        :step="128"
         :disabled="saving"
-        @input="onEntriesInput"
         @change="onEntriesChange"
       />
-      <div class="slider-marks">
-        <span>{{ MIN_ENTRIES }}</span>
-        <span>{{ MAX_ENTRIES }}</span>
-      </div>
       <p class="form-hint">{{ t('settings.logging.maxEntriesHint') }}</p>
     </div>
 
@@ -284,22 +268,14 @@ async function onOpenLogsDir(): Promise<void> {
         </label>
         <span class="form-row__value">{{ maxFiles }}</span>
       </div>
-      <input
+      <RangeSlider
         id="log-max-files"
-        type="range"
-        class="slider"
+        v-model="maxFiles"
         :min="MIN_FILES"
         :max="MAX_FILES"
-        step="1"
-        :value="maxFiles"
         :disabled="saving"
-        @input="onFilesInput"
         @change="onFilesChange"
       />
-      <div class="slider-marks">
-        <span>{{ MIN_FILES }}</span>
-        <span>{{ MAX_FILES }}</span>
-      </div>
       <p class="form-hint">{{ t('settings.logging.maxFilesHint') }}</p>
     </div>
   </div>
@@ -515,66 +491,5 @@ async function onOpenLogsDir(): Promise<void> {
 
 .btn--link:hover:not(:disabled) {
   text-decoration: underline;
-}
-
-/* ── 滑块 ──────────────────────────────────────────────────────────── */
-.slider {
-  width: 100%;
-  height: 4px;
-  appearance: none;
-  -webkit-appearance: none;
-  background: var(--fluen-hairline);
-  border-radius: 9999px;
-  outline: none;
-  cursor: pointer;
-}
-
-.slider:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-.slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--fluen-accent);
-  border: 2px solid var(--fluen-canvas);
-  cursor: pointer;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
-}
-
-.slider::-webkit-slider-thumb:hover {
-  transform: scale(1.1);
-}
-
-.slider:active::-webkit-slider-thumb {
-  transform: scale(1.15);
-}
-
-.slider::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--fluen-accent);
-  border: 2px solid var(--fluen-canvas);
-  cursor: pointer;
-  transition: transform 0.15s ease;
-}
-
-.slider::-moz-range-thumb:hover {
-  transform: scale(1.1);
-}
-
-.slider-marks {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 0.4rem;
-  font-family: var(--fluen-font-mono);
-  font-size: 0.7rem;
-  color: var(--fluen-muted);
 }
 </style>

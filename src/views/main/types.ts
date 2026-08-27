@@ -20,8 +20,12 @@ export type EditorLayoutMode = 'split' | 'source' | 'preview';
 export interface ActivityItem {
   /** 唯一标识 */
   id: string;
-  /** SVG path data（24×24 viewBox） */
+  /** SVG path data（线条风格为 24×24 viewBox；填充风格的原生网格由 viewBox 声明） */
   icon: string;
+  /** 图标 viewBox（缺省 '0 0 24 24'；填充式图标用其原生网格，如 Bootstrap Icons 的 16×16） */
+  viewBox?: string;
+  /** 以填充方式渲染（fill=currentColor，无描边）；缺省为线条描边风格 */
+  filled?: boolean;
   /**
    * 槽位：top=顶部主视图切换（默认），bottom=底部辅助入口（账户/设置等）。
    * 预留字段，便于后续扩展，无需指定时按 top 处理。

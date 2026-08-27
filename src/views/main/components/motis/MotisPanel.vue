@@ -61,11 +61,11 @@ function handleSend(): void {
   draftMessage.value = '';
 }
 
-/** 工具栏模式切换时同步到布局状态。 */
+/** 工具栏模式切换时同步到布局状态（幂等展示，避免误触"点已激活项收起"）。 */
 watch(
   () => toolbar.mode.value,
   (next) => {
-    layout.setActiveRightPanel(next);
+    layout.showRightPanel(next);
   },
 );
 

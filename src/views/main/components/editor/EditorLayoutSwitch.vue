@@ -4,8 +4,8 @@
  *
  * 提供三种视图模式（见 `EditorLayoutMode`）：
  *   - source   仅源码：只显示 MD 编辑器
- *   - split    双栏：左 MD 源码 + 右 HTML 预览（默认）
- *   - preview  仅渲染：只显示 HTML 预览
+ *   - split    双栏：左 MD 源码 + 右 HTML 预览
+ *   - preview  仅渲染：只显示 HTML 预览（默认）
  *
  * 状态由 `useMainLayout` 单例统一管理（`editorLayout`），
  * 与快捷键（Mod+1/2/3，见 MainView 注册）共享同一数据源，
@@ -22,8 +22,8 @@ import type { EditorLayoutMode } from '../../types';
 const layout = inject(MAIN_LAYOUT_KEY);
 const { t } = useI18n();
 
-/** 当前激活的视图模式（未注入布局实例时按双栏处理）。 */
-const active = computed<EditorLayoutMode>(() => layout?.editorLayout.value ?? 'split');
+/** 当前激活的视图模式（未注入布局实例时按预览处理，与 useMainLayout 默认一致）。 */
+const active = computed<EditorLayoutMode>(() => layout?.editorLayout.value ?? 'preview');
 
 /** 三个模式按钮：顺序为 源码 → 双栏 → 预览。 */
 const modes = computed(() => [

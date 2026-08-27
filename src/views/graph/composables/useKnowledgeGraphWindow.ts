@@ -10,8 +10,8 @@
  *     重复点击聚焦已存在的窗口
  *   - **URL 传参**：项目路径通过 query string 传递，新窗口通过
  *     `URLSearchParams` 读取，避免跨窗口状态共享
- *   - **窗口特性**：原生装饰（decorations: true）以提供独立窗口的
- *     标题栏与关闭按钮，符合"独立子窗口"体验
+ *   - **窗口特性**：无边框（decorations: false），由页面内自定义标题栏
+ *     提供拖拽区与最小化 / 最大化 / 关闭控件
  */
 
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -65,7 +65,7 @@ export async function openKnowledgeGraphWindow(
       height: 800,
       minWidth: 720,
       minHeight: 480,
-      decorations: true,
+      decorations: false,
       transparent: false,
       shadow: true,
       center: true,

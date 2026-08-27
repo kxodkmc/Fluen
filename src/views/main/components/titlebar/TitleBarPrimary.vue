@@ -12,7 +12,8 @@
  * 整体为 Tauri 拖拽区域；交互元素通过 data-tauri-drag-region="false" 排除拖拽。
  */
 import { ref, computed } from 'vue';
-import { TITLE_BAR_MENU_IDS, FILE_MENU_ITEM_IDS, HELP_MENU_ITEM_IDS, APP_TITLE } from '../../constants';
+import { TITLE_BAR_MENU_IDS, FILE_MENU_ITEM_IDS, HELP_MENU_ITEM_IDS } from '../../constants';
+import { APP_NAME } from '../../../../utils/appInfo';
 import { useI18n } from '../../../../i18n';
 import TitleBarMenuDropdown from './TitleBarMenuDropdown.vue';
 import type { MenuItem } from './TitleBarMenuDropdown.vue';
@@ -82,7 +83,7 @@ function handleSelect(itemId: string): void {
         <path d="M18 8v12a2 2 0 0 1-2 2" />
         <path d="M8 8h4M8 12h4M8 16h2" />
       </svg>
-      <span v-if="!compact" class="dock-primary__title">{{ APP_TITLE }}</span>
+      <span v-if="!compact" class="dock-primary__title">{{ APP_NAME }}</span>
     </div>
 
     <span v-if="!compact" class="dock-primary__separator" />

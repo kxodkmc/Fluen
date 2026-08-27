@@ -8,7 +8,7 @@
 import { ref, computed } from 'vue';
 import { useLlmConfig } from '../../../composables/useLlmConfig';
 import { useI18n } from '../../../i18n';
-import type { LlmConfig, ProviderConfig, ModelConfig, SceneModels, SceneModelRef, EmbeddingConfig } from '../../../types/llm';
+import type { LlmConfig, ProviderConfig, ModelConfig, ApiStyle, SceneModels, SceneModelRef, EmbeddingConfig } from '../../../types/llm';
 
 /** 场景化模型槽位 key（与后端 `SceneModels` 字段一一对应）。 */
 export type SceneModelKey = 'knowledge_build';
@@ -153,126 +153,116 @@ export function useLlmSettings() {
   }
 
   /**
-   * 从预设构建 ProviderConfig。
-   *
-   * 当预设无可选模型（如 OpenRouter 聚合网关）时，使用调用方传入的
-   * `modelId`（用户自填）生成单个模型条目；未填则模型列表为空。
+   * 从预设构建 ModelConfig 列表（预设无内置模型时返回空列表，由用户补充）。
    */
-  function buildProviderFromPreset(preset: ProviderPreset, apiKey: string, modelId: string): ProviderConfig {
-    const models: ModelConfig[] =
-      preset.models.length > 0
-        ? preset.models.map((m) => ({
-            id: m.id,
-            name: m.name,
-            capabilities: buildCapabilities(m),
-            max_output_tokens: m.maxOutputTokens,
-            context_window: m.contextWindow,
-            description: null,
-            enabled: true,
-          }))
-        : modelId
-          ? [{
-              id: modelId,
-              name: modelId,
-              capabilities: buildCapabilities({ thinking: false, vision: false, audio: false, video: false }),
-              max_output_tokens: null,
-              context_window: null,
-              description: null,
-              enabled: true,
-            }]
-          : [];
-
-    return {
-      id: preset.id,
-      name: getPresetLabel(preset.id),
-      provider_type: 'custom',
-      openai_base_url: preset.openaiBaseUrl,
-      anthropic_base_url: null,
-      api_key: apiKey || null,
-      default_style: preset.defaultStyle,
-      extra_headers: {},
+  function modelsFromPreset(preset: ProviderPreset): ModelConfig[] {
+    return preset.models.map((m) => ({
+      id: m.id,
+      name: m.name,
+      capabilities: buildCapabilities(m),
+      max_output_tokens: m.maxOutputTokens,
+      context_window: m.contextWindow,
+      description: null,
       enabled: true,
-      models,
-      created_at: null,
-      updated_at: null,
-    };
+    }));
   }
 
-  /** 添加预设提供商。 */
-  async function addPresetProvider(preset: ProviderPreset, apiKey: string, modelId: string): Promise<void> {
-    if (!config.value) return;
-    const provider = buildProviderFromPreset(preset, apiKey, modelId);
-    // 替换同 ID 的已有提供商
-    config.value.providers = config.value.providers.filter((p) => p.id !== provider.id);
-    config.value.providers.push(provider);
-    // 如果没有激活提供商，自动设为激活
-    if (!config.value.active_provider_id) {
-      config.value.active_provider_id = provider.id;
-    }
-    if (!config.value.active_model_id && modelId) {
-      config.value.active_model_id = modelId;
-    }
-    isAdding.value = false;
-    selectedPresetId.value = '';
-    await persist();
-  }
-
-  /** 添加自定义提供商。 */
-  async function addCustomProvider(params: {
+  /**
+   * 添加供应商（统一预设与自定义入口）。
+   *
+   * `style` 决定 Base URL 写入哪个字段（后端校验要求
+   * `default_style` 与对应 base_url 同时存在）。
+   */
+  async function addProvider(params: {
+    presetId: string | null;
     name: string;
+    style: ApiStyle;
     baseUrl: string;
     apiKey: string;
-    modelId: string;
-    modelName: string;
-  }): Promise<void> {
-    if (!config.value) return;
-    const id = slugify(params.name) || `custom-${generateId()}`;
+    models: ModelConfig[];
+  }): Promise<string> {
+    if (!config.value) return '';
+    const id = params.presetId ?? (slugify(params.name) || `custom-${generateId()}`);
     const provider: ProviderConfig = {
       id,
-      name: params.name || 'Custom Provider',
+      name: params.name,
       provider_type: 'custom',
-      openai_base_url: params.baseUrl || null,
-      anthropic_base_url: null,
+      openai_base_url: params.style === 'OpenAI' ? params.baseUrl || null : null,
+      anthropic_base_url: params.style === 'Anthropic' ? params.baseUrl || null : null,
       api_key: params.apiKey || null,
-      default_style: 'OpenAI',
+      default_style: params.style,
       extra_headers: {},
-      enabled: true,
-      models: params.modelId
-        ? [{
-            id: params.modelId,
-            name: params.modelName || params.modelId,
-            capabilities: buildCapabilities({ thinking: false, vision: false, audio: false, video: false }),
-            max_output_tokens: null,
-            context_window: null,
-            description: null,
-            enabled: true,
-          }]
-        : [],
+      enabled: !!params.apiKey,
+      models: params.models,
       created_at: null,
       updated_at: null,
     };
+    // 替换同 ID 的已有提供商
+    config.value.providers = config.value.providers.filter((p) => p.id !== id);
     config.value.providers.push(provider);
     if (!config.value.active_provider_id) {
       config.value.active_provider_id = id;
-    }
-    if (!config.value.active_model_id && params.modelId) {
-      config.value.active_model_id = params.modelId;
+      config.value.active_model_id = params.models[0]?.id ?? null;
     }
     isAdding.value = false;
     selectedPresetId.value = '';
     await persist();
+    return id;
   }
 
   /* ── 编辑提供商 ──────────────────────────────────────────────────── */
 
-  /** 更新提供商的 API Key。 */
+  /** 更新提供商的部分字段（Base URL / API Key / 风格 / 启用状态等）。 */
+  async function updateProvider(providerId: string, patch: Partial<ProviderConfig>): Promise<void> {
+    if (!config.value) return;
+    const provider = config.value.providers.find((p) => p.id === providerId);
+    if (!provider) return;
+    Object.assign(provider, patch);
+    await persist();
+  }
+
+  /**
+   * 在提供商下新增或更新模型。
+   * `originalId` 用于编辑时模型 ID 被修改的场景（定位原条目并同步激活项）。
+   */
+  async function upsertModel(providerId: string, model: ModelConfig, originalId?: string): Promise<void> {
+    if (!config.value) return;
+    const provider = config.value.providers.find((p) => p.id === providerId);
+    if (!provider) return;
+    const idx = provider.models.findIndex((m) => m.id === (originalId ?? model.id));
+    if (idx >= 0) {
+      provider.models.splice(idx, 1, model);
+    } else {
+      provider.models.push(model);
+    }
+    if (config.value.active_provider_id === providerId) {
+      if (config.value.active_model_id === originalId || !config.value.active_model_id) {
+        config.value.active_model_id = model.id;
+      }
+    }
+    await persist();
+  }
+
+  /** 删除提供商下的单个模型（激活项被删时清空）。 */
+  async function removeModel(providerId: string, modelId: string): Promise<void> {
+    if (!config.value) return;
+    const provider = config.value.providers.find((p) => p.id === providerId);
+    if (!provider) return;
+    provider.models = provider.models.filter((m) => m.id !== modelId);
+    if (config.value.active_provider_id === providerId && config.value.active_model_id === modelId) {
+      config.value.active_model_id = provider.models[0]?.id ?? null;
+    }
+    await persist();
+  }
+
+  /** 更新提供商的 API Key（同时同步启用状态）。 */
   async function updateApiKey(providerId: string, apiKey: string): Promise<void> {
     if (!config.value) return;
     const provider = config.value.providers.find((p) => p.id === providerId);
-    if (provider) {
-      provider.api_key = apiKey || null;
-      await persist();
-    }
+    if (!provider) return;
+    provider.api_key = apiKey || null;
+    provider.enabled = !!apiKey;
+    await persist();
   }
 
   /** 设置激活的提供商和模型。 */
@@ -402,8 +392,11 @@ export function useLlmSettings() {
     load,
     startAdding,
     cancelAdding,
-    addPresetProvider,
-    addCustomProvider,
+    addProvider,
+    modelsFromPreset,
+    updateProvider,
+    upsertModel,
+    removeModel,
     updateApiKey,
     setActive,
     setSceneModel,

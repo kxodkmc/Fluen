@@ -450,6 +450,13 @@ function handleClose(): void {
   background: var(--fluen-canvas);
 }
 
+/* 分区内容统一宽度并水平居中，避免宽屏下右侧留白过大 */
+.settings-content > * {
+  width: 100%;
+  max-width: 860px;
+  margin-inline: auto;
+}
+
 /* ── 分组展开动画 ───────────────────────────────────────────────────── */
 .nav-expand-enter-active,
 .nav-expand-leave-active {

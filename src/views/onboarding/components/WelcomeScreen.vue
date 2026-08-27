@@ -2,12 +2,13 @@
 /**
  * WelcomeScreen — the opening phase of the onboarding flow.
  *
- * Displays an animated greeting "你好****" using motion-v for the entrance
- * and the ShinyText preset for the shimmering placeholder, followed by a
- * title, subtitle, and a "开始配置" call-to-action button.
+ * Displays an animated greeting "你好！欢迎使用 Fluen" using motion-v for the
+ * entrance, where the app name inherits the ShinyText preset for the shimmering
+ * effect, followed by a short description and a "开始配置" call-to-action button.
  */
 import { Motion } from 'motion-v';
 import { ShinyText } from '../../../presets';
+import { APP_NAME } from '../../../utils/appInfo';
 import { useI18n } from '../../../i18n';
 
 defineEmits<{
@@ -26,7 +27,7 @@ const { t } = useI18n();
     :exit="{ opacity: 0, scale: 0.96 }"
     :transition="{ duration: 0.5, ease: 'easeOut' }"
   >
-    <!-- Greeting: 你好 + shimmering **** placeholder -->
+    <!-- Greeting: 你好！欢迎使用 + shimmering app name -->
     <Motion
       as="div"
       class="welcome__greeting"
@@ -36,7 +37,7 @@ const { t } = useI18n();
     >
       <span class="welcome__greeting-text">{{ t('onboarding.welcome.greeting') }}</span>
       <ShinyText
-        :text="t('onboarding.welcome.placeholder')"
+        :text="APP_NAME"
         :speed="4"
         :spread="80"
         color="rgba(255, 255, 255, 0.25)"
@@ -45,35 +46,13 @@ const { t } = useI18n();
       />
     </Motion>
 
-    <!-- Title -->
-    <Motion
-      as="h1"
-      class="welcome__title"
-      :initial="{ y: 20, opacity: 0 }"
-      :animate="{ y: 0, opacity: 1 }"
-      :transition="{ delay: 0.4, duration: 0.6, ease: 'easeOut' }"
-    >
-      {{ t('onboarding.welcome.title') }}
-    </Motion>
-
-    <!-- Subtitle -->
-    <Motion
-      as="p"
-      class="welcome__subtitle"
-      :initial="{ y: 20, opacity: 0 }"
-      :animate="{ y: 0, opacity: 1 }"
-      :transition="{ delay: 0.55, duration: 0.6, ease: 'easeOut' }"
-    >
-      {{ t('onboarding.welcome.subtitle') }}
-    </Motion>
-
     <!-- Description -->
     <Motion
       as="p"
       class="welcome__desc"
       :initial="{ y: 20, opacity: 0 }"
       :animate="{ y: 0, opacity: 1 }"
-      :transition="{ delay: 0.7, duration: 0.6, ease: 'easeOut' }"
+      :transition="{ delay: 0.4, duration: 0.6, ease: 'easeOut' }"
     >
       {{ t('onboarding.welcome.description') }}
     </Motion>
@@ -84,7 +63,7 @@ const { t } = useI18n();
       class="welcome__cta"
       :initial="{ y: 20, opacity: 0 }"
       :animate="{ y: 0, opacity: 1 }"
-      :transition="{ delay: 0.85, duration: 0.6, ease: 'easeOut' }"
+      :transition="{ delay: 0.55, duration: 0.6, ease: 'easeOut' }"
       @click="$emit('start')"
     >
       {{ t('onboarding.welcome.startButton') }}
@@ -117,10 +96,11 @@ const { t } = useI18n();
 }
 
 /* ── Greeting ─────────────────────────────────────────────────────────── */
+/* 两行排版：第一行问候语，第二行闪烁的应用名 */
 .welcome__greeting {
   display: flex;
-  align-items: baseline;
-  gap: 0.15em;
+  flex-direction: column;
+  align-items: center;
   margin-bottom: 1.5rem;
   font-family: var(--fluen-font-sans);
   font-size: clamp(2.5rem, 6vw, 4rem);
@@ -140,25 +120,6 @@ const { t } = useI18n();
   font-size: clamp(2.5rem, 6vw, 4rem);
   font-weight: 600;
   letter-spacing: -0.02em;
-}
-
-/* ── Title ────────────────────────────────────────────────────────────── */
-.welcome__title {
-  margin: 0 0 0.5rem;
-  font-family: var(--fluen-font-sans);
-  font-size: clamp(1.3rem, 3vw, 1.8rem);
-  font-weight: 600;
-  color: var(--fluen-on-dark);
-  letter-spacing: -0.02em;
-}
-
-/* ── Subtitle ─────────────────────────────────────────────────────────── */
-.welcome__subtitle {
-  margin: 0 0 0.25rem;
-  font-family: var(--fluen-font-sans);
-  font-size: 0.95rem;
-  font-weight: 500;
-  color: var(--fluen-slate);
 }
 
 /* ── Description ──────────────────────────────────────────────────────── */

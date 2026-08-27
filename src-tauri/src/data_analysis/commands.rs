@@ -5,6 +5,9 @@
 //! | 命令 | 返回 | 说明 |
 //! |------|------|------|
 //! | `data_load_dataset` | `DatasetSchema` | 按扩展名加载数据文件并返回 schema |
+//! | `data_preview_rows` | `DatasetPreview` | 返回前 N 行显示值用于内容栏数据表格 |
+//! | `data_list_datasets` | `Vec<DatasetEntry>` | 扫描项目 data 目录下已导入的 CSV 数据表 |
+//! | `data_import_dataset` | `DatasetEntry` | 复制 CSV 到项目 data 目录对应类型子目录 |
 //! | `data_descriptive` | `Descriptive` | 数值变量的描述统计 |
 //! | `data_frequencies` | `FrequencyTable` | 变量的频数表 |
 //! | `data_crosstab` | `Crosstab` | 交叉表（列联表） |
@@ -96,25 +99,6 @@ impl From<CorrelationMethodParam> for CorrelationMethod {
             CorrelationMethodParam::Pearson => CorrelationMethod::Pearson,
             CorrelationMethodParam::Spearman => CorrelationMethod::Spearman,
             CorrelationMethodParam::Kendall => CorrelationMethod::Kendall,
-        }
-    }
-}
-
-/// Fisher 检验的备择假设。
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AlternativeParam {
-    TwoSided,
-    Less,
-    Greater,
-}
-
-impl From<AlternativeParam> for Alternative {
-    fn from(v: AlternativeParam) -> Self {
-        match v {
-            AlternativeParam::TwoSided => Alternative::TwoSided,
-            AlternativeParam::Less => Alternative::Less,
-            AlternativeParam::Greater => Alternative::Greater,
         }
     }
 }
@@ -224,6 +208,178 @@ pub fn data_load_dataset(path: String) -> Result<DatasetSchema, DataAnalysisErro
         n_rows,
         n_vars: ds.n_vars(),
         variables,
+    })
+}
+
+/// 数据表条目（项目 `data/` 目录下的一份可分析数据）。
+#[derive(Debug, Serialize)]
+pub struct DatasetEntry {
+    /// 文件绝对路径。
+    pub path: String,
+    /// 文件名（不含扩展名）。
+    pub name: String,
+    /// 数据类型：`questionnaire` / `experiment`。
+    pub kind: String,
+    /// 数据行数。
+    pub n_rows: usize,
+    /// 变量数量。
+    pub n_vars: usize,
+}
+
+/// 数据在项目内的归档子目录。
+fn kind_dir(kind: &str) -> Result<&'static str, DataAnalysisError> {
+    match kind {
+        "questionnaire" => Ok("questionnaires"),
+        "experiment" => Ok("experiments"),
+        other => Err(DataAnalysisError::InvalidInput(format!(
+            "未知的数据类型: {other}"
+        ))),
+    }
+}
+
+/// 扫描项目 `data/questionnaires` 与 `data/experiments` 下的 CSV 数据表。
+///
+/// 无法解析的文件会被跳过，避免单个损坏文件阻塞整个列表。
+#[tauri::command]
+pub fn data_list_datasets(project_path: String) -> Result<Vec<DatasetEntry>, DataAnalysisError> {
+    let data_root = PathBuf::from(&project_path).join("data");
+    let mut out = Vec::new();
+
+    for (sub, kind) in [("questionnaires", "questionnaire"), ("experiments", "experiment")] {
+        let Ok(entries) = std::fs::read_dir(data_root.join(sub)) else {
+            continue;
+        };
+        let mut files: Vec<std::fs::DirEntry> = entries.flatten().collect();
+        files.sort_by_key(|e| e.file_name());
+        for file in files {
+            let path = file.path();
+            let is_csv = path
+                .extension()
+                .map(|x| x.eq_ignore_ascii_case("csv"))
+                .unwrap_or(false);
+            if !is_csv {
+                continue;
+            }
+            let Ok(ds) = socstat::read().auto(&path) else {
+                continue;
+            };
+            out.push(DatasetEntry {
+                path: path.to_string_lossy().to_string(),
+                name: path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+                kind: kind.to_string(),
+                n_rows: ds.n_rows(),
+                n_vars: ds.n_vars(),
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// 导入 CSV 数据：复制到项目 `data/` 对应类型的子目录并返回条目。
+///
+/// 与目标目录内已有文件重名时自动追加 `-2`、`-3` 等后缀。
+#[tauri::command]
+pub fn data_import_dataset(
+    project_path: String,
+    source_path: String,
+    kind: String,
+) -> Result<DatasetEntry, DataAnalysisError> {
+    let src = PathBuf::from(&source_path);
+    if !src.exists() {
+        return Err(DataAnalysisError::NotFound(source_path));
+    }
+    let is_csv = src
+        .extension()
+        .map(|x| x.eq_ignore_ascii_case("csv"))
+        .unwrap_or(false);
+    if !is_csv {
+        return Err(DataAnalysisError::InvalidInput(
+            "目前仅支持导入 CSV 文件".to_string(),
+        ));
+    }
+
+    let dir = PathBuf::from(&project_path)
+        .join("data")
+        .join(kind_dir(&kind)?);
+    std::fs::create_dir_all(&dir)?;
+
+    let stem = src
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let mut dest = dir.join(format!("{stem}.csv"));
+    let mut suffix = 2;
+    while dest.exists() {
+        dest = dir.join(format!("{stem}-{suffix}.csv"));
+        suffix += 1;
+    }
+
+    std::fs::copy(&src, &dest)?;
+    let ds = socstat::read().auto(&dest)?;
+
+    Ok(DatasetEntry {
+        path: dest.to_string_lossy().to_string(),
+        name: dest
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+        kind,
+        n_rows: ds.n_rows(),
+        n_vars: ds.n_vars(),
+    })
+}
+
+/// 数据预览（前 N 行的显示值，供内容栏数据表格展示）。
+#[derive(Debug, Serialize)]
+pub struct DatasetPreview {
+    /// 列名（与单元格顺序一致）。
+    pub columns: Vec<String>,
+    /// 行数据（格式化为显示字符串，缺失值为空串）。
+    pub rows: Vec<Vec<String>>,
+    /// 数据总行数。
+    pub total_rows: usize,
+    /// 是否仅返回了部分行。
+    pub truncated: bool,
+}
+
+/// 返回数据集前 `limit` 行（默认 100，上限 1000）用于预览。
+#[tauri::command]
+pub fn data_preview_rows(
+    path: String,
+    limit: Option<usize>,
+) -> Result<DatasetPreview, DataAnalysisError> {
+    let ds = load(&path)?;
+    let total = ds.n_rows();
+    let n = limit.unwrap_or(100).min(1000).min(total);
+
+    let columns: Vec<String> = ds.var_names().map(str::to_string).collect();
+    let mut rows = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut row = Vec::with_capacity(columns.len());
+        for idx in 0..ds.n_vars() {
+            let cell = ds
+                .column(idx)
+                .ok()
+                .and_then(|c| c.get_value(i))
+                .map(|v| v.display())
+                .unwrap_or_default();
+            row.push(cell);
+        }
+        rows.push(row);
+    }
+
+    Ok(DatasetPreview {
+        columns,
+        rows,
+        total_rows: total,
+        truncated: n < total,
     })
 }
 
@@ -341,16 +497,15 @@ pub fn data_chi_square_test(
     Ok(ds.chi_square_test(&var1, &var2)?)
 }
 
-/// Fisher 精确检验。
+/// Fisher 精确检验（socstat 一次返回双侧/小于/大于三个 p 值）。
 #[tauri::command]
 pub fn data_fisher_exact_test(
     path: String,
     var1: String,
     var2: String,
-    alternative: AlternativeParam,
 ) -> Result<FisherExactTest, DataAnalysisError> {
     let ds = load(&path)?;
-    Ok(ds.fisher_exact_test(&var1, &var2, alternative.into())?)
+    Ok(ds.fisher_exact_test(&var1, &var2)?)
 }
 
 // ---------------------------------------------------------------------------

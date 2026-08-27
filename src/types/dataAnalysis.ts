@@ -27,6 +27,26 @@ export interface VariableInfo {
   n_missing: number;
 }
 
+/** 数据集用途类型（问卷 / 实验）。 */
+export type DatasetKind = 'questionnaire' | 'experiment';
+
+/** 数据表条目（项目 `data/` 目录下的一份可分析数据）。 */
+export interface DatasetEntry {
+  path: string;
+  name: string;
+  kind: DatasetKind;
+  n_rows: number;
+  n_vars: number;
+}
+
+/** 数据预览（`data_preview_rows` 返回）。 */
+export interface DatasetPreview {
+  columns: string[];
+  rows: string[][];
+  total_rows: number;
+  truncated: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // 描述统计 & 频数 & 交叉表
 // ---------------------------------------------------------------------------
@@ -218,9 +238,6 @@ export interface ChiSquareTest {
   df: number;
   p_value: number;
 }
-
-/** Fisher 精确检验的备择假设。 */
-export type Alternative = 'twosided' | 'less' | 'greater';
 
 /** Fisher 精确检验。 */
 export interface FisherExactTest {

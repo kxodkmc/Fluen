@@ -121,6 +121,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             data_analysis::commands::data_load_dataset,
+            data_analysis::commands::data_preview_rows,
+            data_analysis::commands::data_list_datasets,
+            data_analysis::commands::data_import_dataset,
             data_analysis::commands::data_descriptive,
             data_analysis::commands::data_frequencies,
             data_analysis::commands::data_crosstab,

@@ -14,6 +14,9 @@ pub enum DataAnalysisError {
 
     #[error("数据文件不存在: {0}")]
     NotFound(String),
+
+    #[error("无效的输入: {0}")]
+    InvalidInput(String),
 }
 
 impl Serialize for DataAnalysisError {

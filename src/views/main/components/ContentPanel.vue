@@ -26,6 +26,7 @@ import { useProject } from '../../../composables/useProject';
 import { FluenEditor, FluenPreview, EditorToolbar, EditorLayoutSwitch, useFluenEditor } from './editor';
 import { MAIN_LAYOUT_KEY } from '../composables/useMainLayout';
 import { ReferenceReader, WikiReader } from './reader';
+import DatasetViewer from './data/DatasetViewer.vue';
 import RecentProjects from './welcome/RecentProjects.vue';
 
 const { t } = useI18n();
@@ -189,6 +190,15 @@ onUnmounted(() => {
         v-else-if="activeTab?.type === 'wiki' && activeTab.wikiId"
         :wiki-id="activeTab.wikiId"
         @close="$emit('close-tab', activeTab.id)"
+      />
+
+      <!-- 数据表查看器（数据分析面板选中数据表时打开）；
+           key 保证每个数据表标签页持有独立实例，切换时内容随之切换 -->
+      <DatasetViewer
+        v-else-if="activeTab?.type === 'dataset' && activeTab.datasetPath && activeTab.datasetKind"
+        :key="activeTab.id"
+        :path="activeTab.datasetPath"
+        :kind="activeTab.datasetKind"
       />
 
       <!-- 三视图编辑区（有项目时）：源码 / 半预览共用同一编辑器，按 editorLayout 显隐 -->

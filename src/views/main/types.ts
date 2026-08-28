@@ -40,7 +40,7 @@ export interface ContentTab {
   /** 标签页标题 */
   title: string;
   /** 标签页类型 */
-  type: 'file' | 'editor' | 'welcome' | 'reference' | 'wiki';
+  type: 'file' | 'editor' | 'welcome' | 'reference' | 'wiki' | 'dataset';
   /** SVG path data（可选，标签页图标） */
   icon?: string;
   /** 是否已修改（显示圆点指示） */
@@ -49,6 +49,10 @@ export interface ContentTab {
   referenceId?: string;
   /** 当 type='wiki' 时，关联的知识库条目 ID。 */
   wikiId?: string;
+  /** 当 type='dataset' 时，数据文件绝对路径。 */
+  datasetPath?: string;
+  /** 当 type='dataset' 时，数据类型（问卷 / 实验）。 */
+  datasetKind?: 'questionnaire' | 'experiment';
 }
 
 /** AI 面板会话角色。 */

@@ -22,9 +22,10 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  Alternative,
   CorrelationMethod,
   Crosstab,
+  DatasetEntry,
+  DatasetPreview,
   DatasetSchema,
   DescriptiveResult,
   FactorialAnova,
@@ -60,6 +61,29 @@ import type {
 /** 加载数据文件，返回 schema。 */
 export async function loadDataset(path: string): Promise<DatasetSchema> {
   return invoke<DatasetSchema>('data_load_dataset', { path });
+}
+
+/** 预览数据集前 `limit` 行（默认 100，上限 1000）。 */
+export async function previewRows(path: string, limit?: number): Promise<DatasetPreview> {
+  return invoke<DatasetPreview>('data_preview_rows', { path, limit });
+}
+
+/** 列出项目 data 目录下已导入的数据表（问卷 / 实验）。 */
+export async function listDatasets(projectPath: string): Promise<DatasetEntry[]> {
+  return invoke<DatasetEntry[]>('data_list_datasets', { projectPath });
+}
+
+/** 导入 CSV 数据：复制到项目 data 目录对应类型子目录，返回条目。 */
+export async function importDataset(
+  projectPath: string,
+  sourcePath: string,
+  kind: 'questionnaire' | 'experiment',
+): Promise<DatasetEntry> {
+  return invoke<DatasetEntry>('data_import_dataset', {
+    projectPath,
+    sourcePath,
+    kind,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -190,18 +214,16 @@ export async function chiSquareTest(
   return invoke<ChiSquareTest>('data_chi_square_test', { path, var1, var2 });
 }
 
-/** Fisher 精确检验。 */
+/** Fisher 精确检验（返回双侧/小于/大于三个 p 值）。 */
 export async function fisherExactTest(
   path: string,
   var1: string,
   var2: string,
-  alternative: Alternative = 'twosided',
 ): Promise<FisherExactTest> {
   return invoke<FisherExactTest>('data_fisher_exact_test', {
     path,
     var1,
     var2,
-    alternative,
   });
 }
 

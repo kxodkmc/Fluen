@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 pub const MANUSCRIPT_TOOL_NAME: &str = "manuscript";
 
 /// 工具描述。
-const DESCRIPTION: &str = "撰写/更新论文正文（格式规范）：整体替换 manuscript/main.md 内容，自动校验 fluen-markup 语法并同步章节备份与索引。写入前会弹出确认框，需用户点击「应用」后才真正保存。";
+const DESCRIPTION: &str = "撰写/更新论文正文（格式规范）：整体替换 manuscript/main.md 内容，自动校验 fluen-markup 语法并同步章节备份与索引。写入前会弹出确认框，需用户点击「应用」后才真正保存。更新已有正文前，必须先通过 project_read 完整读取 manuscript/main.md 全文（漏读即丢文），再在完整原文基础上产出新全文；首次撰写（正文尚不存在或为空）无需先读。";
 
 /// 论文正文写入工具。
 pub struct ManuscriptEditTool {

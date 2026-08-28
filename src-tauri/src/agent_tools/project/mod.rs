@@ -17,9 +17,18 @@
 //!
 //! 文件原语全部委托 referee `ReadTool` / `WriteTool` / `EditTool`
 //! （二进制嗅探、有界读取、原子落盘、唯一匹配强制均复用其实现）。
+//!
+//! 防丢内容两道机制（写前必读门，装配于 `assemble.rs`）：
+//!
+//! - [`read_state::ReadTracker`]：跟踪各文件是否已被 `project_read` 完整读取
+//!   且未变更（多智能体共享，挂在 `MotisChatState`）。
+//! - [`read_gate::ReadGateGuard`]：装饰写工具，未完整读取即拒绝执行，
+//!   且先于审批弹窗拦截。
 
 pub mod edit;
 pub mod read;
+pub mod read_gate;
+pub mod read_state;
 pub mod write;
 
 use std::path::{Component, Path, PathBuf};

@@ -18,6 +18,8 @@ use super::paper::outline::PaperOutlineTool;
 use super::paper::section::PaperSectionTool;
 use super::project::edit::ProjectEditTool;
 use super::project::read::ProjectReadTool;
+use super::project::read_gate::ReadGateGuard;
+use super::project::read_state::ReadTracker;
 use super::project::write::ProjectWriteTool;
 
 /// 注册论文读取工具：`paper_outline` + `paper_section`（只读直装）。
@@ -27,39 +29,63 @@ pub fn register_paper_readers(registry: &ToolRegistry, project_path: &str) -> Re
 }
 
 /// 注册论文正文写入工具 `manuscript`（ApprovalGuard 包装；正文唯一写入通道）。
+///
+/// 内层套 [`ReadGateGuard`]：更新已有正文前必须已完整读取
+/// `manuscript/main.md`（先于审批弹窗拦截）。
 pub fn register_manuscript(
     registry: &ToolRegistry,
     project_path: &str,
     approver: Arc<dyn Approver>,
+    tracker: Arc<ReadTracker>,
 ) -> Result<(), RegistryError> {
     registry.register(Arc::new(ApprovalGuard::new(
-        Arc::new(ManuscriptEditTool::new(project_path.to_string())),
+        Arc::new(ReadGateGuard::new(
+            Arc::new(ManuscriptEditTool::new(project_path.to_string())),
+            project_path.to_string(),
+            tracker,
+        )),
         approver,
     )))
 }
 
 /// 注册只读项目文件读取工具 `project_read`（讨论/审核类角色的只读取用）。
+///
+/// 读取成功后向 `tracker` 记账，供写前必读门判定「完整读取」。
 pub fn register_project_read(
     registry: &ToolRegistry,
     project_path: &str,
+    tracker: Arc<ReadTracker>,
 ) -> Result<(), RegistryError> {
-    registry.register(Arc::new(ProjectReadTool::new(project_path.to_string())))
+    registry.register(Arc::new(ProjectReadTool::with_tracker(
+        project_path.to_string(),
+        Some(tracker),
+    )))
 }
 
-/// 注册项目文件三件套：`project_read` 只读直装；`project_write` /
-/// `project_edit` 经 referee 原语并由 ApprovalGuard 包装（正文 main.md 写保护）。
+/// 注册项目文件三件套：`project_read` 只读直装（带读取记账）；
+/// `project_write` / `project_edit` 经写前必读门（[`ReadGateGuard`]）
+/// 与 ApprovalGuard 双层包装（正文 main.md 写保护）。
 pub fn register_project_files(
     registry: &ToolRegistry,
     project_path: &str,
     approver: Arc<dyn Approver>,
+    tracker: Arc<ReadTracker>,
 ) -> Result<(), RegistryError> {
-    register_project_read(registry, project_path)?;
+    register_project_read(registry, project_path, tracker.clone())?;
     registry.register(Arc::new(ApprovalGuard::new(
-        Arc::new(ProjectWriteTool::new(project_path.to_string())),
+        Arc::new(ReadGateGuard::new(
+            Arc::new(ProjectWriteTool::new(project_path.to_string())),
+            project_path.to_string(),
+            tracker.clone(),
+        )),
         approver.clone(),
     )))?;
     registry.register(Arc::new(ApprovalGuard::new(
-        Arc::new(ProjectEditTool::new(project_path.to_string())),
+        Arc::new(ReadGateGuard::new(
+            Arc::new(ProjectEditTool::new(project_path.to_string())),
+            project_path.to_string(),
+            tracker,
+        )),
         approver,
     )))
 }
@@ -113,10 +139,11 @@ mod tests {
         let dir = temp_dir("no_kb");
         let registry = ToolRegistry::with_defaults();
         let approver: Arc<dyn Approver> = Arc::new(NoopApprover);
+        let tracker = ReadTracker::new_arc();
 
         register_paper_readers(&registry, dir.to_str().unwrap()).unwrap();
-        register_manuscript(&registry, dir.to_str().unwrap(), approver.clone()).unwrap();
-        register_project_files(&registry, dir.to_str().unwrap(), approver).unwrap();
+        register_manuscript(&registry, dir.to_str().unwrap(), approver.clone(), tracker.clone()).unwrap();
+        register_project_files(&registry, dir.to_str().unwrap(), approver, tracker).unwrap();
         // 知识库缺失：静默降级
         register_literature_search(&registry, dir.to_str().unwrap(), &LlmConfig::default()).unwrap();
 
@@ -139,7 +166,7 @@ mod tests {
     fn register_project_read_only_excludes_write_tools() {
         let dir = temp_dir("readonly");
         let registry = ToolRegistry::with_defaults();
-        register_project_read(&registry, dir.to_str().unwrap()).unwrap();
+        register_project_read(&registry, dir.to_str().unwrap(), ReadTracker::new_arc()).unwrap();
 
         assert!(registry.get("project_read").is_some());
         assert!(registry.get("project_write").is_none());

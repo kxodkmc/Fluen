@@ -16,6 +16,7 @@ mod llm_chat;
 mod logging;
 #[allow(dead_code)]
 mod llm_config;
+mod mcp_host;
 mod motis_chat;
 #[allow(dead_code)]
 mod mascot;
@@ -72,6 +73,7 @@ pub fn run() {
     let task_queue_state = TaskQueueState::new();
     let recent_projects_storage =
         RecentProjectsStorage::new().expect("无法确定最近打开项目数据目录");
+    let socstat_mcp_host = mcp_host::socstat::SocstatMcpHost::new();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -88,6 +90,7 @@ pub fn run() {
         .manage(ocr_state)
         .manage(task_queue_state)
         .manage(recent_projects_storage)
+        .manage(socstat_mcp_host.clone())
         .manage(logging::LogGuardHolder(log_guard))
         .setup(|app| {
             // 启动时中断接续：从最近打开项目列表恢复未完成任务
@@ -116,6 +119,11 @@ pub fn run() {
             if recovered > 0 {
                 tracing::info!(recovered, "启动时已触发任务恢复");
             }
+
+            // socstat MCP 服务器随应用启动连接并待机（失败降级为无统计工具，
+            // 不阻塞启动；详见 mcp_host 模块文档）
+            let socstat = app.state::<mcp_host::socstat::SocstatMcpHost>().inner().clone();
+            tauri::async_runtime::spawn(async move { socstat.warm().await });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -222,6 +230,13 @@ pub fn run() {
             logging::commands::log_frontend,
             logging::commands::open_logs_dir,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // 应用退出：优雅停机 MCP 服务器子进程（关 stdin → 5s 超时 kill）
+            if let tauri::RunEvent::Exit = event {
+                let socstat = app.state::<mcp_host::socstat::SocstatMcpHost>();
+                tauri::async_runtime::block_on(socstat.shutdown());
+            }
+        });
 }

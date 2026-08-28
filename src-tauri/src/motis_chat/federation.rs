@@ -9,30 +9,37 @@
 //! - [`FederationPool`]：进程级共享槽（tauri State），双检锁惰性构建。
 //! - [`DelegationTracker`]：进程级「进行中委派」登记表——供取消传播
 //!   （中断仍在运行的子会话）与事件路由（子代理工具事件回溯父委派）共享。
+//! - [`ProjectArtifactStore`](super::artifact_store::ProjectArtifactStore)：
+//!   项目级持久化成果板，随联邦构建打开、落盘于用户数据目录，跨轮次与
+//!   重启可读（内置内存版按会话分板，与本应用的按轮会话模型不兼容）。
 //!
 //! ## 委派协议
 //!
 //! 委派工具（[`super::delegate::DelegateAgentTool`]）经
 //! `kernel.invoke(runtime_id, envelope, timeout)` 把任务作为**全新会话**
 //! 派发给目标子代理（每次委派独立会话，保留隔离语义；`peer_depth + 1`
-//! 透传，深度门控由引擎 `max_subagent_depth` 兜底）。大结果或异步派发
-//! 落入带 ACL 的工件板（按调用者会话分板），仅回传 `artifact_id`，
+//! 透传，深度门控由引擎 `max_subagent_depth` 兜底）。大结果或显式
+//! `artifact_ref` 模式落入项目成果板，仅回传 `artifact_id`，
 //! Motis 可经 `list_my_board` / `read_artifact` 自主取回。
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use referee_agent::artifact::{InMemoryArtifactStore, StoreConfig};
+use referee_agent::artifact::StoreConfig;
 use referee_agent::AgentRuntime;
+use referee_ai::tool::Tool;
 use referee_core::kernel::SupervisionPolicy;
 use referee_core::{CapabilityId, Kernel};
 use tokio::sync::RwLock;
 
 use crate::agent_runtime::approval::Approver;
 use crate::llm_config::model::LlmConfig;
+use crate::mcp_host::socstat::SocstatMcpHost;
 
 use super::agent_reporter::AgentReporter;
+use super::artifact_store::ProjectArtifactStore;
 use super::agents::{self, AgentId, AgentBuildError};
 
 /// 每个扩展的入站队列容量（委派为低频操作，小队列即可）。
@@ -128,7 +135,7 @@ impl RegisteredAgent {
 pub struct Federation {
     fingerprint: u64,
     kernel: Kernel,
-    store: Arc<InMemoryArtifactStore>,
+    store: Arc<ProjectArtifactStore>,
     agents: HashMap<AgentId, RegisteredAgent>,
     /// 进行中委派登记表（与进程级 tracker 共享同一实例）。
     tracker: Arc<DelegationTracker>,
@@ -137,16 +144,23 @@ pub struct Federation {
 impl Federation {
     /// 构建联邦：为每个启用的子代理构建引擎并注册为内核扩展。
     ///
-    /// `tracker` 为进程级登记表（跨联邦重建共享）；`reporter` 非空时
-    /// 子代理工具集整体观测包装，并注入引擎观测器（增量透传 + 失败兜底）。
+    /// `store` 为项目级持久化成果板（由调用方 [`FederationPool`] 按项目
+    /// 打开后注入，测试可注入临时目录实例）；`tracker` 为进程级登记表
+    /// （跨联邦重建共享）；`reporter` 非空时子代理工具集整体观测包装，
+    /// 并注入引擎观测器（增量透传 + 失败兜底）；`socstat` 为应用级
+    /// socstat MCP 统计服务器宿主（`None` 时数据分析通道降级为空）。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn build(
         llm: &LlmConfig,
         project_path: &str,
         approver: Arc<dyn Approver>,
+        read_tracker: Arc<crate::agent_tools::project::read_state::ReadTracker>,
         enabled_agents: &[String],
         fingerprint: u64,
         tracker: Arc<DelegationTracker>,
         reporter: Option<Arc<AgentReporter>>,
+        store: Arc<ProjectArtifactStore>,
+        socstat: Option<SocstatMcpHost>,
     ) -> Result<Self, AgentBuildError> {
         let ids: Vec<AgentId> = if enabled_agents.is_empty() {
             AgentId::all().to_vec()
@@ -158,11 +172,14 @@ impl Federation {
                 .collect()
         };
 
+        // socstat MCP 工具快照：宿主待机连接跨联邦重建复用；
+        // 失败/未启用时为空列表，数据分析助手退化为无统计工具
+        let socstat_tools: Vec<Arc<dyn Tool>> = match &socstat {
+            Some(host) => host.tools().await,
+            None => Vec::new(),
+        };
+
         let kernel = Kernel::new();
-        let store = Arc::new(InMemoryArtifactStore::new(StoreConfig {
-            max_artifacts: STORE_MAX_ARTIFACTS,
-            max_total_bytes: STORE_MAX_TOTAL_BYTES,
-        }));
 
         let mut agents = HashMap::new();
         for id in ids {
@@ -171,7 +188,9 @@ impl Federation {
                 llm,
                 project_path,
                 approver.clone(),
+                read_tracker.clone(),
                 reporter.clone(),
+                &socstat_tools,
             )?;
             let agent_rt =
                 AgentRuntime::new(runtime.engine().clone()).with_artifact_store(store.clone());
@@ -211,8 +230,8 @@ impl Federation {
         &self.kernel
     }
 
-    /// 工件板存储（Motis 侧注册读取工具时使用）。
-    pub fn artifact_store(&self) -> Arc<InMemoryArtifactStore> {
+    /// 项目成果板存储（Motis 侧注册读取工具时使用）。
+    pub fn artifact_store(&self) -> Arc<ProjectArtifactStore> {
         self.store.clone()
     }
 
@@ -280,14 +299,17 @@ impl FederationPool {
     /// 取当前指纹匹配的联邦，不存在则构建。
     ///
     /// `reporter` 为子代理事件上报器（工具观测 + 引擎观测双通道），
-    /// 仅在（重）构建联邦时注入。
+    /// 仅在（重）构建联邦时注入；`socstat` 为应用级 socstat MCP
+    /// 统计服务器宿主（注入 `data_analyst` 工具集，见 `agents`）。
     pub async fn get_or_build(
         &self,
         llm: &LlmConfig,
         project_path: &str,
         approver: Arc<dyn Approver>,
+        read_tracker: Arc<crate::agent_tools::project::read_state::ReadTracker>,
         enabled_agents: &[String],
         reporter: Option<Arc<AgentReporter>>,
+        socstat: Option<SocstatMcpHost>,
     ) -> Result<Arc<Federation>, AgentBuildError> {
         let fp = fingerprint(llm, project_path, enabled_agents);
 
@@ -312,15 +334,29 @@ impl FederationPool {
         if let Some(old) = slot.as_ref() {
             old.interrupt_children().await;
         }
+        // 打开项目级持久化成果板（随联邦生命周期；跨重建从磁盘恢复条目）
+        let store = Arc::new(
+            ProjectArtifactStore::open(
+                project_path,
+                StoreConfig {
+                    max_artifacts: STORE_MAX_ARTIFACTS,
+                    max_total_bytes: STORE_MAX_TOTAL_BYTES,
+                },
+            )
+            .map_err(|e| AgentBuildError::Kernel(format!("成果板存储初始化失败: {e}")))?,
+        );
         let fed = Arc::new(
             Federation::build(
                 llm,
                 project_path,
                 approver,
+                read_tracker,
                 enabled_agents,
                 fp,
                 self.tracker.clone(),
                 reporter,
+                store,
+                socstat,
             )
             .await?,
         );

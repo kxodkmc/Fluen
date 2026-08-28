@@ -13,7 +13,7 @@
 //! | `essay_review` | 论文审核助手 | 论文审核（功能开发中，暂不可用） | paper_outline / paper_section / literature_search / project_read |
 //! | `essay_critique` | 论文思辨助手 | 引导论文思辨讨论，客观基于证据，不负责成文 | paper_outline / paper_section / literature_search / project_read |
 //! | `knowledge_builder` | 知识库构建助手 | 构建与查询文献知识库 | literature_search / project_read / project_write / project_edit |
-//! | `data_analyst` | 数据分析助手 | 统计分析与数据可视化 | project_read / project_write / project_edit（数据分析工具为独立 Tauri 命令通道，未注册为智能体工具） |
+//! | `data_analyst` | 数据分析助手 | 统计分析与数据可视化 | project_read / project_write / project_edit / socstat MCP 统计工具族（经 `crate::mcp_host` 托管） |
 //!
 //! ## 扩展
 //!
@@ -22,12 +22,13 @@
 
 use std::sync::Arc;
 
-use referee_ai::tool::ToolRegistry;
+use referee_ai::tool::{Tool, ToolRegistry};
 
 use crate::agent_runtime::approval::Approver;
 use crate::agent_runtime::observability::observe_registry;
 use crate::agent_runtime::{FluenRuntime, FluenRuntimeBuilder};
 use crate::agent_tools;
+use crate::agent_tools::project::read_state::ReadTracker;
 use crate::llm_chat;
 use crate::llm_config::model::LlmConfig;
 
@@ -104,12 +105,16 @@ pub struct AgentDef {
     pub description: &'static str,
     /// 系统提示词构建函数。
     pub build_prompt: fn() -> String,
-    /// 工具注册函数（在给定项目路径 / LLM 配置 / 审批器时构建工具集）。
+    /// 工具注册函数（在给定项目路径 / LLM 配置 / 审批器 / 读取跟踪器时构建工具集）。
     pub build_tools: fn(
         project_path: &str,
         llm: &LlmConfig,
         approver: Arc<dyn Approver>,
+        read_tracker: Arc<ReadTracker>,
     ) -> Result<ToolRegistry, AgentBuildError>,
+    /// 工具预设：是否追加 socstat MCP 统计工具（数据分析通道，工具由
+    /// 应用启动时待机的 `crate::mcp_host` 服务器提供）。
+    pub uses_socstat_mcp: bool,
 }
 
 /// 子智能体运行时构建错误。
@@ -135,6 +140,7 @@ pub fn all_agent_defs() -> &'static [AgentDef] {
             description: "撰写人类式、可通过检验的学术正文（遵循 LVRV1 人类式写作规范与 fluen-markup），可读取论文、检索文献、写入正文。",
             build_prompt: build_essay_writing_prompt,
             build_tools: build_essay_writing_tools,
+            uses_socstat_mcp: false,
         },
         AgentDef {
             id: AgentId::EssayReview,
@@ -142,6 +148,7 @@ pub fn all_agent_defs() -> &'static [AgentDef] {
             description: "审核论文（功能开发中，暂不可用——收到审核任务时如实告知并引导至撰写/思辨助手）。",
             build_prompt: build_essay_review_prompt,
             build_tools: build_essay_review_tools,
+            uses_socstat_mcp: false,
         },
         AgentDef {
             id: AgentId::EssayCritique,
@@ -149,6 +156,7 @@ pub fn all_agent_defs() -> &'static [AgentDef] {
             description: "客观、基于现实证据地引导论文思辨讨论（梳理论点/结构/争议），不负责成文。",
             build_prompt: build_essay_critique_prompt,
             build_tools: build_essay_critique_tools,
+            uses_socstat_mcp: false,
         },
         AgentDef {
             id: AgentId::KnowledgeBuilder,
@@ -156,6 +164,7 @@ pub fn all_agent_defs() -> &'static [AgentDef] {
             description: "构建与查询文献知识库，检索文献综述 / 概念 / 实体条目。",
             build_prompt: build_knowledge_builder_prompt,
             build_tools: build_knowledge_builder_tools,
+            uses_socstat_mcp: false,
         },
         AgentDef {
             id: AgentId::DataAnalyst,
@@ -163,6 +172,7 @@ pub fn all_agent_defs() -> &'static [AgentDef] {
             description: "执行统计分析与数据可视化（描述性统计、假设检验、回归分析等）。",
             build_prompt: build_data_analyst_prompt,
             build_tools: build_data_analyst_tools,
+            uses_socstat_mcp: true,
         },
     ]
 }
@@ -216,15 +226,15 @@ fn build_knowledge_builder_prompt() -> String {
 }
 
 fn build_data_analyst_prompt() -> String {
-    "你是 Fluen 学术创作平台的**数据分析助手**。你的核心职责是帮助用户进行统计分析与数据可视化。\n\n\
-     你可以：\n\
-     - 读取项目内的 CSV / 数据文件\n\
-     - 基于数据提供分析建议\n\
-     - 将分析结果写入项目文件\n\n\
+    "你是 Fluen 学术创作平台的**数据分析助手**。你的核心职责是基于项目数据执行统计分析并解读结果。\n\n\
+     分析通道——socstat 统计服务器（MCP 工具，应用启动时已就绪）：\n\
+     - 先用 load_dataset 加载项目 data/ 目录下的数据文件（CSV / JSON / .sav），后续按数据集名引用；可用 list_datasets / preview 了解数据结构\n\
+     - 数据整理（仅影响会话内数据，不改源文件）：recode / filter / sort / keep / compute / set_weight\n\
+     - 按研究问题选择方法：描述与频数（descriptive / frequencies / crosstab）；组间与配对比较（independent_t_test / paired_t_test / one_way_anova / mann_whitney_u_test / wilcoxon_signed_rank_test / kruskal_wallis_test）；分类关联（chi_square_test / fisher_exact_test）；正态性（shapiro_wilk / ks_normality_test）；相关与回归（correlation_pair / correlation_matrix / partial_correlation / linear_regression / logistic_regression / vif）；多变量与信度（pca / reliability）；事后与析因（post_hoc / factorial_anova）\n\n\
      工作原则：\n\
-     - 分析前先理解数据结构与用户的研究问题\n\
-     - 提供可解释的统计结论，不替代用户做学术判断\n\
-     - 写操作需用户确认后才执行\n"
+     - 方法选择需符合数据类型与研究问题，注明统计前提与适用条件\n\
+     - 结论给出统计量、p 值与效应解读；前提不满足或结果不确定时如实说明\n\
+     - 不替代用户做学术判断；如需将结果写入项目文件，用 project_write / project_edit（需用户确认）\n"
         .to_string()
 }
 
@@ -238,6 +248,7 @@ fn build_essay_writing_tools(
     project_path: &str,
     llm: &LlmConfig,
     approver: Arc<dyn Approver>,
+    read_tracker: Arc<ReadTracker>,
 ) -> Result<ToolRegistry, AgentBuildError> {
     let registry = ToolRegistry::with_defaults();
     let reg_err = |e: referee_ai::tool::RegistryError| {
@@ -249,12 +260,12 @@ fn build_essay_writing_tools(
     agent_tools::assemble::register_literature_search(&registry, project_path, llm)
         .map_err(reg_err)?;
 
-    // 写操作：论文正文写入（ApprovalGuard 包装）
-    agent_tools::assemble::register_manuscript(&registry, project_path, approver.clone())
+    // 写操作：论文正文写入（写前必读门 + ApprovalGuard 包装）
+    agent_tools::assemble::register_manuscript(&registry, project_path, approver.clone(), read_tracker.clone())
         .map_err(reg_err)?;
 
-    // 读写：项目内文件三件套（写/编辑需审批；正文 main.md 写保护）
-    agent_tools::assemble::register_project_files(&registry, project_path, approver)
+    // 读写：项目内文件三件套（写/编辑经读门与审批；正文 main.md 写保护）
+    agent_tools::assemble::register_project_files(&registry, project_path, approver, read_tracker)
         .map_err(reg_err)?;
 
     Ok(registry)
@@ -266,8 +277,9 @@ fn build_essay_review_tools(
     project_path: &str,
     llm: &LlmConfig,
     approver: Arc<dyn Approver>,
+    read_tracker: Arc<ReadTracker>,
 ) -> Result<ToolRegistry, AgentBuildError> {
-    build_readonly_essay_tools(project_path, llm, approver)
+    build_readonly_essay_tools(project_path, llm, approver, read_tracker)
 }
 
 /// 论文思辨助手工具集（只读）：paper_outline / paper_section /
@@ -276,8 +288,9 @@ fn build_essay_critique_tools(
     project_path: &str,
     llm: &LlmConfig,
     approver: Arc<dyn Approver>,
+    read_tracker: Arc<ReadTracker>,
 ) -> Result<ToolRegistry, AgentBuildError> {
-    build_readonly_essay_tools(project_path, llm, approver)
+    build_readonly_essay_tools(project_path, llm, approver, read_tracker)
 }
 
 /// 只读不写工具集公共装配：论文读取 + 文献检索 + 项目只读。
@@ -285,7 +298,8 @@ fn build_essay_critique_tools(
 fn build_readonly_essay_tools(
     project_path: &str,
     llm: &LlmConfig,
-    approver: Arc<dyn Approver>,
+    _approver: Arc<dyn Approver>,
+    read_tracker: Arc<ReadTracker>,
 ) -> Result<ToolRegistry, AgentBuildError> {
     let registry = ToolRegistry::with_defaults();
     let reg_err = |e: referee_ai::tool::RegistryError| {
@@ -295,7 +309,8 @@ fn build_readonly_essay_tools(
     agent_tools::assemble::register_paper_readers(&registry, project_path).map_err(reg_err)?;
     agent_tools::assemble::register_literature_search(&registry, project_path, llm)
         .map_err(reg_err)?;
-    agent_tools::assemble::register_project_read(&registry, project_path).map_err(reg_err)?;
+    agent_tools::assemble::register_project_read(&registry, project_path, read_tracker)
+        .map_err(reg_err)?;
 
     Ok(registry)
 }
@@ -306,6 +321,7 @@ fn build_knowledge_builder_tools(
     project_path: &str,
     llm: &LlmConfig,
     approver: Arc<dyn Approver>,
+    read_tracker: Arc<ReadTracker>,
 ) -> Result<ToolRegistry, AgentBuildError> {
     let registry = ToolRegistry::with_defaults();
     let reg_err = |e: referee_ai::tool::RegistryError| {
@@ -316,23 +332,26 @@ fn build_knowledge_builder_tools(
     agent_tools::assemble::register_literature_search(&registry, project_path, llm)
         .map_err(reg_err)?;
 
-    // 读写：项目内文件三件套（写/编辑需审批；正文 main.md 写保护）
-    agent_tools::assemble::register_project_files(&registry, project_path, approver)
+    // 读写：项目内文件三件套（写/编辑经读门与审批；正文 main.md 写保护）
+    agent_tools::assemble::register_project_files(&registry, project_path, approver, read_tracker)
         .map_err(reg_err)?;
 
     Ok(registry)
 }
 
 /// 数据分析助手工具集：project_read / project_write / project_edit（数据文件）。
+/// socstat 统计工具族由 [`build_agent_runtime`] 按 `uses_socstat_mcp`
+/// 预设追加——统计计算经应用启动时待机的 MCP 服务器（`crate::mcp_host`）。
 fn build_data_analyst_tools(
     project_path: &str,
     _llm: &LlmConfig,
     approver: Arc<dyn Approver>,
+    read_tracker: Arc<ReadTracker>,
 ) -> Result<ToolRegistry, AgentBuildError> {
     let registry = ToolRegistry::with_defaults();
 
-    // 读写：项目内数据文件——只读直装；写/编辑经 referee 原语并 ApprovalGuard 包装
-    agent_tools::assemble::register_project_files(&registry, project_path, approver)
+    // 读写：项目内数据文件——只读直装；写/编辑经读门 + referee 原语并 ApprovalGuard 包装
+    agent_tools::assemble::register_project_files(&registry, project_path, approver, read_tracker)
         .map_err(|e| AgentBuildError::ToolRegistry(e.to_string()))?;
 
     Ok(registry)
@@ -349,12 +368,19 @@ fn build_data_analyst_tools(
 /// - 工具集整体经 [`observe_registry`] 包装，上报工具调用的开始/结束；
 /// - 引擎注入 [`EngineObserver`](referee_ai::EngineObserver)（即 reporter 本身），
 ///   透传子智能体 LLM 思考/文本增量，并兜底上报执行器折叠的工具失败。
+///
+/// `socstat_tools` 为 socstat MCP 统计工具快照（由 `crate::mcp_host`
+/// 待机服务器提供；连接失败为空列表，即该通道降级）；仅
+/// `uses_socstat_mcp` 预设为真的智能体（`data_analyst`）会注册它们。
+#[allow(clippy::too_many_arguments)]
 pub fn build_agent_runtime(
     agent_id: &AgentId,
     llm: &LlmConfig,
     project_path: &str,
     approver: Arc<dyn Approver>,
+    read_tracker: Arc<ReadTracker>,
     reporter: Option<Arc<AgentReporter>>,
+    socstat_tools: &[Arc<dyn Tool>],
 ) -> Result<(bool, FluenRuntime), AgentBuildError> {
     let def = find_agent_def(agent_id).ok_or_else(|| {
         AgentBuildError::LlmConfig(format!("未知子智能体: {}", agent_id))
@@ -375,8 +401,16 @@ pub fn build_agent_runtime(
     )
     .map_err(|e| AgentBuildError::LlmConfig(e.to_string()))?;
 
-    // 构建工具集（可选整体观测包装）
-    let registry = (def.build_tools)(project_path, llm, approver)?;
+    // 构建工具集：角色基础集 + 预设的数据分析通道（socstat MCP 统计工具）
+    let registry = (def.build_tools)(project_path, llm, approver, read_tracker)?;
+    if def.uses_socstat_mcp {
+        for tool in socstat_tools {
+            registry
+                .register(tool.clone())
+                .map_err(|e| AgentBuildError::ToolRegistry(e.to_string()))?;
+        }
+    }
+    // 可选整体观测包装
     let registry = match reporter {
         Some(ref r) => observe_registry(&registry, r.clone()),
         None => registry,
@@ -443,5 +477,17 @@ mod tests {
         assert!(!build_essay_critique_prompt().is_empty());
         assert!(!build_knowledge_builder_prompt().is_empty());
         assert!(!build_data_analyst_prompt().is_empty());
+    }
+
+    #[test]
+    fn socstat_mcp_preset_only_for_data_analyst() {
+        for def in all_agent_defs() {
+            assert_eq!(
+                def.uses_socstat_mcp,
+                def.id == AgentId::DataAnalyst,
+                "{} 的 socstat 预设不符",
+                def.id
+            );
+        }
     }
 }

@@ -30,7 +30,9 @@
 //!
 //! ## 示例
 //!
-//! ```no_run
+//! ```rust,ignore
+//! // 本模块为 crate 私有且示例使用 crate:: 相对路径（doctest 中 crate::
+//! // 指向 doctest 自身而非 fluen_lib），故不参与编译，仅作概念展示
 //! use std::sync::Arc;
 //!
 //! let tool = Arc::new(crate::agent_tools::paper::outline::PaperOutlineTool::new(

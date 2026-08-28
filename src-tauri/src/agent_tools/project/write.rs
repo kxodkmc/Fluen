@@ -15,7 +15,7 @@ use super::ProjectFs;
 pub const PROJECT_WRITE_TOOL_NAME: &str = "project_write";
 
 /// 工具描述。
-const DESCRIPTION: &str = "在论文项目内创建或整体替换文件：原子写入（临时文件 + rename，不留半写状态），自动创建缺失父目录。path 相对项目根，禁止越界与 .git；论文正文 manuscript/main.md 受保护——写正文请使用 manuscript 工具（自动格式校验与章节同步）。执行前会弹出确认框，需用户点击「应用」后才真正写入。";
+const DESCRIPTION: &str = "在论文项目内创建或整体替换文件：原子写入（临时文件 + rename，不留半写状态），自动创建缺失父目录。path 相对项目根，禁止越界与 .git；论文正文 manuscript/main.md 受保护——写正文请使用 manuscript 工具（自动格式校验与章节同步）。执行前会弹出确认框，需用户点击「应用」后才真正写入。禁止用本工具修改已有文件的局部内容（整篇重写极易丢失未复制的段落）——局部修改必须用 project_edit；覆盖已有文件前必须先通过 project_read 完整读取原文，否则拒绝执行。";
 
 /// 项目文件写入工具。
 pub struct ProjectWriteTool {

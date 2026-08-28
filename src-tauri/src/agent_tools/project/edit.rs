@@ -15,7 +15,7 @@ use super::ProjectFs;
 pub const PROJECT_EDIT_TOOL_NAME: &str = "project_edit";
 
 /// 工具描述。
-const DESCRIPTION: &str = "精确替换论文项目内文件中的字面文本：old_string 必须恰好出现一次，多处需 replace_all=true；二进制文件拒绝编辑；写入为原子操作。path 相对项目根，禁止越界与 .git；论文正文 manuscript/main.md 受保护——修改正文请使用 manuscript 工具。执行前会弹出确认框，需用户点击「应用」后才真正保存。";
+const DESCRIPTION: &str = "精确替换论文项目内文件中的字面文本：old_string 必须恰好出现一次，多处需 replace_all=true；二进制文件拒绝编辑；写入为原子操作。path 相对项目根，禁止越界与 .git；论文正文 manuscript/main.md 受保护——修改正文请使用 manuscript 工具。执行前会弹出确认框，需用户点击「应用」后才真正保存。前置条件：必须先通过 project_read 完整读取目标文件原文（所有窗口覆盖全文且文件未变更），否则拒绝执行；禁止用 project_write 做局部修改，局部修改一律走本工具。";
 
 /// 项目文件编辑工具。
 pub struct ProjectEditTool {

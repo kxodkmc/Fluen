@@ -12,6 +12,7 @@ import { useI18n } from '../../../../i18n';
 import { useMascotConfig } from '../../../../composables/useMascotConfig';
 import { useMascotData } from '../../../../composables/useMascotData';
 import type { Mood } from '../../../../types/mascot';
+import MotisContextUsage from './MotisContextUsage.vue';
 
 defineEmits<{
   (e: 'close'): void;
@@ -67,16 +68,19 @@ const moodLabel = computed(() => {
       </span>
     </div>
 
-    <!-- 关闭按钮 -->
-    <button
-      class="motis-header__close"
-      :title="t('main.titleBar.controls.close')"
-      @click="$emit('close')"
-    >
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <path d="M18 6L6 18M6 6l12 12" />
-      </svg>
-    </button>
+    <!-- 右侧操作区：上下文容量 + 关闭 -->
+    <div class="motis-header__actions">
+      <MotisContextUsage />
+      <button
+        class="motis-header__close"
+        :title="t('main.titleBar.controls.close')"
+        @click="$emit('close')"
+      >
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M18 6L6 18M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
   </div>
 </template>
 
@@ -144,6 +148,13 @@ const moodLabel = computed(() => {
   background: var(--fluen-info-bg);
   color: var(--fluen-info);
   border-color: transparent;
+}
+
+.motis-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
 }
 
 .motis-header__close {

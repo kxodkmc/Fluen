@@ -11,6 +11,7 @@
 //! motis:tool-call        →  工具调用通知
 //! motis:tool-result      →  工具执行结果（当前用于 delegate_agent 委派结果）
 //! motis:approval-request →  工具审批请求（写操作需用户确认）
+//! motis:context-usage    →  本轮请求上下文用量分类报告（发送前估算）
 //! motis:finish           →  完成事件（携带最终结果与 token 用量）
 //! motis:error            →  错误事件（流终止时发送）
 //! ```
@@ -50,6 +51,10 @@ pub const EVENT_APPROVAL_REQUEST: &str = "motis:approval-request";
 
 /// 完成事件——认知循环结束，携带最终结果与 token 用量。
 pub const EVENT_FINISH: &str = "motis:finish";
+
+/// 上下文用量事件——每轮发送前推送分类估算报告
+/// （payload 为 [`crate::motis_chat::context_usage::ContextUsageReport`]）。
+pub const EVENT_CONTEXT_USAGE: &str = "motis:context-usage";
 
 /// 错误事件——流式执行中出现错误。
 pub const EVENT_ERROR: &str = "motis:error";
@@ -128,6 +133,10 @@ pub struct ApprovalRequestPayload {
     pub tool_name: String,
     /// 工具调用参数（JSON，含 path / action / content 等）。
     pub input: serde_json::Value,
+    /// 预演算的行级 diff（仅写/编辑类操作；推演失败为 `None`，
+    /// 前端回退截断摘要展示）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<super::approval_diff::ApprovalDiff>,
 }
 
 /// 完成事件 payload。
@@ -137,6 +146,10 @@ pub struct FinishPayload {
     pub result: serde_json::Value,
     /// 总 token 用量。
     pub total_tokens: usize,
+    /// 真实输入 token（vendor 上报 usage 时；流式回合取最后一轮）。
+    pub prompt_tokens: Option<usize>,
+    /// 真实输出 token（同上）。
+    pub completion_tokens: Option<usize>,
 }
 
 /// 错误事件 payload。

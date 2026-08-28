@@ -26,6 +26,7 @@
 
 use std::sync::Arc;
 
+use referee_ai::provider::ToolDeclaration;
 use referee_ai::tool::ToolRegistry;
 
 use crate::agent_runtime::approval::{approval_executor, Approver};
@@ -35,12 +36,33 @@ use crate::llm_config::model::LlmConfig;
 use crate::mascot::model::MascotConfig;
 
 use super::agent_reporter::AgentReporter;
+use super::artifact_store::ProjectArtifactStore;
 use super::delegate::DelegateAgentTool;
 use super::error::MotisChatError;
 use super::federation::FederationPool;
 use super::timeouts::{
     motis_engine_config, LLM_HTTP_TIMEOUT, MOTIS_AWAITING_TIMEOUT, MOTIS_TOOL_TIMEOUT,
 };
+use crate::mcp_host::socstat::SocstatMcpHost;
+
+/// Motis 运行时装配产物——回合所需的一切上下文。
+///
+/// 除运行时本体外，携带工具声明清单与模型规格，
+/// 供 commands 层构建上下文用量报告（[`super::context_usage`]）。
+pub struct MotisRuntimeBundle {
+    /// 思考模式是否启用（由模型能力决定，供 `ChatOptions` 使用）。
+    pub thinking_enabled: bool,
+    /// referee 运行时。
+    pub runtime: FluenRuntime,
+    /// 项目成果板（工具不可用时为 `None`，供系统提示词注入成果清单）。
+    pub board_store: Option<Arc<ProjectArtifactStore>>,
+    /// 主会话工具声明清单（工具不可用时为空）。
+    pub tool_declarations: Vec<ToolDeclaration>,
+    /// 模型上下文窗口（token）。
+    pub context_window: usize,
+    /// 模型最大输出预留（token）。
+    pub max_output_tokens: usize,
+}
 
 /// 构建 Motis 运行时。
 ///
@@ -52,19 +74,24 @@ use super::timeouts::{
 ///   `function_calling_enabled` 时装配项目级工具
 /// - `approver`: 工具审批器（写操作弹窗确认，包装 `project_write` /
 ///   `project_edit`）
+/// - `federation_pool`: 子智能体联邦槽（确保委派目标就绪并注入内核）
+/// - `socstat`: socstat MCP 统计服务器宿主（注入 `data_analyst`
+///   工具集；`None` 或连接失败时数据分析通道降级为无统计工具）
 ///
 /// # 返回
 ///
-/// 思考模式是否启用（由模型能力决定，供 `ChatOptions` 使用）
-/// 与 [`FluenRuntime`]。
+/// [`MotisRuntimeBundle`]——思考模式开关、[`FluenRuntime`]、项目成果板
+/// （工具不可用时为 `None`）、工具声明清单与模型规格。
 pub async fn build_runtime(
     mascot: &MascotConfig,
     llm: &LlmConfig,
     project_path: Option<&str>,
     approver: Arc<dyn Approver>,
+    read_tracker: Arc<crate::agent_tools::project::read_state::ReadTracker>,
     reporter: Arc<AgentReporter>,
     federation_pool: &FederationPool,
-) -> Result<(bool, FluenRuntime), MotisChatError> {
+    socstat: Option<SocstatMcpHost>,
+) -> Result<MotisRuntimeBundle, MotisChatError> {
     // 1. 解析 provider 与 model（优先 Motis 配置，回退全局激活项）
     let (provider, model_id) = llm_chat::resolve_provider_model(
         mascot.provider_id.as_deref(),
@@ -75,6 +102,10 @@ pub async fn build_runtime(
 
     // 模型支持思考时启用思考模式（如 DeepSeek / 智谱深度思考）。
     let thinking_enabled = provider.model_supports_thinking(&model_id);
+
+    // 模型规格（上下文窗口 / 最大输出）——与 provider 构造同源解析，
+    // 供上下文用量报告作分母
+    let (context_window, max_output_tokens) = llm_chat::resolve_model_spec(provider, &model_id);
 
     // 2. 构造 referee LLMProvider（HTTP 兜底超时大于引擎单轮超时）
     let llm_provider = llm_chat::build_llm_provider_with_timeout(
@@ -87,6 +118,8 @@ pub async fn build_runtime(
     // 3. 装配 Motis 总督角色工具集（引擎单轮 LLM 超时放宽至 5 分钟）
     let mut builder = FluenRuntimeBuilder::new(llm_provider)
         .with_config(motis_engine_config(MOTIS_AWAITING_TIMEOUT));
+    let mut board_store = None;
+    let mut tool_declarations = Vec::new();
     if mascot.function_calling_enabled {
         if let Some(project_path) = project_path {
             // 确保子智能体联邦就绪（按指纹复用/重建），并把内核注入执行器，
@@ -96,8 +129,10 @@ pub async fn build_runtime(
                     llm,
                     project_path,
                     approver.clone(),
+                    read_tracker.clone(),
                     &mascot.enabled_agents,
                     Some(reporter.clone()),
+                    socstat,
                 )
                 .await
                 .map_err(|e| MotisChatError::Runtime(e.to_string()))?;
@@ -105,19 +140,30 @@ pub async fn build_runtime(
                 mascot,
                 project_path,
                 approver,
+                read_tracker,
                 reporter,
                 &federation,
             )?;
+            // 声明快照须在 registry 移入 builder 前导出（观测包装不改变声明内容）
+            tool_declarations = registry.declarations();
             // 执行器超时须大于委派 RPC 超时（600s），否则会吞掉 RPC 的
             // 明确超时错误并导致子会话追踪泄漏（见 timeouts 分层）
             builder = builder.with_tools(
                 registry,
                 approval_executor(MOTIS_TOOL_TIMEOUT).with_kernel(federation.kernel().clone()),
             );
+            board_store = Some(federation.artifact_store());
         }
     }
 
-    Ok((thinking_enabled, builder.build()))
+    Ok(MotisRuntimeBundle {
+        thinking_enabled,
+        runtime: builder.build(),
+        board_store,
+        tool_declarations,
+        context_window,
+        max_output_tokens,
+    })
 }
 
 /// 装配 Motis 总督角色的工具集。
@@ -126,13 +172,14 @@ pub async fn build_runtime(
 /// - `paper_outline` / `paper_section`：论文大纲与章节读取（只读）
 /// - `project_read`：项目内文件读取（只读）
 /// - `project_write` / `project_edit`：项目内文件写入/编辑（ApprovalGuard 包装）
-/// - `list_my_board` / `read_artifact`：委派成果板读取（大结果以 artifact_id
-///   返回时，总督可自主取回原文）
+/// - `list_my_board` / `read_artifact`：项目成果板读取（成果以 artifact_id
+///   落库后，总督可跨轮取回原文；板随项目持久化）
 /// - `delegate_agent`：子智能体委派工具（内核协议）
 fn build_motis_tool_registry(
     mascot: &MascotConfig,
     project_path: &str,
     approver: Arc<dyn Approver>,
+    read_tracker: Arc<crate::agent_tools::project::read_state::ReadTracker>,
     reporter: Arc<AgentReporter>,
     federation: &Arc<super::federation::Federation>,
 ) -> Result<ToolRegistry, MotisChatError> {
@@ -147,11 +194,12 @@ fn build_motis_tool_registry(
     crate::agent_tools::assemble::register_paper_readers(&registry, project_path)
         .map_err(reg_err)?;
 
-    // 读写：项目内文件三件套（只读直装；写/编辑经 ApprovalGuard 包装）
+    // 读写：项目内文件三件套（只读带读取记账；写/编辑经读门 + ApprovalGuard 包装）
     crate::agent_tools::assemble::register_project_files(
         &registry,
         project_path,
         approver.clone(),
+        read_tracker,
     )
     .map_err(reg_err)?;
 

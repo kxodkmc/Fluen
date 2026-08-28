@@ -78,15 +78,23 @@ pub struct MotisApprover {
     event_name: String,
     /// 待审批请求共享存储（与 `MotisChatState` 共享同一实例）。
     approvals: Arc<ApprovalMap>,
+    /// 当前论文项目根（用于审批前预演算行级 diff）。
+    project_path: Option<String>,
 }
 
 impl MotisApprover {
-    /// 构造审批器。
-    pub fn new(window: Window, approvals: Arc<ApprovalMap>, event_name: &str) -> Self {
+    /// 构造审批器（`project_path` 用于在审批弹窗中展示真实 diff）。
+    pub fn new(
+        window: Window,
+        approvals: Arc<ApprovalMap>,
+        event_name: &str,
+        project_path: Option<String>,
+    ) -> Self {
         Self {
             window,
             event_name: event_name.to_string(),
             approvals,
+            project_path,
         }
     }
 }
@@ -106,13 +114,19 @@ impl Approver for MotisApprover {
             .expect("approval map poisoned")
             .insert(id.clone(), tx);
 
-        // 2. 推送审批请求到前端
+        // 2. 预演算行级 diff（失败降级为 None，不阻断审批），推送审批请求
+        let diff = super::approval_diff::build_approval_diff(
+            self.project_path.as_deref(),
+            tool_name,
+            input,
+        );
         if let Err(e) = self.window.emit(
             &self.event_name,
             ApprovalRequestPayload {
                 id: id.clone(),
                 tool_name: tool_name.to_string(),
                 input: input.clone(),
+                diff,
             },
         ) {
             self.approvals

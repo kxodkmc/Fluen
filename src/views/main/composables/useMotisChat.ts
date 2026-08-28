@@ -16,7 +16,8 @@
  * motis:tool-result →  工具执行结果（按 tool_call_id 关联到工具消息）
  * motis:agent-*     →  子智能体委派过程（挂到工具消息的 agentRun：
  *                      started / thought / text / tool-call / tool-result / finished）
- * motis:finish      →  完成（结束流式状态 + 清空气泡）
+ * motis:context-usage → 本轮上下文分类估算（发送前推送，驱动「上下文容量」面板）
+ * motis:finish      →  完成（结束流式状态 + 清空气泡 + 真实 token 用量）
  * motis:error      →  错误（追加状态消息 + 标记中断 + 清空气泡）
  * ```
  *
@@ -36,6 +37,7 @@ import { useProject } from '../../../composables/useProject';
 import { useI18n } from '../../../i18n';
 import type { MascotConfig } from '../../../types/mascot';
 import type { ChatMessage } from '../types';
+import type { ApprovalRequestPayload, PendingApproval } from './approvalTypes';
 import {
   PLAYFUL_TOOL_MESSAGE_KEYS,
   PLAYFUL_THINKING_MESSAGE_KEYS,
@@ -70,9 +72,37 @@ interface ToolResultPayload {
 interface FinishPayload {
   result: unknown;
   total_tokens: number;
+  /** 真实输入 token（vendor 上报 usage 时才有）。 */
+  prompt_tokens?: number | null;
+  /** 真实输出 token（同上）。 */
+  completion_tokens?: number | null;
 }
 interface ErrorPayload {
   message: string;
+}
+
+/* ── 上下文用量（与后端 context_usage.rs 对齐，camelCase） ──────────── */
+/** 单个分类的 token 占用。 */
+export interface ContextCategory {
+  /** 分类 key（messages / system_prompt / sub_agents / board / tools / output_reserved）。 */
+  key: string;
+  tokens: number;
+}
+/** 一轮请求的上下文用量报告（`motis:context-usage` 事件 payload）。 */
+export interface ContextUsageReport {
+  categories: ContextCategory[];
+  /** 输入侧估算总量（不含 output_reserved）。 */
+  estimatedPromptTokens: number;
+  /** 当前模型上下文窗口。 */
+  contextWindow: number;
+  /** 当前模型最大输出预留。 */
+  maxOutputTokens: number;
+}
+/** API 返回的真实 token 用量（vendor 不上报时为 null）。 */
+export interface ActualTokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
 }
 
 /* ── 子智能体事件 payload（与后端 events.rs 对齐） ──────────────────── */
@@ -115,20 +145,8 @@ interface AgentFinishedPayload {
   error?: string;
 }
 
-/** 工具审批请求 payload（与后端 events.rs 对齐）。 */
-interface ApprovalRequestPayload {
-  id: string;
-  tool_name: string;
-  input: unknown;
-}
-
-/** 待审批的工具写操作（前端确认弹窗条目）。 */
-export interface PendingApproval {
-  id: string;
-  toolName: string;
-  /** 输入参数（含 path / action / content 等）。 */
-  input: Record<string, unknown>;
-}
+/** 待审批条目类型（共享定义，re-export 保持外部引用兼容）。 */
+export type { PendingApproval } from './approvalTypes';
 /** 默认 MascotConfig（加载失败或非 Tauri 环境时兜底）。 */
 const DEFAULT_CONFIG: MascotConfig = {
   version: '1.0.0',
@@ -178,6 +196,10 @@ export function useMotisChat() {
   const pendingApprovals = ref<PendingApproval[]>([]);
   /** 草稿消息（供搜索栏 @Motis 预填，可双向绑定）。 */
   const draftMessage = ref('');
+  /** 最近一轮请求的上下文用量分类报告（发送前估算，`motis:context-usage`）。 */
+  const contextUsage = ref<ContextUsageReport | null>(null);
+  /** 最近一轮 API 返回的真实 token 用量（vendor 不上报时为 null）。 */
+  const lastActualUsage = ref<ActualTokenUsage | null>(null);
 
   /* ── 内部状态 ─────────────────────────────────────────────────────── */
   /** 当前 MascotConfig（每次 send 前刷新）。 */
@@ -251,6 +273,7 @@ export function useMotisChat() {
       id: payload.id,
       toolName: payload.tool_name,
       input: (payload.input ?? {}) as Record<string, unknown>,
+      diff: payload.diff,
     });
   }
 
@@ -457,13 +480,28 @@ export function useMotisChat() {
     }, BUBBLE_CLEAR_DELAY);
   }
 
-  /** 处理完成事件 — 结束流式状态，气泡延迟清除。 */
-  function onFinish(_payload: FinishPayload): void {
+  /** 处理上下文用量事件 — 缓存最近一轮的分类估算报告。 */
+  function onContextUsage(payload: ContextUsageReport): void {
+    contextUsage.value = payload;
+  }
+
+  /** 处理完成事件 — 结束流式状态，气泡延迟清除，记录真实 token 用量。 */
+  function onFinish(payload: FinishPayload): void {
     closeStreamingMessages();
     // 不立即清空气泡，延迟让用户读完最后回复
     scheduleBubbleClear();
     isGenerating.value = false;
     currentRunId.value = null;
+    // 真实用量（vendor 上报 usage 时才有 prompt/completion 拆分）
+    if (payload.prompt_tokens != null || payload.completion_tokens != null) {
+      lastActualUsage.value = {
+        promptTokens: payload.prompt_tokens ?? 0,
+        completionTokens: payload.completion_tokens ?? 0,
+        totalTokens: payload.total_tokens ?? 0,
+      };
+    } else {
+      lastActualUsage.value = null;
+    }
   }
 
   /** 处理错误事件 — 追加状态消息、标记中断并清空气泡。 */
@@ -498,6 +536,7 @@ export function useMotisChat() {
       listen<AgentToolCallPayload>('motis:agent-tool-call', (e) => onAgentToolCall(e.payload)),
       listen<AgentToolResultPayload>('motis:agent-tool-result', (e) => onAgentToolResult(e.payload)),
       listen<AgentFinishedPayload>('motis:agent-finished', (e) => onAgentFinished(e.payload)),
+      listen<ContextUsageReport>('motis:context-usage', (e) => onContextUsage(e.payload)),
       listen<FinishPayload>('motis:finish', (e) => onFinish(e.payload)),
       listen<ErrorPayload>('motis:error', (e) => onError(e.payload)),
     ]);
@@ -642,6 +681,9 @@ export function useMotisChat() {
     statusBubble: readonly(statusBubble),
     currentRunId: readonly(currentRunId),
     pendingApprovals: readonly(pendingApprovals),
+    // 上下文用量（只读）：最近一轮的分类估算报告与真实 token 用量
+    contextUsage: readonly(contextUsage),
+    lastActualUsage: readonly(lastActualUsage),
     // 草稿消息（可双向绑定）
     draftMessage,
 

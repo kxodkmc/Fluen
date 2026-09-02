@@ -138,6 +138,7 @@ const WRITING_WORKFLOW: &str = "## 撰写流程
 
 - 正文一律经 `manuscript` 写入（唯一正文通道，会校验格式并同步章节结构）；通用写工具（project_write / project_edit）已禁止触碰正文。
 - `manuscript` 的 content 应包含**全部章节**（含已有内容），不只是新增部分——它是整体替换语义。
+- 更新已有正文前必须先掌握全文，否则 `manuscript` 会拒绝执行：用 `paper_section` 逐个**完整读取全部一级章节**（`# 标题`，计入已读记账），或用 `project_read` 完整读取 `manuscript/main.md`（从 offset 0 续读到 truncated=false）。
 - 写入前会弹出确认框，需用户点击「应用」后才真正保存；用户拒绝时尊重决定，不反复尝试。
 - 参考文献索引等非正文文件用 `project_write` 写入、用 `project_edit` 精确修改。
 - 若用户只要求提供内容草稿（未要求写入），可直接在回复中给出，不调用工具。";

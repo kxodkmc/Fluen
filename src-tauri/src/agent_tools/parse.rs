@@ -241,6 +241,30 @@ pub fn extract_section(md: &str, reference: &str) -> Result<ExtractedSection, Se
     })
 }
 
+/// 提取 H1 标题与其章节标记 ID 的配对（按文档顺序）。
+///
+/// `main.md` 中每个一级章节块以 `<!-- @sec_id:sec-xxx -->` 标记行开头、
+/// 紧随 `# 标题` 行；本函数扫描两者并配对，供 [`crate::agent_tools::paper::section::PaperSectionTool`]
+/// 将已完整读取的一级章节映射回章节备份文件（`sec-{id}.md`），
+/// 进而让写前必读门认可结构化读取路径。
+pub fn h1_sec_ids(md: &str) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut pending_id: Option<String> = None;
+    for line in md.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(SEC_MARKER_PREFIX) {
+            pending_id = Some(rest.trim().trim_end_matches("-->").trim().to_string());
+            continue;
+        }
+        if let Some((1, text)) = parse_heading(line) {
+            if let Some(id) = pending_id.take() {
+                pairs.push((text, id));
+            }
+        }
+    }
+    pairs
+}
+
 // ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------
@@ -325,6 +349,27 @@ mod tests {
         assert!(err.message.contains("未找到章节"));
         assert!(err.message.contains("可用标题"));
         assert!(err.message.contains("引言"));
+    }
+
+    #[test]
+    fn h1_sec_ids_pairs_markers_with_h1_titles() {
+        assert_eq!(
+            h1_sec_ids(SAMPLE_MD),
+            vec![
+                ("引言".to_string(), "sec-aaa11111".to_string()),
+                ("方法".to_string(), "sec-bbb22222".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn h1_sec_ids_skips_unmarked_h1() {
+        // 无标记的 H1（如用户手写内容）不参与配对
+        let md = "# 草稿\n\n正文\n\n<!-- @sec_id:sec-ccc33333 -->\n# 有标记\n";
+        assert_eq!(
+            h1_sec_ids(md),
+            vec![("有标记".to_string(), "sec-ccc33333".to_string())]
+        );
     }
 
     #[test]

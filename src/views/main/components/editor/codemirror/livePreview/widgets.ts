@@ -9,7 +9,11 @@
  */
 
 import { WidgetType } from '@codemirror/view';
+import type { EditorView } from '@codemirror/view';
 import katex from 'katex';
+import { i18nInstance } from '../../../../../../i18n';
+import type { MarkdownTableModel, TableAlignment } from '../tableModel';
+import { attachTableEvents } from '../tableEditing';
 
 /** KaTeX 安全渲染选项：throwOnError 关闭 + 失败回退由调用方处理。 */
 const KATEX_OPTIONS = {
@@ -116,6 +120,190 @@ export class TaskCheckboxWidget extends WidgetType {
     el.textContent = this.checked ? '☑' : '☐';
     el.setAttribute('aria-hidden', 'true');
     return el;
+  }
+}
+
+/* ── 表格 widget（结构化编辑：渲染态单元格 + 行列手柄） ───────────── */
+
+/** 按模型对齐标记设置单元格文本对齐。 */
+function applyCellAlign(el: HTMLElement, align: TableAlignment): void {
+  if (align) el.style.textAlign = align;
+}
+
+/** i18n 单例读取（widget 构建于编辑器挂载后，vue-i18n 已就绪）。 */
+function tr(key: string): string {
+  return i18nInstance.global.t(key) as string;
+}
+
+/** 构建一个手柄按钮（+ 插入 / × 删除），操作类型由 data-table-op 标记。 */
+function handleButton(op: string, glyph: string, titleKey: string): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'fluen-lp-tbhandle__btn';
+  btn.dataset.tableOp = op;
+  btn.textContent = glyph;
+  btn.title = tr(titleKey);
+  return btn;
+}
+
+/**
+ * 列手柄：悬停列上方显示（+ 在左侧插入列 / × 删除此列），
+ * 附纵向指示线；`data-col` 由悬停定位时写入，供事件层读取操作索引。
+ */
+function buildColHandle(): HTMLDivElement {
+  const box = document.createElement('div');
+  box.className = 'fluen-lp-tbhandle fluen-lp-tbhandle--col';
+  box.hidden = true;
+  box.appendChild(handleButton('insert-col', '+', 'main.content.toolbar.handleInsertCol'));
+  box.appendChild(handleButton('delete-col', '×', 'main.content.toolbar.handleDeleteCol'));
+  box.appendChild(Object.assign(document.createElement('span'), { className: 'fluen-lp-tbhandle__line' }));
+  return box;
+}
+
+/** 行手柄：悬停行左侧显示（+ 在上方插入行 / × 删除此行），附横向指示线。 */
+function buildRowHandle(): HTMLDivElement {
+  const box = document.createElement('div');
+  box.className = 'fluen-lp-tbhandle fluen-lp-tbhandle--row';
+  box.hidden = true;
+  box.appendChild(handleButton('insert-row', '+', 'main.content.toolbar.handleInsertRow'));
+  box.appendChild(handleButton('delete-row', '×', 'main.content.toolbar.handleDeleteRow'));
+  box.appendChild(Object.assign(document.createElement('span'), { className: 'fluen-lp-tbhandle__line' }));
+  return box;
+}
+
+/** 将手柄定位到悬停单元格所在行/列（offsetParent 即 tablebox）。 */
+function showHandles(box: HTMLElement, cell: HTMLElement): void {
+  const colHandle = box.querySelector<HTMLDivElement>('.fluen-lp-tbhandle--col');
+  const rowHandle = box.querySelector<HTMLDivElement>('.fluen-lp-tbhandle--row');
+  if (!colHandle || !rowHandle) return;
+
+  const row = cell.parentElement as HTMLTableRowElement;
+  colHandle.dataset.col = String((cell as HTMLTableCellElement).cellIndex);
+  colHandle.style.left = `${cell.offsetLeft}px`;
+  colHandle.style.width = `${cell.offsetWidth}px`;
+  colHandle.hidden = false;
+
+  rowHandle.dataset.row = String(row.sectionRowIndex);
+  rowHandle.style.top = `${cell.offsetTop}px`;
+  rowHandle.style.height = `${cell.offsetHeight}px`;
+  rowHandle.hidden = false;
+}
+
+/**
+ * 表格 widget：渲染为可直接编辑的结构化表格。
+ *
+ * Word 式交互（半预览中不揭示 Markdown 源码，源码编辑走仅源码视图）：
+ *   - 单元格 contenteditable 直接输入，input 事件经 tableEditing 层写回
+ *     文档（事件为 widget DOM 原生监听——CM6 会丢弃 ignoreEvent widget 内
+ *     冒泡的事件，domEventHandlers 收不到）；
+ *   - 悬停单元格显示行/列手柄（+ 插入 / × 删除），点击由 tableEditing 层
+ *     应用 {@link tableModel} 的结构操作后整体写回；
+ *   - 单元格内容一律走 textContent 读写，无 HTML 注入面。
+ *
+ * DOM 复用两段式：
+ *   - `eq` 模型相等 → 整个 DOM 直接复用；
+ *   - 模型不等（键入写回 / 撤销等）→ `updateDOM` 原地同步单元格文本并复用
+ *     DOM，焦点与输入法状态得以保留——这是「编辑不闪断」的关键；行列数
+ *     变化（手柄增删）时返回 false 交由 CM 重建。
+ */
+export class TableWidget extends WidgetType {
+  constructor(readonly model: MarkdownTableModel) {
+    super();
+  }
+
+  override eq(other: TableWidget): boolean {
+    return JSON.stringify(other.model) === JSON.stringify(this.model);
+  }
+
+  /**
+   * 结构一致时原地同步单元格文本，复用现有 DOM。
+   *
+   * 键入写回路径：新模型源自 DOM 读取，焦点单元格文本必然一致、不被触碰，
+   * 焦点与输入法状态因此保留。仅撤销/外部变更等 DOM 与模型不一致时才会
+   * 重写单元格文本（焦点单元格光标位置会重置，属可接受代价）。
+   */
+  override updateDOM(box: HTMLElement, _view: EditorView, from: this): boolean {
+    const table = box.querySelector('table');
+    if (!table) return false;
+    const head = [...box.querySelectorAll<HTMLElement>('thead th')];
+    const bodyRows = [...table.querySelectorAll<HTMLElement>('tbody tr')];
+    if (
+      head.length !== this.model.header.length ||
+      bodyRows.length !== this.model.rows.length ||
+      from.model.aligns.length !== this.model.aligns.length
+    ) {
+      return false; // 行列结构变化：交由 CM 重建
+    }
+
+    const sync = (el: HTMLElement, text: string, align: TableAlignment): void => {
+      if (el.textContent !== text) el.textContent = text;
+      if (el.style.textAlign !== (align ?? '')) applyCellAlign(el, align);
+    };
+    head.forEach((th, i) => sync(th, this.model.header[i] ?? '', this.model.aligns[i] ?? null));
+    for (let r = 0; r < bodyRows.length; r++) {
+      const cells = [...bodyRows[r]!.querySelectorAll<HTMLElement>('td')];
+      if (cells.length !== this.model.header.length) return false;
+      const row = this.model.rows[r] ?? [];
+      cells.forEach((td, i) => sync(td, row[i] ?? '', this.model.aligns[i] ?? null));
+    }
+    box.dataset.aligns = JSON.stringify(this.model.aligns);
+    return true;
+  }
+
+  /** 事件全部由原生监听处理（见 tableEditing.ts；CM 不感知 widget 内事件）。 */
+  override ignoreEvent(): boolean {
+    return true;
+  }
+
+  override toDOM(): HTMLElement {
+    const box = document.createElement('div');
+    box.className = 'fluen-lp-tablebox';
+    box.dataset.aligns = JSON.stringify(this.model.aligns);
+    box.appendChild(this.buildTable());
+    box.appendChild(buildColHandle());
+    box.appendChild(buildRowHandle());
+    attachTableEvents(box);
+
+    box.addEventListener('mouseover', (e) => {
+      const cell = (e.target as HTMLElement).closest('th,td');
+      if (cell instanceof HTMLElement && box.contains(cell)) showHandles(box, cell);
+    });
+    box.addEventListener('mouseleave', () => {
+      const col = box.querySelector<HTMLDivElement>('.fluen-lp-tbhandle--col');
+      const row = box.querySelector<HTMLDivElement>('.fluen-lp-tbhandle--row');
+      if (col) col.hidden = true;
+      if (row) row.hidden = true;
+    });
+    return box;
+  }
+
+  /** 渲染三线表 DOM：单元格内容为 textContent，可编辑。 */
+  private buildTable(): HTMLTableElement {
+    const table = document.createElement('table');
+    table.className = 'fluen-lp-table';
+
+    const thead = table.createTHead();
+    const headRow = thead.insertRow();
+    this.model.header.forEach((cell, i) => {
+      const th = document.createElement('th');
+      th.textContent = cell;
+      th.setAttribute('contenteditable', 'plaintext-only');
+      applyCellAlign(th, this.model.aligns[i] ?? null);
+      headRow.appendChild(th);
+    });
+
+    const tbody = table.createTBody();
+    for (const row of this.model.rows) {
+      const tr = tbody.insertRow();
+      this.model.header.forEach((_, i) => {
+        const td = document.createElement('td');
+        td.textContent = row[i] ?? '';
+        td.setAttribute('contenteditable', 'plaintext-only');
+        applyCellAlign(td, this.model.aligns[i] ?? null);
+        tr.appendChild(td);
+      });
+    }
+    return table;
   }
 }
 

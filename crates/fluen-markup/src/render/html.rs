@@ -244,6 +244,7 @@ fn render_inline(i: &Inline, ctx: &RenderContext<'_>, out: &mut String) {
         Inline::Emphasis(v) => { out.push_str("<em>"); render_inlines(v, ctx, out); out.push_str("</em>"); }
         Inline::Strong(v) => { out.push_str("<strong>"); render_inlines(v, ctx, out); out.push_str("</strong>"); }
         Inline::Strikethrough(v) => { out.push_str("<del>"); render_inlines(v, ctx, out); out.push_str("</del>"); }
+        Inline::Underline(v) => { out.push_str("<u>"); render_inlines(v, ctx, out); out.push_str("</u>"); }
         Inline::Code(c) => { out.push_str("<code>"); out.push_str(&html_escape_text(c)); out.push_str("</code>"); }
         Inline::Math(m) => {
             // 行内数学：交给前端 KaTeX/MathJax；用 $$ 包裹供后者识别

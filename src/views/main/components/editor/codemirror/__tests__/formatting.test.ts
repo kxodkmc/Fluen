@@ -144,6 +144,33 @@ describe('applyMarkdownFormat — italic', () => {
   });
 });
 
+describe('applyMarkdownFormat — underline', () => {
+  it('选中文本时整体包裹（++ 标记）', () => {
+    expectFormat('abc', 1, 2, 'underline', 'a++b++c', 3, 4);
+  });
+
+  it('选区整体已被包裹时取消包裹', () => {
+    expectFormat('++un++ rest', 0, 6, 'underline', 'un rest', 0, 2);
+  });
+
+  it('光标位于下划线标记对内时取消下划线', () => {
+    expectFormat('a++un++b', 4, 4, 'underline', 'aunb', 2, 2);
+  });
+
+  it('光标不在标记内时插入空标记对并居中', () => {
+    expectFormat('abc', 1, 1, 'underline', 'a++++bc', 3, 3);
+  });
+
+  it('选区紧贴后续下划线区域时合并为一段', () => {
+    // `你好我是++Kimi++` 选中 `是` → `你好我++是Kimi++`（而非 ++是++++Kimi++）
+    expectFormat('你好我是++Kimi++', 3, 4, 'underline', '你好我++是Kimi++', 5, 10);
+  });
+
+  it('与加粗标记互不干扰（在 **bold** 内部包裹下划线）', () => {
+    expectFormat('**bold**', 2, 6, 'underline', '**++bold++**', 4, 8);
+  });
+});
+
 describe('applyMarkdownFormat — heading', () => {
   it('光标行添加 `# ` 前缀', () => {
     expectFormat('hello\nworld', 2, 2, 'heading', '# hello\nworld', 4, 4);

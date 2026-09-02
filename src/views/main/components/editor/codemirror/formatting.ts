@@ -23,7 +23,7 @@
  *     级别（1-6 级）前缀；所有行均已处于目标级别时切换为移除前缀。
  */
 
-export type MarkdownFormatKind = 'bold' | 'italic' | 'heading';
+export type MarkdownFormatKind = 'bold' | 'italic' | 'underline' | 'heading';
 
 /** 标题级别（1-6 级，对应 Markdown `#` 至 `######`）。 */
 export type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
@@ -45,6 +45,7 @@ export interface FormatResult {
 const MARKERS: Record<Exclude<MarkdownFormatKind, 'heading'>, string> = {
   bold: '**',
   italic: '*',
+  underline: '++',
 };
 
 /** 行首标题前缀：可选前导空白 + 1-6 个 `#` + 空格/制表符或行尾，避免误伤 `#tag` 等文本。 */
@@ -124,12 +125,12 @@ function markerBalanceBefore(doc: string, pos: number, marker: string): number {
 /**
  * 剥离文本中的同类标记。
  *
- *   - bold（`**`）：移除全部 `**`。
+ *   - 通用（`**` / `++` 等）：移除全部标记序列。
  *   - italic（`*`）：仅移除独立的 `*`（不属于 `**` 的部分），保留加粗标记。
  */
 function stripMarkers(text: string, marker: string): string {
-  if (marker === '**') {
-    return text.split('**').join('');
+  if (marker !== '*') {
+    return text.split(marker).join('');
   }
   let out = '';
   for (let i = 0; i < text.length; i++) {
@@ -178,14 +179,14 @@ function shiftPosition(pos: number, changes: DocChange[]): number {
 /**
  * 判断文本内部是否还存在同类标记。
  *
- *   - bold（`**`）：是否存在任意 `**`。
+ *   - 通用（`**` / `++` 等）：是否存在任意标记序列。
  *   - italic（`*`）：是否存在独立 `*`（`**` 视为加粗标记整体跳过）。
  * 用于“选区整体被包裹”判定：首尾为标记且内部无同类标记才算包裹，
  * 避免 `甲**乙**丙**丁**` 这类首尾恰好是标记的选区被误判为取消包裹。
  */
 function hasInnerMarker(text: string, marker: string): boolean {
-  if (marker === '**') {
-    return text.includes('**');
+  if (marker !== '*') {
+    return text.includes(marker);
   }
   for (let i = 0; i < text.length; i++) {
     if (text[i] === '*') {
@@ -199,7 +200,7 @@ function hasInnerMarker(text: string, marker: string): boolean {
   return false;
 }
 
-/* ── 行内格式（加粗 / 斜体） ─────────────────────────────────────── */
+/* ── 行内格式（加粗 / 斜体 / 下划线） ─────────────────────────────── */
 
 function applyInline(doc: string, from: number, to: number, marker: string): FormatResult {
   const m = marker.length;

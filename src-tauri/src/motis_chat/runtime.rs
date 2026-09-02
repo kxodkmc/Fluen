@@ -191,8 +191,12 @@ fn build_motis_tool_registry(
     };
 
     // 只读：论文大纲与章节读取
-    crate::agent_tools::assemble::register_paper_readers(&registry, project_path)
-        .map_err(reg_err)?;
+    crate::agent_tools::assemble::register_paper_readers(
+        &registry,
+        project_path,
+        read_tracker.clone(),
+    )
+    .map_err(reg_err)?;
 
     // 读写：项目内文件三件套（只读带读取记账；写/编辑经读门 + ApprovalGuard 包装）
     crate::agent_tools::assemble::register_project_files(

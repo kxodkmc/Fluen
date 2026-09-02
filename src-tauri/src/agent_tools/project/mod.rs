@@ -111,7 +111,8 @@ impl ProjectFs {
         }
     }
 
-    fn root(&self) -> PathBuf {
+    /// 项目根目录（供写前必读门定位章节索引 / 备份文件等派生路径）。
+    pub(crate) fn root(&self) -> PathBuf {
         PathBuf::from(&self.project_path)
     }
 

@@ -160,6 +160,7 @@ fn render_inline(i: &Inline, ctx: &RenderContext<'_>, out: &mut String) {
         Inline::Emphasis(v) => { render_inlines(v, ctx, out); }
         Inline::Strong(v) => { out.push_str("**"); render_inlines(v, ctx, out); out.push_str("**"); }
         Inline::Strikethrough(v) => { render_inlines(v, ctx, out); }
+        Inline::Underline(v) => { render_inlines(v, ctx, out); }
         Inline::Code(c) => { out.push('`'); out.push_str(c); out.push('`'); }
         Inline::Math(m) => { out.push('$'); out.push_str(m); out.push('$'); }
         Inline::Link { text, url, .. } => {

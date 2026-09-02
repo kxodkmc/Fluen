@@ -63,7 +63,7 @@ fn rewrite_inlines(inls: &mut Vec<Inline>) {
     // 递归处理嵌套（emphasis/strong/link）
     for nl in inls.iter_mut() {
         match nl {
-            Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) => rewrite_inlines(v),
+            Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) | Inline::Underline(v) => rewrite_inlines(v),
             Inline::Link { text, .. } => rewrite_inlines(text),
             _ => {}
         }

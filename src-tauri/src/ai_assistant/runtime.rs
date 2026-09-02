@@ -91,8 +91,12 @@ fn build_tool_registry(
     };
 
     // 只读：论文大纲与章节读取
-    crate::agent_tools::assemble::register_paper_readers(&registry, project_path)
-        .map_err(reg_err)?;
+    crate::agent_tools::assemble::register_paper_readers(
+        &registry,
+        project_path,
+        read_tracker.clone(),
+    )
+    .map_err(reg_err)?;
 
     // 只读：文献知识库搜索（知识库存在时装配；缺失/打开失败时降级跳过）
     crate::agent_tools::assemble::register_literature_search(&registry, project_path, llm)

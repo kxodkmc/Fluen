@@ -26,6 +26,7 @@ import type { ChangeSpec } from '@codemirror/state';
 import { undo, redo, undoDepth, redoDepth } from '@codemirror/commands';
 import { createEditorState, createEditorView, type EditorCallbacks } from '../codemirror/setup';
 import { applyMarkdownFormat, type MarkdownFormatKind, type HeadingLevel } from '../codemirror/formatting';
+import { insertBlockSpec } from '../codemirror/blockInsert';
 import { setLivePreviewEffect } from '../codemirror/livePreview';
 import { useProject } from '../../../../../composables/useProject';
 
@@ -217,6 +218,28 @@ function toggleFormat(kind: MarkdownFormatKind, level: HeadingLevel = 1): void {
   _view.focus();
 }
 
+/**
+ * 在光标处插入块级内容（表格、图片等），自动保证块间空行隔离。
+ *
+ * 位置与空行计算委托给纯函数层 {@link insertBlockSpec}；插入后光标
+ * 定位到块内容之后并聚焦编辑器。未挂载时返回 false。
+ *
+ * @param block 块级文本（不含首尾空行）。
+ * @returns 是否成功插入。
+ */
+function insertBlock(block: string): boolean {
+  if (!_view) return false;
+  const pos = _view.state.selection.main.head;
+  const spec = insertBlockSpec(_view.state.doc.toString(), pos, block);
+  _view.dispatch({
+    changes: spec.changes,
+    selection: spec.selection,
+    scrollIntoView: true,
+  });
+  _view.focus();
+  return true;
+}
+
 // ── 保存 ───────────────────────────────────────────────────────────
 
 /**
@@ -326,6 +349,7 @@ export function useFluenEditor() {
     undo: undoEd,
     redo: redoEd,
     toggleFormat,
+    insertBlock,
     dispatchChanges,
     setLivePreview,
 

@@ -84,6 +84,26 @@ fn inline_strong() {
 }
 
 #[test]
+fn inline_underline() {
+    let html = render_html("这是++下划线++文本。");
+    assert!(html.contains("<u>"), "html: {html}");
+    assert!(html.contains("下划线"), "html: {html}");
+}
+
+#[test]
+fn inline_underline_nested_strong() {
+    let html = render_html("++**粗且下划**++");
+    assert!(html.contains("<u>"), "html: {html}");
+    assert!(html.contains("<strong>"), "html: {html}");
+}
+
+#[test]
+fn inline_underline_unpaired_is_plain_text() {
+    let html = render_html("a ++ b");
+    assert!(!html.contains("<u>"), "html: {html}");
+}
+
+#[test]
 fn inline_link() {
     let html = render_html("[链接](https://example.com)");
     assert!(html.contains("<a"), "html: {html}");
@@ -96,6 +116,14 @@ fn markdown_table() {
     let html = render_html("\n| A | B |\n|---|---|\n| 1 | 2 |\n");
     // 若 md_block 不支持独立 MD 表，则表格文本会出现在段落中——验证至少有内容
     assert!(html.contains("A") && html.contains("1"), "html: {html}");
+}
+
+#[test]
+fn f_tbl_inserted_shape_renders() {
+    // 编辑器「插入表格」生成的精确源码形态（含 linter 必需的 caption）
+    let src = "<f-tbl>\n  <f-caption>题注</f-caption>\n\n|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n\n</f-tbl>";
+    let html = render_html(src);
+    assert!(html.contains("<table"), "html: {html}");
 }
 
 #[test]

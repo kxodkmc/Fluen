@@ -256,7 +256,12 @@ fn build_essay_writing_tools(
     };
 
     // 只读：论文大纲与章节读取 + 文献知识库搜索
-    agent_tools::assemble::register_paper_readers(&registry, project_path).map_err(reg_err)?;
+    agent_tools::assemble::register_paper_readers(
+        &registry,
+        project_path,
+        read_tracker.clone(),
+    )
+    .map_err(reg_err)?;
     agent_tools::assemble::register_literature_search(&registry, project_path, llm)
         .map_err(reg_err)?;
 
@@ -306,7 +311,12 @@ fn build_readonly_essay_tools(
         AgentBuildError::ToolRegistry(e.to_string())
     };
 
-    agent_tools::assemble::register_paper_readers(&registry, project_path).map_err(reg_err)?;
+    agent_tools::assemble::register_paper_readers(
+        &registry,
+        project_path,
+        read_tracker.clone(),
+    )
+    .map_err(reg_err)?;
     agent_tools::assemble::register_literature_search(&registry, project_path, llm)
         .map_err(reg_err)?;
     agent_tools::assemble::register_project_read(&registry, project_path, read_tracker)

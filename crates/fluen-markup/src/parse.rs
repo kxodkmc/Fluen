@@ -116,7 +116,7 @@ fn push_plain(i: &Inline, out: &mut String) {
         Inline::Text(t) => out.push_str(t),
         Inline::Code(c) => out.push_str(c),
         Inline::Math(m) => out.push_str(m),
-        Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) => {
+        Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) | Inline::Underline(v) => {
             for x in v { push_plain(x, out); }
         }
         Inline::Link { text, .. } => for x in text { push_plain(x, out); },

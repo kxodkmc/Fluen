@@ -21,6 +21,7 @@ import {
 
 import { ftagExtension } from './ftagSyntax';
 import { footnoteExtension } from './footnoteSyntax';
+import { underlineExtension } from './underlineSyntax';
 import { hideSectionMarkers } from './markerDecoration';
 import { fluenMathExtension, livePreviewExtension } from './livePreview';
 
@@ -51,11 +52,11 @@ export function createEditorState(doc: string, callbacks: EditorCallbacks): Edit
       drawSelection(),
       bracketMatching(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-      // 启用 f- 标签、脚注与数学公式语法扩展；base 采用 GFM 方言
+      // 启用 f- 标签、脚注、下划线与数学公式语法扩展；base 采用 GFM 方言
       // （表格 / 删除线 / 任务列表 / 上下标），与半预览渲染规则对齐
       markdown({
         base: markdownLanguage,
-        extensions: [ftagExtension, footnoteExtension, fluenMathExtension],
+        extensions: [ftagExtension, footnoteExtension, underlineExtension, fluenMathExtension],
       }),
       // 隐藏章节标记行（<!-- @sec_id:xxx -->），对用户不可见但保留在文档中
       hideSectionMarkers,

@@ -130,7 +130,9 @@ fn read_config(project_dir: &Path) -> Result<ProjectConfig, ProjectError> {
 }
 
 /// 读取并解析 `sections.json`，返回章节列表（未排序）。
-fn read_sections_index(project_dir: &Path) -> Result<Vec<SectionMeta>, ProjectError> {
+///
+/// 公开供智能体工具层读取（如写前必读门列举章节）。
+pub fn read_sections_index(project_dir: &Path) -> Result<Vec<SectionMeta>, ProjectError> {
     let path = project_dir
         .join("manuscript")
         .join("sections")

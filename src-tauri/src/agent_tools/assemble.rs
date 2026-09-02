@@ -23,9 +23,19 @@ use super::project::read_state::ReadTracker;
 use super::project::write::ProjectWriteTool;
 
 /// 注册论文读取工具：`paper_outline` + `paper_section`（只读直装）。
-pub fn register_paper_readers(registry: &ToolRegistry, project_path: &str) -> Result<(), RegistryError> {
+///
+/// `paper_section` 接入 `tracker`：完整读取一级章节时登记其章节备份，
+/// 供写前必读门认可结构化读取路径。
+pub fn register_paper_readers(
+    registry: &ToolRegistry,
+    project_path: &str,
+    tracker: Arc<ReadTracker>,
+) -> Result<(), RegistryError> {
     registry.register(Arc::new(PaperOutlineTool::new(project_path.to_string())))?;
-    registry.register(Arc::new(PaperSectionTool::new(project_path.to_string())))
+    registry.register(Arc::new(PaperSectionTool::with_tracker(
+        project_path.to_string(),
+        Some(tracker),
+    )))
 }
 
 /// 注册论文正文写入工具 `manuscript`（ApprovalGuard 包装；正文唯一写入通道）。
@@ -141,7 +151,7 @@ mod tests {
         let approver: Arc<dyn Approver> = Arc::new(NoopApprover);
         let tracker = ReadTracker::new_arc();
 
-        register_paper_readers(&registry, dir.to_str().unwrap()).unwrap();
+        register_paper_readers(&registry, dir.to_str().unwrap(), tracker.clone()).unwrap();
         register_manuscript(&registry, dir.to_str().unwrap(), approver.clone(), tracker.clone()).unwrap();
         register_project_files(&registry, dir.to_str().unwrap(), approver, tracker).unwrap();
         // 知识库缺失：静默降级

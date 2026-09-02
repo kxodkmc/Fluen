@@ -282,7 +282,7 @@ fn resolve_xrefs_inline(i: &mut Inline, table: &NumberingTable, options: &crate:
                 }
             }
         }
-        Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) => {
+        Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) | Inline::Underline(v) => {
             for x in v.iter_mut() { resolve_xrefs_inline(x, table, options, problems); }
         }
         Inline::Link { text, .. } => for x in text { resolve_xrefs_inline(x, table, options, problems); },
@@ -344,7 +344,7 @@ fn collect_cite_refs_inlines(inls: &[Inline], refs: &dyn ReferenceProvider, orde
                     }
                 }
             }
-            Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) => collect_cite_refs_inlines(v, refs, order, map),
+            Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) | Inline::Underline(v) => collect_cite_refs_inlines(v, refs, order, map),
             Inline::Link { text, .. } => collect_cite_refs_inlines(text, refs, order, map),
             _ => {}
         }
@@ -421,7 +421,7 @@ fn resolve_cites_inline(i: &mut Inline, refs: &dyn ReferenceProvider, options: &
                 }
             }
         }
-        Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) => {
+        Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) | Inline::Underline(v) => {
             for x in v.iter_mut() { resolve_cites_inline(x, refs, options, numeric_order, problems); }
         }
         Inline::Link { text, .. } => for x in text { resolve_cites_inline(x, refs, options, numeric_order, problems); },
@@ -493,7 +493,7 @@ fn check_fallback_inlines(inls: &[Inline], table: &NumberingTable, refs: &dyn Re
                     }
                 }
             }
-            Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) => check_fallback_inlines(v, table, refs, options, problems),
+            Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) | Inline::Underline(v) => check_fallback_inlines(v, table, refs, options, problems),
             Inline::Link { text, .. } => check_fallback_inlines(text, table, refs, options, problems),
             _ => {}
         }

@@ -164,7 +164,7 @@ fn lint_refs_inlines(inls: &[Inline], table: &NumberingTable, refs: &dyn Referen
                 }
                 let _ = options;
             }
-            Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) => lint_refs_inlines(v, table, refs, options, problems),
+            Inline::Emphasis(v) | Inline::Strong(v) | Inline::Strikethrough(v) | Inline::Underline(v) => lint_refs_inlines(v, table, refs, options, problems),
             Inline::Link { text, .. } => lint_refs_inlines(text, table, refs, options, problems),
             _ => {}
         }

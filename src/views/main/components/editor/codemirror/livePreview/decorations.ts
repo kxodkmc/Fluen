@@ -23,7 +23,8 @@ import { Decoration } from '@codemirror/view';
 import { type Range, type Text } from '@codemirror/state';
 import type { DecorationSet } from '@codemirror/view';
 import type { SyntaxNode, Tree } from '@lezer/common';
-import { BulletWidget, MathWidget, TaskCheckboxWidget } from './widgets';
+import { BulletWidget, MathWidget, TableWidget, TaskCheckboxWidget } from './widgets';
+import { parseMarkdownTableText } from '../tableModel';
 import { scanMathRegions, type MathRegion } from './mathDisplayScan';
 
 // ── 装饰模板（模块级复用；Decoration 实例不可变可共享） ─────────────
@@ -31,6 +32,7 @@ import { scanMathRegions, type MathRegion } from './mathDisplayScan';
 const decoBold = Decoration.mark({ class: 'fluen-lp-strong' });
 const decoItalic = Decoration.mark({ class: 'fluen-lp-em' });
 const decoStrike = Decoration.mark({ class: 'fluen-lp-strike' });
+const decoUnderline = Decoration.mark({ class: 'fluen-lp-underline' });
 const decoInlineCode = Decoration.mark({ class: 'fluen-lp-code-inline' });
 
 const lineHeading: ReadonlyArray<Decoration | null> = [
@@ -44,8 +46,6 @@ const lineHeading: ReadonlyArray<Decoration | null> = [
 ];
 const lineQuote = Decoration.line({ class: 'fluen-lp-quote' });
 const lineFence = Decoration.line({ class: 'fluen-lp-fence' });
-const lineTableHead = Decoration.line({ class: 'fluen-lp-table-head' });
-const lineTableBody = Decoration.line({ class: 'fluen-lp-table-body' });
 const lineTaskDone = Decoration.line({ class: 'fluen-lp-task-done' });
 const lineMathSrc = Decoration.line({ class: 'fluen-lp-math-src' });
 const lineHr = Decoration.line({ class: 'fluen-lp-hr' });
@@ -191,11 +191,12 @@ for (let level = 1 as const, cap = 6 as const; level <= cap; level++) {
   });
 }
 
-/** 强调族：粗体/斜体/删除线/上标/下标。 */
+/** 强调族：粗体/斜体/删除线/下划线/上标/下标。 */
 const EMPHASIS_FAMILIES: ReadonlyArray<{ node: string; deco: Decoration; mark: string }> = [
   { node: 'StrongEmphasis', deco: decoBold, mark: 'EmphasisMark' },
   { node: 'Emphasis', deco: decoItalic, mark: 'EmphasisMark' },
   { node: 'Strikethrough', deco: decoStrike, mark: 'StrikethroughMark' },
+  { node: 'Underline', deco: decoUnderline, mark: 'UnderlineMark' },
   { node: 'Superscript', deco: decoItalic, mark: 'SuperscriptMark' },
   { node: 'Subscript', deco: decoItalic, mark: 'SubscriptMark' },
 ];
@@ -337,26 +338,27 @@ addRule('HorizontalRule', (node, cx) => {
   cx.acc.deco.push(lineHr.range(line.from, line.from));
 });
 
-/** 表格：表头加粗、正文弱化，保持网格原样可编辑。 */
-addRule('Table', (node, cx) => {
-  let headerOpen = false;
-  for (
-    let child: SyntaxNode | null = node.firstChild;
-    child;
-    child = child.nextSibling
-  ) {
-    if (child.name === 'TableHeader') {
-      headerOpen = true;
-      eachLine(cx, child.from, child.to, (line) => {
-        cx.acc.deco.push(lineTableHead.range(line.from, line.from));
-      });
-    } else if ((headerOpen || child.name === 'TableRow') && child.name === 'TableRow') {
-      eachLine(cx, child.from, child.to, (line) => {
-        cx.acc.deco.push(lineTableBody.range(line.from, line.from));
-      });
-    }
-  }
-});
+/**
+ * 表格：整体替换为可交互表格 widget（原子块，永不揭示源码）。
+ *
+ * 覆盖两种来源的同一渲染规则：
+ *   - `Table`：裸 GFM 表（f-tbl 之外的普通 Markdown 表）
+ *   - `FTagTable`：`<f-tbl>` 内嵌 MD 表（ftagSyntax 的块解析器接管后，
+ *     内嵌表由 tableStructure.ts 产出 FTagTable 结构节点）
+ *
+ * 单元格编辑与行列操作在渲染态完成，由插件层写回文档（见 plugin.ts）；
+ * 源码形态仅在仅源码视图出现。解析失败（结构异常）时降级为源码显示。
+ */
+function renderTableWidget(node: SyntaxNode, cx: RuleContext): void {
+  const model = parseMarkdownTableText(cx.doc.sliceString(node.from, node.to));
+  if (!model) return;
+  const d = Decoration.replace({ widget: new TableWidget(model), block: true });
+  cx.acc.deco.push(d.range(node.from, node.to));
+  cx.acc.atomic.push(d.range(node.from, node.to));
+}
+
+addRule('Table', renderTableWidget);
+addRule('FTagTable', renderTableWidget);
 
 /** 围栏代码块：区域行样式（含语言标签高亮由 CSS 处理）。 */
 addRule('FencedCode', (node, cx) => {
@@ -527,15 +529,18 @@ if (import.meta.vitest) {
   const { syntaxTree } = await import('@codemirror/language');
   const { markdown, markdownLanguage } = await import('@codemirror/lang-markdown');
   const { fluenMathExtension } = await import('./mathSyntax');
+  const { ftagExtension } = await import('../ftagSyntax');
+  const { underlineExtension } = await import('../underlineSyntax');
 
   function setup(md: string) {
     const state = EditorState.create({
       doc: md,
       extensions: [
-        // 与生产 setup.ts 相同的方言配置（GFM base），确保规则覆盖真实语法树
+        // 与生产 setup.ts 完全一致的方言组合（GFM base + f-标签/下划线/数学），
+        // 确保 f-tbl 块解析器认领后规则仍覆盖真实语法树
         markdown({
           base: markdownLanguage,
-          extensions: [fluenMathExtension],
+          extensions: [ftagExtension, underlineExtension, fluenMathExtension],
           addKeymap: false,
         }),
       ],
@@ -623,6 +628,14 @@ if (import.meta.vitest) {
       expect(flat.some((d) => d.cls === 'fluen-lp-em')).toBe(true);
       expect(flat.some((d) => d.cls === 'fluen-lp-strike')).toBe(true);
     });
+
+    it('下划线渲染为 underline 装饰并隐藏 ++ 记号', () => {
+      const md = '++下划++ 文本\n\n普通文本段落';
+      const r = build(md);
+      const flat = flatten(r);
+      expect(flat.some((d) => d.cls === 'fluen-lp-underline')).toBe(true);
+      expect(countAtomic(r)).toBe(2); // 两侧 ++ 各一组隐藏
+    });
   });
 
   describe('decorations: 链接与图片', () => {
@@ -690,6 +703,42 @@ if (import.meta.vitest) {
       const r = build(md, [pos, pos]);
       const flat = flatten(r);
       expect(flat.some((d) => d.cls === 'fluen-lp-math-src')).toBe(true);
+    });
+  });
+
+  describe('decorations: 表格', () => {
+    const BARE_TABLE = '| A | B |\n| --- | --- |\n| 1 | 2 |';
+
+    it('裸 GFM 表整体替换为可交互 widget（原子块）', () => {
+      const md = `${BARE_TABLE}\n\n正文段落。`;
+      const r = build(md);
+      const flat = flatten(r);
+      const widget = flat.find((d) => d.widget && d.from === 0);
+      expect(widget).toBeDefined();
+      expect(widget!.to - widget!.from).toBe(BARE_TABLE.length);
+      expect(r.atomicRanges.iter().value).not.toBeNull(); // 注册原子性，光标不进入
+    });
+
+    it('<f-tbl> 内嵌 MD 表（FTagTable 节点）同样渲染 widget', () => {
+      // 插入器生成的精确形态：插入器输出直接复制于此，防两侧行为漂移
+      const md = '<f-tbl>\n  <f-caption>表格题注</f-caption>\n\n|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |\n\n</f-tbl>\n\n正文段落。';
+      const r = build(md);
+      const widget = flatten(r).find((d) => d.widget && d.cls === undefined);
+      expect(widget).toBeDefined();
+      const inner = '|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |';
+      expect(widget!.to - widget!.from).toBe(inner.length);
+    });
+
+    it('光标在表格内仍渲染 widget（半预览不揭示表格源码）', () => {
+      const md = `${BARE_TABLE}\n\n正文段落。`;
+      const inside = md.indexOf('| 1 |');
+      const r = build(md, [inside, inside]);
+      expect(flatten(r).some((d) => d.widget && d.cls === undefined)).toBe(true);
+    });
+
+    it('结构异常的表格（缺分隔行）降级为源码显示', () => {
+      const r = build('| A |\n| x |\n| y |\n\n正文。');
+      expect(flatten(r).some((d) => d.widget)).toBe(false);
     });
   });
 

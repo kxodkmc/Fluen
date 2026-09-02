@@ -57,6 +57,11 @@ impl PaperReader {
         }
     }
 
+    /// 论文项目根目录（供章节记账定位备份文件等派生路径）。
+    pub(crate) fn project_path(&self) -> &str {
+        &self.project_path
+    }
+
     /// 确保磁盘上存在可读的 `manuscript/main.md`。
     ///
     /// 旧版项目（仅有章节备份、无 main.md）经 `open_project` 迁移落盘；

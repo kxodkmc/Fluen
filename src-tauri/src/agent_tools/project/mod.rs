@@ -11,9 +11,11 @@
 //! - 相对路径解析（模型只需项目相对路径，不感知宿主机绝对路径）
 //! - 拒绝绝对路径、空路径与 `..` 穿越；父目录 canonicalize 防符号链接逃逸
 //! - 保护 `.git` 等版本控制元数据（读写均拒绝）
-//! - **写保护 `manuscript/main.md`**：论文正文的唯一写入通道是
-//!   [`crate::agent_tools::manuscript::ManuscriptEditTool`]（fluen-markup 校验 +
-//!   章节同步），通用写/编辑工具拒绝触碰正文，杜绝绕过校验的旁路
+//! - **写保护论文正文派生文件**：`manuscript/main.md`（正文）与
+//!   `manuscript/sections.json` / `manuscript/sections/`（保存流程同步的
+//!   章节索引与备份）均仅可经 [`crate::agent_tools::manuscript::ManuscriptEditTool`]
+//!   写入（fluen-markup 校验 + 章节同步），通用写/编辑工具拒绝触碰，
+//!   杜绝绕过校验的旁路
 //!
 //! 文件原语全部委托 referee `ReadTool` / `WriteTool` / `EditTool`
 //! （二进制嗅探、有界读取、原子落盘、唯一匹配强制均复用其实现）。
@@ -41,6 +43,10 @@ const PROTECTED_PREFIXES: &[&str] = &[".git"];
 
 /// 论文正文相对路径（写入保护目标：仅 `manuscript` 工具可写）。
 const MAIN_MD: [&str; 2] = ["manuscript", "main.md"];
+/// 章节索引相对路径（保存流程同步生成，写入保护同正文）。
+const SECTIONS_JSON: [&str; 2] = ["manuscript", "sections.json"];
+/// 章节备份目录前缀（`manuscript/sections/`，保存流程同步生成，写入保护同正文）。
+const SECTIONS_DIR: [&str; 2] = ["manuscript", "sections"];
 
 /// 单文件读写字节上限（5 MiB），防止意外读写超大文件。
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
@@ -171,11 +177,14 @@ impl ProjectFs {
                 )));
             }
         }
-        // 论文正文写保护：唯一写入通道是 manuscript 工具
-        if mutating && is_main_md(&normals) {
+        // 论文正文与章节派生文件写保护：唯一写入通道是 manuscript 工具
+        //（main.md 为正文本体；sections.json 与 sections/ 为保存流程同步的
+        //  章节索引与备份，直改会导致与正文失去同步）
+        if mutating && (is_main_md(&normals) || is_sections_json(&normals) || under_sections_dir(&normals)) {
             return Err(ToolError::InvalidArguments(
-                "manuscript/main.md 是论文正文，受格式校验与章节同步保护：\
-                 请使用 manuscript 工具写入，而非本工具"
+                "论文正文及其章节派生文件（manuscript/main.md、manuscript/sections.json、\
+                 manuscript/sections/）受格式校验与章节同步保护：\
+                 请使用 manuscript 工具写入正文，而非本工具"
                     .into(),
             ));
         }
@@ -231,6 +240,24 @@ fn is_main_md(normals: &[std::ffi::OsString]) -> bool {
         && normals
             .iter()
             .zip(MAIN_MD.iter())
+            .all(|(a, b)| a.to_string_lossy().eq_ignore_ascii_case(b))
+}
+
+/// 判断是否指向章节索引 `manuscript/sections.json`（大小写折叠比较）。
+fn is_sections_json(normals: &[std::ffi::OsString]) -> bool {
+    normals.len() == SECTIONS_JSON.len()
+        && normals
+            .iter()
+            .zip(SECTIONS_JSON.iter())
+            .all(|(a, b)| a.to_string_lossy().eq_ignore_ascii_case(b))
+}
+
+/// 判断是否位于章节备份目录 `manuscript/sections/` 之下（含目录本身）。
+fn under_sections_dir(normals: &[std::ffi::OsString]) -> bool {
+    normals.len() >= SECTIONS_DIR.len()
+        && normals
+            .iter()
+            .zip(SECTIONS_DIR.iter())
             .all(|(a, b)| a.to_string_lossy().eq_ignore_ascii_case(b))
 }
 
@@ -335,6 +362,44 @@ mod tests {
         assert!(fs.resolve_for_write("notes/manuscript/main.md", true).is_ok());
         // manuscript/main.md.bak 同理
         assert!(fs.resolve_for_write("manuscript/main.md.bak", true).is_ok());
+    }
+
+    #[test]
+    fn sections_derivatives_write_blocked_but_read_allowed() {
+        let (dir, fs) = make_fs("guard_sections");
+        fs::create_dir_all(dir.join("manuscript").join("sections")).unwrap();
+        fs::write(
+            dir.join("manuscript").join("sections").join("sec-aaa11111.md"),
+            "# 引言",
+        )
+        .unwrap();
+        fs::write(dir.join("manuscript").join("sections.json"), "[]").unwrap();
+
+        // 章节备份可读（paper_section 的读取通道）
+        assert!(fs
+            .resolve_for_read("manuscript/sections/sec-aaa11111.md")
+            .is_ok());
+        assert!(fs.resolve_for_read("manuscript/sections.json").is_ok());
+
+        // 写/编辑一律拒绝，并指名走 manuscript 工具
+        for rel in [
+            "manuscript/sections.json",
+            "manuscript/sections/sec-aaa11111.md",
+            "manuscript/sections/new-sec.md",
+            "Manuscript/Sections/SEC-x.md",
+        ] {
+            let err = fs.resolve_for_write(rel, true).unwrap_err();
+            assert!(
+                matches!(err, ToolError::InvalidArguments(_)),
+                "写应被拒绝: {rel}"
+            );
+            assert!(err.to_string().contains("manuscript"), "{rel}: {err}");
+        }
+
+        // 章节资源目录（manuscript/assets/）不受正文保护约束
+        assert!(fs
+            .resolve_for_write("manuscript/assets/figure.csv", true)
+            .is_ok());
     }
 
     #[test]

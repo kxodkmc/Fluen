@@ -73,3 +73,51 @@ pub struct KbBuildCancelledPayload {
     pub task_id: String,
     pub ref_id: String,
 }
+
+// ---------------------------------------------------------------------------
+// 构建过程对话流事件（Kb Agent 面板）
+// ---------------------------------------------------------------------------
+//
+// 阶段迁移与终态复用 `kb-build:progress` / `kb-build:completed|failed|cancelled`
+// （载荷已含 task_id），此处仅补充对话样式的增量与工具事件。
+
+/// LLM 思考增量。
+pub const EVENT_KBCHAT_THOUGHT: &str = "kbchat:thought";
+/// LLM 文本增量。
+pub const EVENT_KBCHAT_TEXT: &str = "kbchat:text";
+/// 工具调用开始。
+pub const EVENT_KBCHAT_TOOL_CALL: &str = "kbchat:tool-call";
+/// 工具执行结束。
+pub const EVENT_KBCHAT_TOOL_RESULT: &str = "kbchat:tool-result";
+
+/// 增量事件 payload（思考 / 文本共用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbChatDeltaPayload {
+    pub task_id: String,
+    pub ref_id: String,
+    pub delta: String,
+}
+
+/// 工具调用事件 payload。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbChatToolCallPayload {
+    pub task_id: String,
+    pub ref_id: String,
+    /// 引擎内部分配的工具调用 ID（result 按此回填）。
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+/// 工具结果事件 payload。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbChatToolResultPayload {
+    pub task_id: String,
+    pub ref_id: String,
+    pub tool_call_id: String,
+    pub name: String,
+    pub ok: bool,
+    pub duration_ms: u64,
+    /// 结果内容（成功为 output 文本，失败为 error 对象），超长截断。
+    pub result: serde_json::Value,
+}

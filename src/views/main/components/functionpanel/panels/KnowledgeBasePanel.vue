@@ -77,7 +77,6 @@ interface DisplayEntry {
   id: string;
   wiki_type: WikiType;
   title: string;
-  tags_count: number;
   updated?: string;
   score?: number;
 }
@@ -92,7 +91,6 @@ const displayEntries = computed<DisplayEntry[]>(() => {
         id: m.wiki_id,
         wiki_type: m.wiki_type,
         title: m.title,
-        tags_count: 0,
         score: m.score,
       }));
   }
@@ -103,7 +101,6 @@ const displayEntries = computed<DisplayEntry[]>(() => {
       id: e.id,
       wiki_type: e.wiki_type,
       title: e.title,
-      tags_count: e.tags?.length ?? 0,
       updated: e.updated,
     }));
 });
@@ -356,7 +353,6 @@ watch(projectPath, () => {
               class="kb-entry__type"
               :class="'kb-entry__type--' + displayEntries[index].wiki_type"
             >{{ typeLabel(displayEntries[index].wiki_type) }}</span>
-            <span v-if="displayEntries[index].tags_count" class="kb-entry__tags">{{ displayEntries[index].tags_count }}</span>
             <span v-if="displayEntries[index].updated" class="kb-entry__date">{{ formatDate(displayEntries[index].updated) }}</span>
           </div>
         </template>
@@ -591,16 +587,6 @@ watch(projectPath, () => {
 .kb-entry__type--summary {
   background: var(--fluen-success-bg);
   color: var(--fluen-success-text);
-}
-
-.kb-entry__tags {
-  font-family: var(--fluen-font-sans);
-  font-size: 10.5px;
-  color: var(--fluen-steel);
-  background: var(--fluen-hover);
-  border-radius: 4px;
-  padding: 1px 5px;
-  flex-shrink: 0;
 }
 
 .kb-entry__date {

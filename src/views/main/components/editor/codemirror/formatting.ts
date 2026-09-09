@@ -23,7 +23,7 @@
  *     级别（1-6 级）前缀；所有行均已处于目标级别时切换为移除前缀。
  */
 
-export type MarkdownFormatKind = 'bold' | 'italic' | 'underline' | 'heading';
+export type MarkdownFormatKind = 'bold' | 'italic' | 'underline' | 'heading' | 'inlineMath';
 
 /** 标题级别（1-6 级，对应 Markdown `#` 至 `######`）。 */
 export type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
@@ -46,6 +46,7 @@ const MARKERS: Record<Exclude<MarkdownFormatKind, 'heading'>, string> = {
   bold: '**',
   italic: '*',
   underline: '++',
+  inlineMath: '$',
 };
 
 /** 行首标题前缀：可选前导空白 + 1-6 个 `#` + 空格/制表符或行尾，避免误伤 `#tag` 等文本。 */

@@ -19,7 +19,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use fluen_knowledge::async_kb::AsyncKnowledgeBase;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::agent_runtime::FluenRuntime;
@@ -28,8 +27,11 @@ use crate::llm_config::model::{LlmConfig, SceneModelRef};
 use super::context_budget::ContextBudget;
 use super::error::KnowledgeBuilderError;
 use super::llm_helper::{
-    build_kb_runtime, CreateEntryCapture, PlanCapture, UsageCapture, UsageSnapshot,
+    build_kb_runtime, CreateEntryCapture, PlanCapture, RelationsCapture, UsageCapture,
+    UsageSnapshot,
 };
+use super::reporter::KbReporter;
+use crate::knowledge_mcp_bridge::KbMcpBridge;
 
 /// 跨论文会话：runtime + 预算 + 真实 usage 跟踪。
 ///
@@ -61,19 +63,23 @@ impl KnowledgeBuildSession {
     pub async fn new(
         llm: &LlmConfig,
         model_ref: &SceneModelRef,
-        kb: AsyncKnowledgeBase,
+        bridge: std::sync::Arc<KbMcpBridge>,
         budget: ContextBudget,
-    ) -> Result<(Self, PlanCapture, CreateEntryCapture, UsageCapture), KnowledgeBuilderError> {
+        reporter: KbReporter,
+    ) -> Result<(Self, PlanCapture, CreateEntryCapture, RelationsCapture, UsageCapture), KnowledgeBuilderError> {
         let plan_capture: PlanCapture = Arc::new(Mutex::new(None));
         let entry_capture: CreateEntryCapture = Arc::new(Mutex::new(None));
+        let relations_capture: RelationsCapture = Arc::new(Mutex::new(None));
         let usage_capture: UsageCapture = Arc::new(Mutex::new(None));
 
         let (thinking_enabled, runtime) = build_kb_runtime(
             llm,
             model_ref,
-            kb,
+            bridge,
             plan_capture.clone(),
             entry_capture.clone(),
+            relations_capture.clone(),
+            reporter,
         )?;
 
         Ok((
@@ -86,6 +92,7 @@ impl KnowledgeBuildSession {
             },
             plan_capture,
             entry_capture,
+            relations_capture,
             usage_capture,
         ))
     }
@@ -172,6 +179,11 @@ impl std::fmt::Debug for KnowledgeBuildSession {
 /// - **进程崩溃**：启动时 [`SessionPool::clear`]（runtime 历史无法恢复）
 /// - **瞬态错误 / 用户取消**：保留会话（缓存可复用）
 pub struct SessionPool {
+    /// 构建过程事件上报器（跨任务共享，上下文由 runner 按任务切换）。
+    ///
+    /// runtime 观察者与工具观测装饰器持有的都是本实例的克隆（内部 `Arc`），
+    /// runner 经 [`reporter`](Self::reporter) 取出并 `set_context` 后即刻生效。
+    reporter: KbReporter,
     /// 当前活跃会话（含 capture 引用）。
     ///
     /// 使用 `AsyncMutex` 因为 `acquire` 是 async 操作，且需保证并发安全。
@@ -185,21 +197,22 @@ struct ActiveSession {
     session: KnowledgeBuildSession,
     plan_capture: PlanCapture,
     entry_capture: CreateEntryCapture,
+    relations_capture: RelationsCapture,
     usage_capture: UsageCapture,
 }
 
-impl Default for SessionPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SessionPool {
-    /// 创建空会话池。
-    pub fn new() -> Self {
+    /// 创建会话池（绑定构建过程事件上报器）。
+    pub fn new(reporter: KbReporter) -> Self {
         Self {
+            reporter,
             inner: AsyncMutex::new(None),
         }
+    }
+
+    /// 借出共享上报器（runner 执行任务前 `set_context`、结束后 `clear_context`）。
+    pub fn reporter(&self) -> KbReporter {
+        self.reporter.clone()
     }
 
     /// 获取或重建会话。
@@ -213,7 +226,7 @@ impl SessionPool {
         &self,
         llm: &LlmConfig,
         model_ref: &SceneModelRef,
-        kb: AsyncKnowledgeBase,
+        bridge: std::sync::Arc<KbMcpBridge>,
         budget: ContextBudget,
         next_paper_md_tokens: usize,
     ) -> Result<SessionLease<'_>, KnowledgeBuilderError> {
@@ -239,13 +252,21 @@ impl SessionPool {
             // 销毁旧会话（drop）
             *guard = None;
 
-            // 构建新会话
-            let (session, plan_capture, entry_capture, usage_capture) =
-                KnowledgeBuildSession::new(llm, model_ref, kb, budget).await?;
+            // 构建新会话（runtime 重建时重新挂载共享上报器）
+            let (session, plan_capture, entry_capture, relations_capture, usage_capture) =
+                KnowledgeBuildSession::new(
+                    llm,
+                    model_ref,
+                    bridge,
+                    budget,
+                    self.reporter.clone(),
+                )
+                .await?;
             *guard = Some(ActiveSession {
                 session,
                 plan_capture,
                 entry_capture,
+                relations_capture,
                 usage_capture,
             });
         }
@@ -345,6 +366,15 @@ impl<'a> SessionLease<'a> {
             .clone()
     }
 
+    /// 借用 relations_capture。
+    pub fn relations_capture(&self) -> RelationsCapture {
+        self.guard
+            .as_ref()
+            .expect("lease 仅在 acquire 后存在")
+            .relations_capture
+            .clone()
+    }
+
     /// 借用 usage_capture。
     pub fn usage_capture(&self) -> UsageCapture {
         self.guard
@@ -395,16 +425,21 @@ mod tests {
         assert!(!should_close);
     }
 
+    /// 无事件上报的空 reporter（测试用）。
+    fn noop_reporter() -> KbReporter {
+        KbReporter::new(|_, _| {})
+    }
+
     #[tokio::test]
     async fn session_pool_default_is_empty() {
-        let pool = SessionPool::new();
+        let pool = SessionPool::new(noop_reporter());
         assert_eq!(pool.papers_processed().await, 0);
         assert_eq!(pool.history_used().await, None);
     }
 
     #[tokio::test]
     async fn session_pool_clear_silent_on_empty() {
-        let pool = SessionPool::new();
+        let pool = SessionPool::new(noop_reporter());
         // 不应 panic
         pool.clear().await;
         assert_eq!(pool.papers_processed().await, 0);
@@ -412,7 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_pool_destroy_silent_on_empty() {
-        let pool = SessionPool::new();
+        let pool = SessionPool::new(noop_reporter());
         // 不应 panic
         pool.destroy().await;
         assert_eq!(pool.history_used().await, None);
@@ -420,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_pool_keep_is_noop() {
-        let pool = SessionPool::new();
+        let pool = SessionPool::new(noop_reporter());
         // 不应 panic
         pool.keep().await;
     }

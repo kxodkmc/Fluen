@@ -13,8 +13,9 @@ export type PanelId = 'function' | 'content' | 'ai';
  * - `source`：仅显示 MD 源码
  * - `live`：半预览（同一编辑器开启实时渲染，WYSIWYG 所见即所得编辑）
  * - `preview`：仅显示 HTML 预览
+ * - `wysiwyg`：预览编辑（实验，TipTap 所见即所得）
  */
-export type EditorLayoutMode = 'live' | 'source' | 'preview';
+export type EditorLayoutMode = 'live' | 'source' | 'preview' | 'wysiwyg';
 
 /** 活动栏项目 — 左侧功能区中的导航条目。 */
 export interface ActivityItem {
@@ -129,10 +130,12 @@ export interface ChatMessage {
   isStreaming?: boolean;
   /** 是否被中断（取消或出错时标记）。 */
   interrupted?: boolean;
+  /** 附带的引用文段（用户从论文编辑器划选添加，kind='text' 时展示）。 */
+  quotes?: readonly string[];
 }
 
-/** 右侧 AI 面板标识（Motis 对话 / 助手面板）。 */
-export type RightPanelId = 'motis' | 'assistant';
+/** 右侧 AI 面板标识（Motis 对话 / 助手面板 / 知识库构建智能体）。 */
+export type RightPanelId = 'motis' | 'assistant' | 'kbagent';
 
 /** 布局面板尺寸配置。 */
 export interface PanelSizes {

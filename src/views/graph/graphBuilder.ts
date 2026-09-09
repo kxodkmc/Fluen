@@ -39,8 +39,8 @@ export function buildGraph(entries: WikiEntry[]): {
 
   const edges: GraphEdge[] = [];
   for (const entry of entries) {
-    const relations = entry.relations ?? [];
-    for (const target of relations) {
+    for (const rel of entry.relations ?? []) {
+      const target = rel.id;
       // 自环忽略
       if (target === entry.id) continue;
       // 悬空引用丢弃

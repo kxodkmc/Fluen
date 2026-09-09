@@ -40,7 +40,6 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   MetaData,
   MetaQueryType,
-  MetaResult,
   QueryResult,
   RetrievalMethod,
   WikiEntry,
@@ -196,7 +195,7 @@ export function useWikiExplorer() {
    * @param projectPath 项目根路径
    * @param query 检索文本（标题关键词、ID 或语义描述）
    * @param options 检索选项
-   * @returns 检索结果（含匹配项与使用的检索方式）
+   * @returns 检索结果（含匹配项）
    */
   async function search(
     projectPath: string,
@@ -211,7 +210,7 @@ export function useWikiExplorer() {
     },
   ): Promise<QueryResult> {
     if (!isTauriEnvironment()) {
-      return { success: false, retrieval_method_used: 'keyword', results: [] };
+      return { success: false, results: [] };
     }
     try {
       return await invoke<QueryResult>('knowledge_query', {
@@ -223,7 +222,7 @@ export function useWikiExplorer() {
       });
     } catch (err) {
       console.error('[useWikiExplorer] 检索失败:', err);
-      return { success: false, retrieval_method_used: 'keyword', results: [] };
+      return { success: false, results: [] };
     }
   }
 
@@ -231,27 +230,27 @@ export function useWikiExplorer() {
    * 查询知识库元信息。
    *
    * @param projectPath 项目根路径
-   * @param queryType 查询类型（overview / tags / recent）
-   * @param limit 结果数上限（仅 tags / recent 有效）
-   * @returns 元信息结果
+   * @param queryType 查询类型（overview / recent）
+   * @param limit 结果数上限（仅 recent 有效）
+   * @returns 元信息数据体
    */
   async function loadMeta(
     projectPath: string,
     queryType: MetaQueryType,
     limit?: number,
-  ): Promise<MetaResult | null> {
+  ): Promise<MetaData | null> {
     if (!isTauriEnvironment()) return null;
     try {
-      const result = await invoke<MetaResult>('knowledge_meta', {
+      const data = await invoke<MetaData>('knowledge_meta', {
         projectPath,
         queryType,
         limit: limit ?? null,
       });
       // overview 结果缓存到模块级状态
-      if (queryType === 'overview' && result.success) {
-        meta.value = result.data;
+      if (queryType === 'overview') {
+        meta.value = data;
       }
-      return result;
+      return data;
     } catch (err) {
       console.error('[useWikiExplorer] 加载元信息失败:', err);
       return null;

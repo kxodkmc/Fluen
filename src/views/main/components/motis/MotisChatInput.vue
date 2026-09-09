@@ -9,6 +9,7 @@
  */
 import { ref, watch, nextTick, onMounted } from 'vue';
 import { useI18n } from '../../../../i18n';
+import { useChatQuotes } from '../../composables/useChatQuotes';
 
 const props = defineProps<{
   /** 草稿文本（v-model）。 */
@@ -24,6 +25,15 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+
+/** 论文编辑器划选加入的引用文段（发送时自动附带）。 */
+const { quotes, removeQuote } = useChatQuotes();
+
+/** 截断引用预览（超长以省略号收尾）。 */
+function excerpt(text: string): string {
+  const single = text.replace(/\s+/g, ' ');
+  return single.length > 120 ? `${single.slice(0, 120)}…` : single;
+}
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
@@ -83,6 +93,26 @@ onMounted(() => {
 
 <template>
   <div class="motis-input">
+    <!-- 引用文段卡片（论文编辑器划选添加，发送时自动附带） -->
+    <div v-if="quotes.length > 0" class="motis-quotes">
+      <div v-for="quote in quotes" :key="quote.id" class="motis-quotes__card">
+        <svg class="motis-quotes__icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 21c3-1 5-3.5 5-7V6H3v8h4c0 3-1.5 5-4 6v1z" />
+          <path d="M14 21c3-1 5-3.5 5-7V6h-5v8h4c0 3-1.5 5-4 6v1z" />
+        </svg>
+        <span class="motis-quotes__text" :title="quote.text">{{ excerpt(quote.text) }}</span>
+        <button
+          type="button"
+          class="motis-quotes__remove"
+          :title="t('main.motisPanel.removeQuote')"
+          @click="removeQuote(quote.id)"
+        >
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+    </div>
     <div class="motis-input__wrapper">
       <textarea
         ref="textareaRef"
@@ -134,6 +164,66 @@ onMounted(() => {
 
 .motis-input__textarea::placeholder {
   color: var(--fluen-stone);
+}
+
+/* ── 引用文段卡片 ────────────────────────────────────────────────────── */
+.motis-quotes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.motis-quotes__card {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--fluen-hairline);
+  border-left: 3px solid var(--fluen-brand-coral);
+  border-radius: 10px;
+  background: var(--fluen-canvas);
+}
+
+.motis-quotes__icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--fluen-stone);
+}
+
+.motis-quotes__text {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--fluen-font-sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fluen-slate);
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.motis-quotes__remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fluen-stone);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.motis-quotes__remove:hover {
+  background: var(--fluen-hover);
+  color: var(--fluen-ink);
 }
 
 </style>

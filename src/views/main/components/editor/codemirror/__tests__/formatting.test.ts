@@ -171,6 +171,28 @@ describe('applyMarkdownFormat — underline', () => {
   });
 });
 
+describe('applyMarkdownFormat — inlineMath', () => {
+  it('选中文本时整体包裹（$ 标记）', () => {
+    expectFormat('质能方程 E=mc^2 很有名', 5, 11, 'inlineMath', '质能方程 $E=mc^2$ 很有名', 6, 12);
+  });
+
+  it('选区整体已被包裹时取消包裹', () => {
+    expectFormat('$E=mc^2$ 很有名', 0, 8, 'inlineMath', 'E=mc^2 很有名', 0, 6);
+  });
+
+  it('光标位于行内公式标记对内时取消公式', () => {
+    expectFormat('a $x+y$ b', 4, 4, 'inlineMath', 'a x+y b', 3, 3);
+  });
+
+  it('光标不在标记内时插入空标记对并居中', () => {
+    expectFormat('abc', 1, 1, 'inlineMath', 'a$$bc', 2, 2);
+  });
+
+  it('与下划线 ++ 标记互不干扰', () => {
+    expectFormat('++un++', 2, 4, 'inlineMath', '++$un$++', 3, 5);
+  });
+});
+
 describe('applyMarkdownFormat — heading', () => {
   it('光标行添加 `# ` 前缀', () => {
     expectFormat('hello\nworld', 2, 2, 'heading', '# hello\nworld', 4, 4);

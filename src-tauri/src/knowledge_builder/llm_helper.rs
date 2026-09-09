@@ -18,13 +18,17 @@ use async_trait::async_trait;
 use referee_ai::provider::{Message, ThinkingConfig, TokenUsage};
 use referee_ai::session::{ChatOptions, ChatPayload, SessionId};
 use referee_ai::tool::{Tool, ToolCategory, ToolContext, ToolError, ToolOutput};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::agent_runtime::observability::ToolEventSink;
 use crate::agent_runtime::{FluenRuntime, FluenRuntimeBuilder};
+use crate::knowledge_mcp_bridge::{KbMcpBridge, McpKnowledgeTool, KB_BUILD_TOOL_NAMES};
 use crate::llm_chat;
 use crate::llm_config::model::{LlmConfig, SceneModelRef};
 
 use super::error::KnowledgeBuilderError;
+use super::reporter::KbReporter;
 use super::types::ExtractionPlan;
 
 /// 共享捕获状态：用于 SubmitPlanTool 把 plan 传回 pipeline。
@@ -41,6 +45,27 @@ pub type CreateEntryCapture = Arc<Mutex<Option<String>>>;
 /// 每次 `engine.chat()` 后从中读取 `prompt_tokens + completion_tokens`
 /// 作为会话真实上下文占用，替代累加估算（避免 Context Overflow）。
 pub type UsageCapture = Arc<Mutex<Option<UsageSnapshot>>>;
+
+/// 关联关系对（`submit_relations` 提交的条目间关联）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationPair {
+    /// 起始条目 wikiID。
+    pub from: String,
+    /// 目标条目 wikiID。
+    pub to: String,
+    /// 关联谓词（缺省 `related`；仅允许字母数字/下划线，≤32 字符）。
+    #[serde(default)]
+    pub predicate: Option<String>,
+}
+
+/// 共享捕获状态：用于 SubmitRelationsTool 把关联对传回 pipeline。
+pub type RelationsCapture = Arc<Mutex<Option<Vec<RelationPair>>>>;
+
+/// `submit_relations` 顶层入参（与 `input_schema` 声明一致：对象包裹）。
+#[derive(Debug, Deserialize)]
+struct RelationsArgs {
+    relations: Vec<RelationPair>,
+}
 
 /// 单次 `engine.chat()` 的 LLM usage 快照。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -66,10 +91,10 @@ impl UsageSnapshot {
     }
 }
 
-/// `knowledge_create_entry` 工具名称。
-const CREATE_ENTRY_TOOL_NAME: &str = "knowledge_create_entry";
-/// `knowledge_edit_entry` 工具名称（合并路径：候选命中已有条目时调用）。
-const EDIT_ENTRY_TOOL_NAME: &str = "knowledge_edit_entry";
+/// `knowledge_create_entry` 工具名称（MCP 桥接同名工具）。
+pub const CREATE_ENTRY_TOOL_NAME: &str = "knowledge_create_entry";
+/// `knowledge_edit_entry` 工具名称（MCP 桥接同名工具；合并路径：候选命中已有条目时调用）。
+pub const EDIT_ENTRY_TOOL_NAME: &str = "knowledge_edit_entry";
 
 // ---------------------------------------------------------------------------
 // Provider/Model 解析
@@ -255,17 +280,130 @@ impl Tool for SubmitPlanTool {
 }
 
 // ---------------------------------------------------------------------------
+// SubmitRelationsTool — EstablishingRelations 阶段提交关联对
+// ---------------------------------------------------------------------------
+
+/// `submit_relations` 工具名称。
+pub const SUBMIT_RELATIONS_TOOL_NAME: &str = "submit_relations";
+
+/// EstablishingRelations 阶段用于接收 AI 判定关联的工具。
+///
+/// 新库 MCP `knowledge_edit_entry` 不含 add_relations 语义，关联建立改为
+/// AI 结构化提交（wikiID 对 + 可选谓词），Rust 端经 `AsyncKb.merge` 确定性
+/// 落库并自动补双向。
+pub struct SubmitRelationsTool {
+    name: String,
+    description: String,
+    parameters: Value,
+    capture: RelationsCapture,
+}
+
+impl SubmitRelationsTool {
+    pub fn new(capture: RelationsCapture) -> Self {
+        let parameters = json!({
+            "type": "object",
+            "properties": {
+                "relations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from": {"type": "string", "description": "起始条目 wikiID（wiki-xxxxxxxxxxxxxxxx）"},
+                            "to": {"type": "string", "description": "目标条目 wikiID（wiki-xxxxxxxxxxxxxxxx）"},
+                            "predicate": {"type": "string", "description": "可选谓词（默认 related；仅字母/数字/下划线，≤32 字符，可用中文）"}
+                        },
+                        "required": ["from", "to"]
+                    },
+                    "description": "关联关系对列表；无需双向提交（系统自动补反向）"
+                }
+            },
+            "required": ["relations"]
+        });
+        Self {
+            name: SUBMIT_RELATIONS_TOOL_NAME.into(),
+            description: "提交条目间关联关系（EstablishingRelations 阶段必须调用）".into(),
+            parameters,
+            capture,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SubmitRelationsTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn input_schema(&self) -> Value {
+        self.parameters.clone()
+    }
+
+    fn default_wait(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, _ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        // 按 input_schema 声明解析：顶层为对象，关联对在 `relations` 字段
+        let args: RelationsArgs = serde_json::from_value(args)
+            .map_err(|e| ToolError::InvalidArguments(format!("relations 解析失败: {e}")))?;
+        let pairs = args.relations;
+
+        if pairs.is_empty() {
+            return Err(ToolError::InvalidArguments(
+                "relations 不能为空：无关联时请提交空业务判断说明并至少保留一对关联；确实无任何关联时应提交空数组吗？——空数组将被拒绝，请基于条目语义尽量给出关联".into(),
+            ));
+        }
+
+        for (i, pair) in pairs.iter().enumerate() {
+            if fluen_kb::WikiId::parse(&pair.from).is_none() {
+                return Err(ToolError::InvalidArguments(format!(
+                    "relations[{i}].from 非法 wikiID: {}（必须形如 wiki-xxxxxxxxxxxxxxxx）",
+                    pair.from
+                )));
+            }
+            if fluen_kb::WikiId::parse(&pair.to).is_none() {
+                return Err(ToolError::InvalidArguments(format!(
+                    "relations[{i}].to 非法 wikiID: {}（必须形如 wiki-xxxxxxxxxxxxxxxx）",
+                    pair.to
+                )));
+            }
+            if let Some(p) = &pair.predicate {
+                if fluen_kb::Predicate::new(p).is_err() {
+                    return Err(ToolError::InvalidArguments(format!(
+                        "relations[{i}].predicate 非法: {p}（仅允许 1..=32 个字母/数字/下划线字符）"
+                    )));
+                }
+            }
+        }
+
+        tracing::info!(count = pairs.len(), "AI 提交关联关系");
+        *self.capture.lock().expect("relations capture poisoned") = Some(pairs);
+        let output = json!({"success": true, "message": "relations received"});
+        Ok(ToolOutput::from_json(&output))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EntryCaptureGuard — 捕获知识库工具返回的 wiki_id
 // ---------------------------------------------------------------------------
 
 /// 装饰器：包装 `knowledge_create_entry` / `knowledge_edit_entry` 工具，
-/// `execute` 后从返回值中提取 `wiki_id` 写入 capture。
+/// `execute` 后捕获 `wiki_id` 写入 capture。
 ///
 /// 替代 confluent 时代的 `CreateEntryObserver`（referee 无 observer 机制，
 /// 改用装饰器在工具执行后直接捕获）。
 ///
 /// **必须同时包装两个工具**：Execution 阶段 AI 依据 L2 检索结果二选一——
 /// 无相似条目时新建（create_entry），有相似条目时合并（edit_entry）。
+///
+/// id 提取：
+/// - create 路径：从输出提取 `created` / `merged_into`（兼容旧库 `wiki_id`）
+/// - edit 路径：MCP 输出为 op 结果数组（如 `[true]`），不含 id，
+///   从请求参数 `id` 提取（工具成功返回即条目必然存在）
 pub struct EntryCaptureGuard {
     inner: Arc<dyn Tool>,
     capture: CreateEntryCapture,
@@ -278,9 +416,14 @@ impl EntryCaptureGuard {
     }
 
     /// 从工具输出中提取 `wiki_id`。
+    ///
+    /// 兼容两代输出键：旧库 `wiki_id`；MCP `created`（新建）/
+    /// `merged_into`（去重合并）。
     fn extract_wiki_id(output: &ToolOutput) -> Option<String> {
         let value: Value = serde_json::from_str(&output.content).ok()?;
-        value.get("wiki_id").and_then(|v| v.as_str()).map(|s| s.to_string())
+        ["wiki_id", "created", "merged_into"]
+            .iter()
+            .find_map(|key| value.get(*key).and_then(|v| v.as_str()).map(|s| s.to_string()))
     }
 }
 
@@ -307,10 +450,17 @@ impl Tool for EntryCaptureGuard {
     }
 
     async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
-        let result = self.inner.execute(ctx, args).await?;
+        let result = self.inner.execute(ctx, args.clone()).await?;
 
-        // 从工具返回值中提取 wiki_id 写入 capture
-        if let Some(wiki_id) = Self::extract_wiki_id(&result) {
+        // create 路径从输出提取；edit 路径输出不含 id，从请求参数提取
+        let wiki_id = Self::extract_wiki_id(&result).or_else(|| {
+            if self.inner.name() == EDIT_ENTRY_TOOL_NAME {
+                args.get("id").and_then(Value::as_str).map(str::to_string)
+            } else {
+                None
+            }
+        });
+        if let Some(wiki_id) = wiki_id {
             tracing::debug!(tool = %self.inner.name(), wiki_id = %wiki_id, "捕获条目操作结果");
             *self.capture.lock().expect("create_entry capture poisoned") = Some(wiki_id);
         }
@@ -386,19 +536,27 @@ pub fn new_session_id() -> SessionId {
 ///
 /// 装配：
 /// - LLMProvider（基于场景模型，通过 `llm_chat::build_llm_provider`）
-/// - 知识库工具（5 个：query/query_batch/create/edit/get_entry）
+/// - 知识库工具（经 [`KbMcpBridge`] 转发 MCP：query / query_batch / create /
+///   edit / get_entry，schema 动态取自 MCP `list_tools`）
 ///   - 全部经 [`ForceWaitGuard`] 强制同步等待（避免纯派发轮被引擎立即终结回合）
 ///   - `create_entry` / `edit_entry` 另经 [`EntryCaptureGuard`] 包装捕获 `wiki_id`
 /// - `submit_plan` 工具（Planning 阶段捕获 ExtractionPlan，自带 `default_wait=true`）
+/// - `submit_relations` 工具（EstablishingRelations 阶段捕获关联对，自带 `default_wait=true`）
+/// - [`KbReporter`]：工具观测装饰器（`observe_registry`）+ 引擎观察者
+///   （`with_observer`），把工具调用与 LLM 增量透传为 kbchat:* 事件
+///   （引擎注入观察者后，非流式 `chat()` 在厂商支持流式时自动改走
+///   内部流式收敛以产生 delta，厂商不支持时保持直调、零回归）
 ///
-/// `plan_capture` / `entry_capture` 由调用方创建并传入，
+/// `plan_capture` / `entry_capture` / `relations_capture` 由调用方创建并传入，
 /// pipeline 在对应阶段执行后从中读取结果。
 pub fn build_kb_runtime(
     llm: &LlmConfig,
     model_ref: &SceneModelRef,
-    kb: fluen_knowledge::async_kb::AsyncKnowledgeBase,
+    bridge: Arc<KbMcpBridge>,
     plan_capture: PlanCapture,
     entry_capture: CreateEntryCapture,
+    relations_capture: RelationsCapture,
+    reporter: KbReporter,
 ) -> Result<(bool, FluenRuntime), KnowledgeBuilderError> {
     let (provider, model_id) = resolve_kb_provider(llm, model_ref)?;
     let llm_provider = llm_chat::build_llm_provider(provider, &model_id)
@@ -407,27 +565,15 @@ pub fn build_kb_runtime(
     // 模型支持思考时启用思考模式
     let thinking_enabled = provider.model_supports_thinking(&model_id);
 
-    // 知识库工具：仅启用提取所需的 5 个
-    let kb_config = fluen_knowledge::config::KnowledgeConfig::builder()
-        .enabled_tools(vec![
-            "query".into(),
-            "query_batch".into(),
-            "create_entry".into(),
-            "edit_entry".into(),
-            "get_entry".into(),
-        ])
-        .build();
-    let kb_provider = fluen_knowledge::tools::KnowledgeToolProvider::new(kb, kb_config);
-
     // 装配工具注册表
     let registry = referee_ai::tool::ToolRegistry::with_defaults();
 
-    // 注册知识库工具：统一经 ForceWaitGuard 强制同步等待；
+    // 注册 MCP 桥接知识库工具：统一经 ForceWaitGuard 强制同步等待；
     // create_entry / edit_entry 另经 EntryCaptureGuard 捕获 wiki_id
-    for tool in kb_provider.list_tools() {
+    for tool in McpKnowledgeTool::list_from(&bridge, &KB_BUILD_TOOL_NAMES) {
         let tool_name = tool.name().to_string();
-        let tool: Arc<dyn Tool> = if tool_name == CREATE_ENTRY_TOOL_NAME
-            || tool_name == EDIT_ENTRY_TOOL_NAME
+        let tool: Arc<dyn Tool> = if tool_name == "knowledge_create_entry"
+            || tool_name == "knowledge_edit_entry"
         {
             Arc::new(EntryCaptureGuard::new(tool, entry_capture.clone()))
         } else {
@@ -443,15 +589,38 @@ pub fn build_kb_runtime(
         .register(Arc::new(SubmitPlanTool::new(plan_capture)))
         .map_err(|e| KnowledgeBuilderError::Config(format!("工具注册失败: {e}")))?;
 
+    // 注册 submit_relations 工具
+    registry
+        .register(Arc::new(SubmitRelationsTool::new(relations_capture)))
+        .map_err(|e| KnowledgeBuilderError::Config(format!("工具注册失败: {e}")))?;
+
+    // 工具观测装饰器：工具执行开始/结束经 KbReporter 透传为 kbchat:* 事件
+    // （透明透传，EntryCaptureGuard 等捕获守卫保持内层、捕获语义不变）
+    let registry = crate::agent_runtime::observability::observe_registry(
+        &registry,
+        Arc::new(reporter.clone()) as Arc<dyn ToolEventSink>,
+    );
+
     tracing::debug!(model_id = %model_ref.model_id, "装配 FluenRuntime（知识库构建）");
 
     let executor = referee_ai::tool::ToolExecutor::with_defaults();
 
-    // 知识库构建是超长多轮任务（Planning 多轮检索 + 多阶段创建），
-    // 单会话累计 token 易突破默认 10 万会话预算；覆盖为 1M 会话预算避免中途中断。
-    // global_limit 保持默认 1M（单会话任务下与 session 对齐）。
+    // 会话预算（runaway 兜底，非成本核算）。
+    // 口径实测（2026-09-05，t4 构建 12:04 日志 + agent_runtime::tests 引擎模拟）：
+    // referee session_limit 按「每个内部 LLM 轮的 total_tokens」累计——每个等待类
+    // 工具调用回合 = 工具调用轮 + 收尾轮（各按全历史计费一次），故实际流水 ≈
+    // pipeline 可见 usage（每阶段最后一轮）的 ~2.2×。单篇 13 条目论文实测烧到
+    // 1,012,063（limit 1M 触顶），22 条目论文推算 ~2.2M，故取 3M 覆盖全量构建。
+    // 该口径把缓存命中部分也按 1× 计（实际成本 ~0.1×），仅作失控护栏使用；
+    // 主流框架（MS Agent Framework / AgentBudget / LangChain）的硬门槛分别为
+    // 当前上下文体积、美元成本、轮数上限，均不以裸 token 流水为闸门——KB 构建
+    // 已有轮数防护（nudge ≤3 次、阶段顺序固定、条目数上限），此处只防极端跑飞。
+    // global_limit 置 0：全局计数器挂在 Engine 上，会话池跨论文复用 runtime 时
+    // 会累计已销毁会话的消耗（每篇论文都是新会话），该口径无守护意义，
+    // 单会话上限才是有效护栏。
     let mut engine_config = referee_ai::engine::EngineConfig::default();
-    engine_config.budget.session_limit = 1_000_000;
+    engine_config.budget.session_limit = 3_000_000;
+    engine_config.budget.global_limit = 0;
     // 会话 prompt 预算采用 referee 默认（128K token）：上游已保证"当前轮核心输入恒完整交付、
     // 超预算仅告警"，规划阶段的完整文献不会再被截断，无需在此覆写。
     // KB 构建的 planning 需注入整篇文献并做深度思考，单回合远超默认 30s 的 thinking 超时；
@@ -461,6 +630,7 @@ pub fn build_kb_runtime(
     let runtime = FluenRuntimeBuilder::new(llm_provider)
         .with_config(engine_config)
         .with_tools(registry, executor)
+        .with_observer(Arc::new(reporter.clone()))
         .build();
 
     tracing::info!(model_id = %model_ref.model_id, "知识库构建 Runtime 构建完成");
@@ -729,6 +899,53 @@ mod tests {
         assert!(err.contains("待补充"), "实体占位标题应被拒绝，得到: {err}");
     }
 
+    #[tokio::test]
+    async fn submit_relations_tool_accepts_schema_shaped_args() {
+        // 回归：input_schema 声明顶层为 {"relations": [...]}，
+        // execute 必须按此解析（此前按裸数组解析，schema 合规调用全被拒）
+        let capture: RelationsCapture = Arc::new(Mutex::new(None));
+        let tool = SubmitRelationsTool::new(capture.clone());
+        let ctx = ToolContext {
+            tool_call_id: "test".into(),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
+        };
+        let input = json!({
+            "relations": [
+                {"from": "wiki-0123456789abcdef", "to": "wiki-fedcba9876543210", "predicate": "related"}
+            ]
+        });
+        tool.execute(ctx, input).await.unwrap();
+        let pairs = capture.lock().unwrap().take().unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].from, "wiki-0123456789abcdef");
+        assert_eq!(pairs[0].to, "wiki-fedcba9876543210");
+    }
+
+    #[tokio::test]
+    async fn submit_relations_tool_rejects_bare_array() {
+        // 裸数组不符合 schema（顶层必须为对象），应被拒绝
+        let capture: RelationsCapture = Arc::new(Mutex::new(None));
+        let tool = SubmitRelationsTool::new(capture.clone());
+        let ctx = ToolContext {
+            tool_call_id: "test".into(),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
+        };
+        let input = json!([{"from": "wiki-0123456789abcdef", "to": "wiki-fedcba9876543210"}]);
+        let result = tool.execute(ctx, input).await;
+        assert!(result.is_err());
+        assert!(capture.lock().unwrap().is_none());
+    }
+
     #[test]
     fn entry_capture_guard_extracts_wiki_id() {
         let output = ToolOutput::from_json(&json!({
@@ -746,6 +963,77 @@ mod tests {
         }));
         let wiki_id = EntryCaptureGuard::extract_wiki_id(&output);
         assert!(wiki_id.is_none());
+    }
+
+    /// 固定名称/输出的内层工具（模拟 MCP 桥接工具）。
+    struct FixedOutputTool {
+        name: String,
+        output: ToolOutput,
+    }
+
+    #[async_trait]
+    impl Tool for FixedOutputTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "fixed output"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        async fn execute(&self, _ctx: ToolContext, _args: Value) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput {
+                content: self.output.content.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn entry_capture_guard_captures_edit_id_from_args() {
+        // 回归：MCP edit_entry 输出为 op 结果数组（如 [true]），不含 id；
+        // 守卫必须从请求参数 id 捕获，否则合并路径永远"未调用工具"
+        let capture: CreateEntryCapture = Arc::new(Mutex::new(None));
+        let inner = Arc::new(FixedOutputTool {
+            name: EDIT_ENTRY_TOOL_NAME.into(),
+            output: ToolOutput::from_json(&json!([true])),
+        });
+        let guard = EntryCaptureGuard::new(inner, capture.clone());
+        let ctx = ToolContext {
+            tool_call_id: "test".into(),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
+        };
+        let args = json!({"id": "wiki-97a3d93153364a34", "ops": []});
+        guard.execute(ctx, args).await.unwrap();
+        assert_eq!(capture.lock().unwrap().as_deref(), Some("wiki-97a3d93153364a34"));
+    }
+
+    #[tokio::test]
+    async fn entry_capture_guard_create_path_prefers_output_id() {
+        // create 路径：输出含 created，优先从输出提取
+        let capture: CreateEntryCapture = Arc::new(Mutex::new(None));
+        let inner = Arc::new(FixedOutputTool {
+            name: CREATE_ENTRY_TOOL_NAME.into(),
+            output: ToolOutput::from_json(&json!({"created": "wiki-2ecaf57b0b554a43"})),
+        });
+        let guard = EntryCaptureGuard::new(inner, capture.clone());
+        let ctx = ToolContext {
+            tool_call_id: "test".into(),
+            session_id: uuid::Uuid::new_v4(),
+            turn_id: 0,
+            kernel: None,
+            store: None,
+            wait: true,
+            peer_depth: 0,
+        };
+        let args = json!({"type": "summary", "title": "t", "body": "b"});
+        guard.execute(ctx, args).await.unwrap();
+        assert_eq!(capture.lock().unwrap().as_deref(), Some("wiki-2ecaf57b0b554a43"));
     }
 
     /// 默认不等待的工具（模拟未覆写 default_wait 的知识库工具）

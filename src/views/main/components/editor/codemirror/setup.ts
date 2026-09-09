@@ -35,6 +35,8 @@ export interface EditorCallbacks {
   onActiveLineChange: (line: number) => void;
   /** 文档内容变化（完整 MD 文本）。 */
   onDocChange: (md: string) => void;
+  /** 选区变化（含选区清空，from === to 表示空选区）。 */
+  onSelectionChange: (from: number, to: number) => void;
 }
 
 /**
@@ -81,6 +83,11 @@ export function createEditorState(doc: string, callbacks: EditorCallbacks): Edit
         if (update.selectionSet) {
           const line = update.state.doc.lineAt(update.state.selection.main.head).number - 1;
           callbacks.onActiveLineChange(line);
+          const sel = update.state.selection.main;
+          callbacks.onSelectionChange(
+            Math.min(sel.anchor, sel.head),
+            Math.max(sel.anchor, sel.head),
+          );
         }
       }),
     ],

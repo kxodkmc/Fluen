@@ -12,7 +12,7 @@
 //! 语义层（懂论文结构）   paper_outline / paper_section / manuscript
 //! 业务层（Fluen 领域）   literature_search / delegate_agent（见 motis_chat::delegate）
 //! 原语层（通用文件门面） project_read / project_write / project_edit
-//! 知识库管线专用         knowledge_* 前缀工具族（fluen-knowledge，仅用于后台
+//! 知识库管线专用         knowledge_* 前缀工具族（fluen-kb MCP 桥接，仅用于后台
 //!                        知识库构建智能体与 MCP server，不进入用户侧聊天运行时；
 //!                        literature_search 是聊天运行时的唯一检索入口）
 //! ```

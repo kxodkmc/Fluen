@@ -91,14 +91,14 @@ const isBuilding = ref(false);
 // ---------------------------------------------------------------------------
 
 /**
- * 从 `WikiEntry.source`（如 `raw/ref-xxx.pdf`）解析出 ref_id。
+ * 从 `WikiEntry.source`（`ref-xxx`）解析出 ref_id。
  *
  * @returns ref_id 或 null（无法解析时）
  */
 function extractRefIdFromSource(source: string | undefined | null): string | null {
   if (!source) return null;
-  // 形如 raw/ref-xxxxxxxxxxxxxxxx.pdf
-  const match = source.match(/raw\/(ref-[a-f0-9]+)\./i);
+  // 新知识库 source 即 refID：ref-xxxxxxxxxxxxxxxx
+  const match = source.match(/^(ref-[a-f0-9]+)$/i);
   return match ? match[1] : null;
 }
 

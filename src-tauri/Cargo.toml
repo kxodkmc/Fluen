@@ -32,7 +32,10 @@ referee-core  = { path = "../crates/referee/referee-core" }
 referee-ai    = { path = "../crates/referee/referee-ai", features = ["openai"] }
 referee-agent = { path = "../crates/referee/referee-agent", features = ["openai", "mcp-stdio"] }
 fluen-markup = { path = "../crates/fluen-markup", features = ["serde"] }
-fluen-knowledge = { path = "../crates/fluen-knowledge", features = ["async", "tools"] }
+fluen-kb = { path = "../crates/fluen-kb", features = ["async", "mcp-server"] }
+# MCP 客户端（与 fluen-kb 的 rmcp 同版本，共享类型）
+rmcp = { version = "3", default-features = false, features = ["client", "transport-async-rw"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 socstat = { path = "../crates/socstat", features = ["csv", "sav"] }
 parking_lot = "0.12"
 async-trait = "0.1"

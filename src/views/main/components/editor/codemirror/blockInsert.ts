@@ -22,6 +22,8 @@ export interface DocChange {
 export interface BlockInsertSpec {
   changes: DocChange[];
   selection: { anchor: number; head: number };
+  /** 插入后文档中 block 文本的起始位置（前导空行之后），供块内光标定位。 */
+  blockStart: number;
 }
 
 /**
@@ -63,6 +65,7 @@ export function insertBlockSpec(doc: string, pos: number, block: string): BlockI
   return {
     changes: [{ from: at, to: at, insert: text }],
     selection: { anchor: caret, head: caret },
+    blockStart: at + before.length,
   };
 }
 
@@ -108,6 +111,12 @@ if (import.meta.vitest) {
     it('光标在行中时按整行判定，插入到该行下方', () => {
       const r = apply('AB\nCD', 4, 'BLOCK');
       expect(r.text).toBe('AB\nCD\n\nBLOCK\n\n');
+    });
+
+    it('blockStart 指向 block 文本起点（前导空行之后）', () => {
+      // 'AB' 行有内容 → at=3（行尾后），before='\n' → block 从 4 开始
+      const spec = insertBlockSpec('AB\nCD', 1, 'BLOCK');
+      expect(spec.blockStart).toBe(4);
     });
   });
 }

@@ -3,58 +3,21 @@
  *
  * 安全约定：
  *   - KaTeX 使用默认信任配置（trust:false），禁用 \href、\includegraphics 等；
- *     只有本文件导出的 `katexMathHtml()` 的返回值允许进入 widget DOM，
+ *     只有 {@link katexMathHtml} 的返回值允许进入 widget DOM，
  *     渲染失败时回退为转义后的纯文本原文——绝无原始用户输入直接 innerHTML。
  *   - 列表圆点 / 任务框为静态字符，无动态内容。
  */
 
 import { WidgetType } from '@codemirror/view';
 import type { EditorView } from '@codemirror/view';
-import katex from 'katex';
 import { i18nInstance } from '../../../../../../i18n';
 import type { MarkdownTableModel, TableAlignment } from '../tableModel';
 import { attachTableEvents } from '../tableEditing';
+import { getCellRaw, setCellRaw, renderCellMath } from '../cellMath';
+import { katexMathHtml } from './katexRender';
 
-/** KaTeX 安全渲染选项：throwOnError 关闭 + 失败回退由调用方处理。 */
-const KATEX_OPTIONS = {
-  throwOnError: false,
-  strict: 'ignore' as const,
-  // trust 默认即 false：\href/\includegraphics 等不被执行，防 TeX 注入
-};
-
-/**
- * 渲染 LaTeX 为 KaTeX HTML 字符串（纯函数，无 DOM 依赖，可测）。
- *
- * @param tex         LaTeX 源文本（定界符之间的内容）。
- * @param displayMode true 为块级展示式排版。
- * @returns 成功时 `{ ok: true, html }`；失败（KaTeX 抛错）时
- *          `{ ok: false, html }`，其中 html 为已 HTML 转义的原文文本，
- *          调用方可作为降级内容直接插入。
- */
-export function katexMathHtml(
-  tex: string,
-  displayMode: boolean,
-): { ok: boolean; html: string } {
-  try {
-    return {
-      ok: true,
-      html: katex.renderToString(tex, { ...KATEX_OPTIONS, displayMode }),
-    };
-  } catch {
-    // 双保险：即便 throwOnError:false 仍可能因未知异常抛出（如非法嵌套）
-    return { ok: false, html: escapeHtml(tex) };
-  }
-}
-
-/** HTML 实体转义（与 FluenPreview 错误展示相同的防护等级）。 */
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
+// KaTeX 渲染已抽至 katexRender.ts；此处保留同名导出以维持既有引用与测试
+export { katexMathHtml };
 
 /**
  * 数学公式 widget。默认通过原子区间交互：光标落在边缘即揭示原文编辑
@@ -236,8 +199,13 @@ export class TableWidget extends WidgetType {
     }
 
     const sync = (el: HTMLElement, text: string, align: TableAlignment): void => {
-      if (el.textContent !== text) el.textContent = text;
+      // 以原文镜像比较（渲染态 textContent 含 KaTeX 重复文本，不可直接比较）
+      if (getCellRaw(el) !== text) {
+        el.textContent = text;
+        setCellRaw(el, text);
+      }
       if (el.style.textAlign !== (align ?? '')) applyCellAlign(el, align);
+      renderCellMath(el);
     };
     head.forEach((th, i) => sync(th, this.model.header[i] ?? '', this.model.aligns[i] ?? null));
     for (let r = 0; r < bodyRows.length; r++) {
@@ -277,7 +245,7 @@ export class TableWidget extends WidgetType {
     return box;
   }
 
-  /** 渲染三线表 DOM：单元格内容为 textContent，可编辑。 */
+  /** 渲染三线表 DOM：单元格内容为 textContent，可编辑；含公式的单元格失焦渲染。 */
   private buildTable(): HTMLTableElement {
     const table = document.createElement('table');
     table.className = 'fluen-lp-table';
@@ -289,6 +257,7 @@ export class TableWidget extends WidgetType {
       th.textContent = cell;
       th.setAttribute('contenteditable', 'plaintext-only');
       applyCellAlign(th, this.model.aligns[i] ?? null);
+      setCellRaw(th, cell);
       headRow.appendChild(th);
     });
 
@@ -300,8 +269,13 @@ export class TableWidget extends WidgetType {
         td.textContent = row[i] ?? '';
         td.setAttribute('contenteditable', 'plaintext-only');
         applyCellAlign(td, this.model.aligns[i] ?? null);
+        setCellRaw(td, row[i] ?? '');
         tr.appendChild(td);
       });
+    }
+    // 构建完成后统一渲染公式（构建期单元格必然未聚焦）
+    for (const cell of table.querySelectorAll<HTMLElement>('th,td')) {
+      renderCellMath(cell);
     }
     return table;
   }

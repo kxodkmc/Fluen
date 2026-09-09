@@ -1,7 +1,7 @@
 //! Index 快照实时提取（纯解析，无状态）。
 //!
 //! 每次构建任务从 `references/wiki/index.md` 实时解析为紧凑快照，
-//! 屏蔽 wiki_id，仅保留类型标记 + 标题 + 标签名。
+//! 屏蔽 wiki_id，仅保留类型标记 + 标题。
 //!
 //! ## 快照格式
 //!
@@ -9,7 +9,6 @@
 //! - [S] 综述标题
 //! - [C] 数智化技术
 //! - [E] 湖南农业大学
-//! - #个性化学习
 //! ```
 //!
 //! 每条约 8-15 tokens，320 条目约 3-5K tokens。
@@ -22,7 +21,7 @@
 
 use super::error::KnowledgeBuilderError;
 
-/// 紧凑快照：分类的标题列表 + 标签列表。
+/// 紧凑快照：分类的标题列表。
 ///
 /// 渲染后注入 Planning prompt，提供全局去重视图。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -30,7 +29,6 @@ pub struct IndexSnapshot {
     pub summaries: Vec<String>,
     pub concepts: Vec<String>,
     pub entities: Vec<String>,
-    pub tags: Vec<String>,
 }
 
 impl IndexSnapshot {
@@ -40,10 +38,10 @@ impl IndexSnapshot {
     /// - `- [[summaries/...]]` → summaries
     /// - `- <@wiki-id>[[concepts/...]]` → concepts（屏蔽 `<@...>`）
     /// - `- <@wiki-id>[[entities/...]]` → entities
-    /// - `- tag-id-名称` → tags（仅保留名称，去掉 `tag-id` 前缀）
     ///
     /// 标题提取：链接形如 `concepts/wiki-abc-数智化技术`，
     /// 去掉 `wiki-` 前缀与 16 位 UUID4，保留 `数智化技术`。
+    /// 其余行（含旧版遗留的 tags 行）忽略。
     pub fn parse(index_md: &str) -> Result<Self, KnowledgeBuilderError> {
         let mut snap = Self::default();
         for raw in index_md.lines() {
@@ -57,8 +55,6 @@ impl IndexSnapshot {
                 snap.concepts.push(title);
             } else if let Some(title) = extract_link_title(line, "entities/") {
                 snap.entities.push(title);
-            } else if let Some(tag) = extract_tag_name(line) {
-                snap.tags.push(tag);
             }
         }
         Ok(snap)
@@ -66,7 +62,7 @@ impl IndexSnapshot {
 
     /// 渲染为紧凑文本，注入 Planning prompt。
     ///
-    /// 按类型分组，每行一条，类型标记 `[S]/[C]/[E]/#`。
+    /// 按类型分组，每行一条，类型标记 `[S]/[C]/[E]`。
     /// 空分类不输出。
     pub fn render(&self) -> String {
         let mut out = String::new();
@@ -85,21 +81,12 @@ impl IndexSnapshot {
             out.push_str(t);
             out.push('\n');
         }
-        for t in &self.tags {
-            out.push_str("- #");
-            out.push_str(t);
-            out.push('\n');
-        }
         out
     }
 
     /// 估算快照占用 tokens（粗略：每条 10 tokens）。
     pub fn estimated_tokens(&self) -> usize {
-        let count = self.summaries.len()
-            + self.concepts.len()
-            + self.entities.len()
-            + self.tags.len();
-        count.saturating_mul(10)
+        (self.summaries.len() + self.concepts.len() + self.entities.len()).saturating_mul(10)
     }
 
     /// 条目总数。
@@ -147,22 +134,6 @@ fn strip_wiki_id_prefix(s: &str) -> String {
     s.to_string()
 }
 
-/// 从 `- tag-id-名称` 行提取标签名（去掉 `tag-{16hex}-` 前缀）。
-fn extract_tag_name(line: &str) -> Option<String> {
-    let line = line.strip_prefix("- ")?;
-    let rest = line.strip_prefix("tag-")?;
-    let hex_len = 16usize;
-    if rest.len() > hex_len + 1 {
-        let (hex, tail) = rest.split_at(hex_len);
-        if hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            if let Some(name) = tail.strip_prefix('-') {
-                return Some(name.to_string());
-            }
-        }
-    }
-    None
-}
-
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -185,9 +156,6 @@ type: index
 - <@wiki-1111222233334444>[[concepts/wiki-1111222233334444-机器学习]]
 ## Entities
 - <@wiki-aaaabbbbccccdddd>[[entities/wiki-aaaabbbbccccdddd-湖南农业大学]]
-# Tags
-- tag-aaaa1111bbbb2222-个性化学习
-- tag-cccc3333dddd4444-中职生
 "#
     }
 
@@ -197,13 +165,21 @@ type: index
         assert_eq!(snap.summaries, vec!["文献综述"]);
         assert_eq!(snap.concepts, vec!["数智化技术", "机器学习"]);
         assert_eq!(snap.entities, vec!["湖南农业大学"]);
-        assert_eq!(snap.tags, vec!["个性化学习", "中职生"]);
     }
 
     #[test]
     fn parse_empty_string_yields_empty_snapshot() {
         let snap = IndexSnapshot::parse("").unwrap();
         assert_eq!(snap, IndexSnapshot::default());
+    }
+
+    /// 旧版 index.md 的 tags 行（`tag-{16hex}-名称`）应被忽略。
+    #[test]
+    fn parse_ignores_legacy_tag_lines() {
+        let md = "# index\n- tag-aaaa1111bbbb2222-个性化学习\n- <@wiki-abc12345def67890>[[concepts/wiki-abc12345def67890-测试]]";
+        let snap = IndexSnapshot::parse(md).unwrap();
+        assert_eq!(snap.concepts, vec!["测试"]);
+        assert_eq!(snap.total_entries(), 1);
     }
 
     #[test]
@@ -219,13 +195,11 @@ type: index
             summaries: vec!["综述".into()],
             concepts: vec!["数智化".into()],
             entities: vec!["湖南农大".into()],
-            tags: vec!["个性化".into()],
         };
         let rendered = snap.render();
         assert!(rendered.contains("- [S] 综述"));
         assert!(rendered.contains("- [C] 数智化"));
         assert!(rendered.contains("- [E] 湖南农大"));
-        assert!(rendered.contains("- #个性化"));
     }
 
     #[test]
@@ -238,7 +212,7 @@ type: index
         assert!(rendered.contains("- [C] 机器学习"));
         assert!(!rendered.contains("[S]"));
         assert!(!rendered.contains("[E]"));
-        assert!(!rendered.contains("#"));
+        assert!(!rendered.contains('#'));
     }
 
     #[test]
@@ -247,18 +221,16 @@ type: index
             summaries: vec!["a".into()],
             concepts: vec!["b".into(), "c".into()],
             entities: vec!["d".into()],
-            tags: vec!["e".into(), "f".into()],
         };
-        assert_eq!(snap.estimated_tokens(), 60);
+        assert_eq!(snap.estimated_tokens(), 40);
     }
 
     #[test]
-    fn total_entries_excludes_tags() {
+    fn total_entries_counts_all_types() {
         let snap = IndexSnapshot {
             summaries: vec!["a".into()],
             concepts: vec!["b".into()],
             entities: vec!["c".into()],
-            tags: vec!["t1".into(), "t2".into()],
         };
         assert_eq!(snap.total_entries(), 3);
     }
@@ -267,11 +239,5 @@ type: index
     fn strip_wiki_id_prefix_handles_short_strings() {
         // 无 16 位 hex 前缀的链接原样保留标题部分
         assert_eq!(strip_wiki_id_prefix("短标题"), "短标题");
-    }
-
-    #[test]
-    fn extract_tag_name_rejects_non_tag_lines() {
-        assert!(extract_tag_name("- [S] 综述").is_none());
-        assert!(extract_tag_name("普通文本").is_none());
     }
 }

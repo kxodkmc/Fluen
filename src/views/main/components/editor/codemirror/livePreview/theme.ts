@@ -88,6 +88,12 @@ export const livePreviewTheme: Extension = [
       cursor: 'help',
     },
 
+    /* ── f-标签题注 ─────────────────────────────────────────────── */
+    '& .fluen-lp-caption': {
+      color: 'var(--fluen-slate)',
+      fontSize: '0.9em',
+    },
+
     /* ── 引用块 ─────────────────────────────────────────────────── */
     '& .fluen-lp-quote': {
       borderLeft: '3px solid var(--fluen-hairline)',
@@ -120,10 +126,14 @@ export const livePreviewTheme: Extension = [
       padding: '4px 12px',
       textAlign: 'left',
       cursor: 'text',
+      minWidth: '56px',
+      height: '1.7em',
     },
     '& .fluen-lp-table td': {
       padding: '3px 12px',
       cursor: 'text',
+      minWidth: '56px',
+      height: '1.7em',
     },
     '& .fluen-lp-table tbody tr:last-child td': {
       borderBottom: '2px solid var(--fluen-ink)',
@@ -131,6 +141,11 @@ export const livePreviewTheme: Extension = [
     '& .fluen-lp-table [contenteditable]:focus': {
       outline: '2px solid var(--fluen-accent)',
       outlineOffset: '-2px',
+    },
+    // 单元格内公式（失焦渲染态）：KaTeX 基线对齐微调
+    '& .fluen-lp-cell-math': {
+      display: 'inline-block',
+      lineHeight: '1',
     },
 
     /* 行/列手柄（Word/Notion 式：+ 插入 / × 删除，悬停单元格时出现） */
@@ -141,6 +156,10 @@ export const livePreviewTheme: Extension = [
       justifyContent: 'center',
       gap: '2px',
       zIndex: '10',
+    },
+    // hidden 属性兜底：作者样式的 display:flex 会覆盖 UA 的 [hidden] 规则
+    '& .fluen-lp-tbhandle[hidden]': {
+      display: 'none',
     },
     '& .fluen-lp-tbhandle--col': {
       top: '-20px',

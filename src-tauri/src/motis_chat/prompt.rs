@@ -121,7 +121,7 @@ const MOTIS_TOOLS_BODY: &str = "工具使用规则：\n- 调用前评估风险�
 
 /// SubAgents：可用子智能体清单（动态注入，根据 `enabled_agents` 过滤）。
 fn sub_agents_section(agents_desc: &str) -> String {
-    format!("## 可用子智能体\n\n你可以通过 `delegate_agent` 工具调用以下子智能体执行任务：\n\n{agents_desc}\n\n**使用建议**：\n- 撰写论文正文 → `essay_writing`\n- 引导论文思辨讨论 → `essay_critique`\n- 审核论文 → `essay_review`（当前开发中）\n- 检索文献知识 → `knowledge_builder`\n- 统计分析数据 → `data_analyst`\n\n委派时请在 `task` 参数中提供清晰、完整的任务描述，包含必要的上下文、约束和期望输出格式。")
+    format!("## 可用子智能体\n\n你可以通过 `delegate_agent` 工具调用以下子智能体执行任务：\n\n{agents_desc}\n\n**使用建议**：\n- 撰写、编辑、修改论文正文（含局部小改与章节调整）→ `essay_writing`\n- 引导论文思辨讨论 → `essay_critique`\n- 审核论文 → `essay_review`（当前开发中）\n- 检索文献知识 → `knowledge_builder`\n- 统计分析数据 → `data_analyst`\n\n**分工铁律**：你自身不生产任何内容——撰写、编辑、修改论文正文只能委派 `essay_writing`（正文唯一写入通道是它的 `manuscript` 工具）；其他子智能体与你都不具备、也不得尝试编辑论文正文。\n\n委派时请在 `task` 参数中提供清晰、完整的任务描述，包含必要的上下文、约束和期望输出格式。")
 }
 
 /// Board：项目成果板清单段落（动态注入）。

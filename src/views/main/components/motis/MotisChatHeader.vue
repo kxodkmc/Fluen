@@ -2,14 +2,13 @@
 /**
  * MotisChatHeader — Motis 对话面板头部。
  *
- * 展示 Motis 头像（圆形笑脸）、名称、心情徽章，以及关闭按钮。
- * 头像与名称从 useMascotConfig 读取，心情从 useMascotData 读取。
+ * 展示 Motis 头像（圆形笑脸）与心情徽章，以及关闭按钮。
+ * 心情从 useMascotData 读取。
  *
  * @emits close - 关闭按钮点击时触发（由父组件收起右侧面板）
  */
 import { ref, onMounted, computed } from 'vue';
 import { useI18n } from '../../../../i18n';
-import { useMascotConfig } from '../../../../composables/useMascotConfig';
 import { useMascotData } from '../../../../composables/useMascotData';
 import type { Mood } from '../../../../types/mascot';
 import MotisContextUsage from './MotisContextUsage.vue';
@@ -19,18 +18,14 @@ defineEmits<{
 }>();
 
 const { t } = useI18n();
-const { loadConfig } = useMascotConfig();
 const { loadData } = useMascotData();
 
-/** Motis 名称（默认 'Motis'）。 */
-const name = ref('Motis');
 /** 当前心情。 */
 const mood = ref<Mood>('neutral');
 
 onMounted(async () => {
   try {
-    const [config, data] = await Promise.all([loadConfig(), loadData()]);
-    name.value = config.name || 'Motis';
+    const data = await loadData();
     mood.value = data.mood;
   } catch {
     // 降级使用默认值
@@ -52,7 +47,7 @@ const moodLabel = computed(() => {
 
 <template>
   <div class="motis-header">
-    <!-- 头像 + 名称 + 心情 -->
+    <!-- 头像 + 心情 -->
     <div class="motis-header__info">
       <div class="motis-header__avatar">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -62,7 +57,6 @@ const moodLabel = computed(() => {
           <line x1="15" y1="9" x2="15.01" y2="9" />
         </svg>
       </div>
-      <span class="motis-header__name">{{ name }}</span>
       <span class="motis-header__mood" :class="`motis-header__mood--${mood}`">
         {{ moodLabel }}
       </span>
@@ -113,16 +107,6 @@ const moodLabel = computed(() => {
   border-radius: 50%;
   background: var(--fluen-brand-coral);
   color: var(--fluen-on-dark);
-}
-
-.motis-header__name {
-  font-family: var(--fluen-font-sans);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--fluen-ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .motis-header__mood {

@@ -13,9 +13,9 @@ pub enum KnowledgeBuilderError {
     #[error("JSON 解析错误: {0}")]
     Parse(#[from] serde_json::Error),
 
-    /// 知识库底层错误。
+    /// 知识库底层错误（fluen-kb）。
     #[error("知识库错误: {0}")]
-    Knowledge(#[from] fluen_knowledge::KnowledgeError),
+    Kb(#[from] fluen_kb::KbError),
 
     /// LLM 调用错误。
     #[error("LLM 调用失败: {0}")]

@@ -4,16 +4,19 @@
  *
  * 两层结构：
  *   标签栏（Tab Bar）   — 已打开文件的标签页列表
- *   编辑区（Editor）    — 三视图互斥：仅源码 / 半预览(live) / 仅渲染
+ *   编辑区（Editor）    — 四视图互斥：仅源码 / 半预览(live) / 预览编辑(实验) / 仅渲染
  *     · 仅源码：FluenEditor 源码形态
  *     · 半预览：同一 FluenEditor 开启实时渲染（WYSIWYG，由 livePreview 扩展实现）
+ *     · 预览编辑：FluenWysiwygEditor（TipTap 实验视图，v-if 独立挂载）
  *     · 仅渲染：FluenPreview 后端 HTML 预览
  *
  * 无标签页时展示欢迎页（Welcome）。
  * 项目打开后，自动创建一个以项目标题命名的标签页，编辑区渲染 `main.md`。
  *
- * 数据流：`FluenEditor @doc-change(md)` → 本地 `liveMd` ref → `FluenPreview :md`。
- * 外部 `mainMd` 变化（项目切换、保存归一化）通过 `watch` 同步到 `liveMd` 与编辑器。
+ * 数据流：`FluenEditor / FluenWysiwygEditor @doc-change(md)` → 本地 `liveMd` ref
+ * → `FluenPreview :md`。离开预览编辑视图时将 liveMd 回灌 CM6（内容相同则跳过，
+ * 保留撤销历史）。外部 `mainMd` 变化（项目切换、保存归一化）通过 `watch` 同步到
+ * `liveMd` 与编辑器。
  *
  * 大纲跳转由 `useOutline.jumpTo` 内部调用 `useFluenEditor().scrollToLine` 完成。
  */
@@ -23,7 +26,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { ContentTab } from '../types';
 import { useI18n } from '../../../i18n';
 import { useProject } from '../../../composables/useProject';
-import { FluenEditor, FluenPreview, EditorToolbar, EditorLayoutSwitch, useFluenEditor } from './editor';
+import { FluenEditor, FluenPreview, FluenWysiwygEditor, EditorToolbar, EditorLayoutSwitch, EditorQuoteToolbar, useFluenEditor } from './editor';
 import { MAIN_LAYOUT_KEY } from '../composables/useMainLayout';
 import { ReferenceReader, WikiReader } from './reader';
 import DatasetViewer from './data/DatasetViewer.vue';
@@ -39,10 +42,15 @@ const editor = useFluenEditor();
 
 // 视图切换语义：
 //   - 进入/离开半预览时驱动同一 CM6 实例的实时渲染开关（StateEffect，零损耗）
+//   - 离开预览编辑时把 TipTap 最新产出（liveMd）回灌 CM6，两个编辑面内容一致；
+//     内容相同则跳过，避免丢弃 CM6 撤销历史
 //   - v-show 显隐后让 CM6 立即重新测量，避免容器尺寸从 0 恢复时的测量延迟
 watch(
   editorLayout,
-  (mode) => {
+  (mode, prev) => {
+    if (prev === 'wysiwyg' && mode !== 'wysiwyg' && editor.getMd() !== liveMd.value) {
+      editor.setMd(liveMd.value);
+    }
     editor.setLivePreview(mode === 'live');
     editor.requestMeasure();
   },
@@ -201,21 +209,33 @@ onUnmounted(() => {
         :kind="activeTab.datasetKind"
       />
 
-      <!-- 三视图编辑区（有项目时）：源码 / 半预览共用同一编辑器，按 editorLayout 显隐 -->
+      <!-- 四视图编辑区（有项目时）：source / live 共用同一编辑器，wysiwyg 独立挂载 -->
       <div v-else-if="hasProject" class="content-editor">
+        <!-- 工具栏（source / live / wysiwyg 显示；命令经 useFluenEditor 路由到当前编辑面） -->
+        <EditorToolbar v-show="editorLayout !== 'preview'" />
         <!-- 编辑器侧（source 与 live 模式均可见；live 下为实时渲染形态） -->
-        <div v-show="editorLayout !== 'preview'" class="content-editor__editing">
-          <EditorToolbar />
+        <div v-show="editorLayout === 'source' || editorLayout === 'live'" class="content-editor__editing">
           <FluenEditor
             :md="mainMd"
             class="content-editor__canvas"
             @doc-change="onDocChange"
           />
         </div>
+        <!-- 预览编辑侧（实验）：TipTap WYSIWYG，v-if 独立挂载（编辑内容经
+             onDocChange 流入 liveMd，与 FluenEditor 共用同一数据通路） -->
+        <FluenWysiwygEditor
+          v-if="editorLayout === 'wysiwyg'"
+          :md="liveMd"
+          class="content-editor__wysiwyg"
+          @doc-change="onDocChange"
+        />
         <!-- 仅渲染侧：后端 HTML 预览 -->
         <FluenPreview v-show="editorLayout === 'preview'" :md="liveMd" class="content-editor__preview" />
         <!-- 视图模式切换（仅编辑视图显示，阅读器不挂载本组件） -->
         <EditorLayoutSwitch />
+        <!-- 论文划选「添加到对话」浮层（编辑器上方，框选文本时可见）；
+             依赖 CM6 选区坐标，预览编辑视图下隐藏 -->
+        <EditorQuoteToolbar v-show="editorLayout !== 'wysiwyg'" />
       </div>
 
       <!-- 编辑器占位（有标签页但无项目内容时） -->
@@ -347,7 +367,7 @@ onUnmounted(() => {
   color: var(--fluen-stone);
 }
 
-/* ── 三视图编辑区（source / live / preview 互斥） ─────────────────────── */
+/* ── 四视图编辑区（source / live / wysiwyg / preview 互斥） ────────────── */
 .content-editor {
   flex: 1;
   display: flex;
@@ -375,6 +395,11 @@ onUnmounted(() => {
 }
 
 .content-editor__preview {
+  flex: 1;
+  min-width: 0;
+}
+
+.content-editor__wysiwyg {
   flex: 1;
   min-width: 0;
 }

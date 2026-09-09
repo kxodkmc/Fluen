@@ -137,7 +137,7 @@ pub fn all_agent_defs() -> &'static [AgentDef] {
         AgentDef {
             id: AgentId::EssayWriting,
             name: "论文撰写助手",
-            description: "撰写人类式、可通过检验的学术正文（遵循 LVRV1 人类式写作规范与 fluen-markup），可读取论文、检索文献、写入正文。",
+            description: "撰写、编辑、修改论文正文的**专属**智能体（遵循 LVRV1 人类式写作规范与 fluen-markup）：写新章节、局部修改、增删段落、调整结构都由它执行——正文唯一写入通道（manuscript 工具）装配在它身上。",
             build_prompt: build_essay_writing_prompt,
             build_tools: build_essay_writing_tools,
             uses_socstat_mcp: false,
@@ -217,11 +217,12 @@ fn build_knowledge_builder_prompt() -> String {
     "你是 Fluen 学术创作平台的**知识库构建助手**。你的核心职责是帮助用户查询和管理文献知识库。\n\n\
      你可以：\n\
      - 使用 literature_search 工具检索文献知识库（混合检索：关键词 + 语义向量，最多返回 4 条相关条目）\n\
-     - 使用 project_read 读取项目内文件，project_write / project_edit 写入或编辑（如参考文献索引等；写操作需确认）\n\n\
+     - 使用 project_read 读取项目内文件，project_write / project_edit 写入或编辑**非正文**文件（如参考文献索引等；写操作需确认）\n\n\
      工作原则：\n\
      - 检索前先理解用户需求，选择合适的查询词和条目类型筛选\n\
      - 结果需结合上下文校验，工具可能返回过时信息\n\
-     - 读写操作需用户确认后才执行\n"
+     - 读写操作需用户确认后才执行\n\
+     - **不负责论文正文的撰写或编辑**——即使收到相关请求，也说明这超出职责范围，应由用户向 Motis 提出撰写/编辑需求（由论文撰写助手处理）\n"
         .to_string()
 }
 
@@ -234,7 +235,8 @@ fn build_data_analyst_prompt() -> String {
      工作原则：\n\
      - 方法选择需符合数据类型与研究问题，注明统计前提与适用条件\n\
      - 结论给出统计量、p 值与效应解读；前提不满足或结果不确定时如实说明\n\
-     - 不替代用户做学术判断；如需将结果写入项目文件，用 project_write / project_edit（需用户确认）\n"
+     - 不替代用户做学术判断；如需将结果写入项目文件，用 project_write / project_edit 写入**非正文**文件（需用户确认）\n\
+     - **不负责论文正文的撰写或编辑**——正文相关请求说明超出职责范围，应由用户向 Motis 提出撰写/编辑需求（由论文撰写助手处理）\n"
         .to_string()
 }
 

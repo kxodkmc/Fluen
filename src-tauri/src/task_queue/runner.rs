@@ -46,8 +46,6 @@ use crate::references::events::{
 use crate::references::importer::{ImportProgress, ReferenceImporter};
 use crate::references::storage::ReferenceIndex;
 
-use fluen_knowledge::async_kb::AsyncKnowledgeBase;
-
 use super::error::TaskQueueError;
 use super::store::TaskStore;
 use super::types::{TaskKind, TaskRecord, TaskStatus};
@@ -356,15 +354,19 @@ impl TaskRunner {
             "checkpoint 已加载"
         );
 
-        // 构建 KB（用于会话创建时装配 runtime 内的知识工具）
+        // 构建 KB + MCP 桥接（会话 runtime 内的 AI 工具经桥接转发 fluen-kb）
+        // 首次用新库打开旧项目时自动执行存量迁移（弹窗确认）
         let refs_dir = self.project_path.join("references");
-        let kb = match crate::builtin_providers::embedding::build_embedding_router(&llm_config) {
-            Some(router) => AsyncKnowledgeBase::init(&refs_dir)
-                .map_err(|e| TaskQueueError::Execution(format!("知识库初始化失败: {e}")))?
-                .with_embedding_provider(Arc::new(router)),
-            None => AsyncKnowledgeBase::init(&refs_dir)
-                .map_err(|e| TaskQueueError::Execution(format!("知识库初始化失败: {e}")))?,
-        };
+        crate::knowledge_builder::migration::ensure_migrated(&self.app, &refs_dir)
+            .await
+            .map_err(|e| TaskQueueError::Execution(format!("知识库迁移失败: {e}")))?;
+        let kb = crate::knowledge_builder::kb_adapter::init_kb(&refs_dir, &llm_config)
+            .map_err(|e| TaskQueueError::Execution(format!("知识库初始化失败: {e}")))?;
+        let bridge = std::sync::Arc::new(
+            crate::knowledge_mcp_bridge::KbMcpBridge::connect(kb)
+                .await
+                .map_err(|e| TaskQueueError::Execution(format!("知识库 MCP 桥接失败: {e}")))?,
+        );
 
         // 计算上下文预算
         let budget = ContextBudget::from_config(&llm_config, model_ref)
@@ -381,13 +383,19 @@ impl TaskRunner {
         //
         // 使用 block 限定 lease 生命周期：lease 持有 AsyncMutex 守卫，
         // 必须在调用 session_pool.destroy() 之前释放。
+
+        // 构建过程事件上报：执行前绑定任务上下文（kbchat:* 事件关联 task_id/ref_id），
+        // 结束后清除（会话池与 runtime 观察者共享同一 reporter 实例，即刻生效）
+        let reporter = self.session_pool.reporter();
+        reporter.set_context(&task.id, ref_id);
+
         let pipeline_result: Result<(), KbError> = {
             let mut lease = self
                 .session_pool
                 .acquire_or_create(
                     &llm_config,
                     model_ref,
-                    kb,
+                    bridge,
                     budget,
                     next_paper_tokens,
                 )
@@ -399,6 +407,7 @@ impl TaskRunner {
             // 克隆 captures（Arc 廉价复制），然后获取 session 可变借用
             let plan_capture = lease.plan_capture();
             let entry_capture = lease.entry_capture();
+            let relations_capture = lease.relations_capture();
             let usage_capture = lease.usage_capture();
             let session = lease.session_mut();
 
@@ -411,6 +420,7 @@ impl TaskRunner {
                 &llm_config,
                 &plan_capture,
                 &entry_capture,
+                &relations_capture,
                 &usage_capture,
                 cancel,
                 |progress| {
@@ -424,6 +434,9 @@ impl TaskRunner {
             )
             .await
         }; // lease 在此释放
+
+        // 任务结束（成功/失败/取消），清除事件上下文
+        reporter.clear_context();
 
         // 无论 Ok 还是 Err，都持久化 checkpoint（保留进度，支持中断恢复）
         match serde_json::to_value(&checkpoint) {
@@ -484,6 +497,7 @@ impl TaskRunner {
         llm_config: &crate::llm_config::model::LlmConfig,
         plan_capture: &crate::knowledge_builder::llm_helper::PlanCapture,
         entry_capture: &crate::knowledge_builder::llm_helper::CreateEntryCapture,
+        relations_capture: &crate::knowledge_builder::llm_helper::RelationsCapture,
         usage_capture: &crate::knowledge_builder::llm_helper::UsageCapture,
         cancel: &CancellationToken,
         on_progress: impl Fn(crate::knowledge_builder::events::KbBuildProgressPayload),
@@ -499,6 +513,7 @@ impl TaskRunner {
                 session,
                 plan_capture,
                 entry_capture,
+                relations_capture,
                 usage_capture,
                 cancel,
                 &on_progress,

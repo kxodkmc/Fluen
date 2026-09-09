@@ -124,6 +124,14 @@ If any answer is "no," revise before output."#;
 /// 角色定位 —— 引导文本，声明须严格遵循核心写作规范。
 const WRITING_ROLE: &str = "你是 Fluen 学术创作平台的**论文撰写助手**。你的职责是根据用户要求，产出**可通过人类式写作检验的学术正文**——严格遵循下方「Human-Souled Academic Writing Prompt」核心规范（含六项动作、抽象-操作阶梯、反机器特征自检与校准示例），并在落盘前逐项执行其中的 Pre-Output Self-Check。你不是通用聊天助手，而是专业的论文撰写引擎。";
 
+/// 落盘铁律 —— 正文写入通道的唯一约束。
+///
+/// 置于超长核心规范之前：模型对工具的选择受提示词位置权重影响，
+/// 该规则若沉在文末易被稀释，导致误用 `project_edit` 改正文。
+const WRITING_CHANNEL_RULE: &str = "## 落盘铁律（最高优先级，先于一切写作规范）
+
+**论文正文（manuscript/main.md 及章节派生文件）的唯一写入通道是 `manuscript` 工具。** 无论是全文撰写、局部修改、增删段落还是调整章节，一律经 `manuscript` 提交——`project_write` / `project_edit` 对正文路径会直接拒绝，不要尝试；它们只服务于参考文献索引、数据文件等非正文文件。";
+
 /// 写作流程与工具约定 —— 让核心规范落地到 Fluen 编辑器语法与落盘。
 const WRITING_WORKFLOW: &str = "## 撰写流程
 
@@ -136,7 +144,7 @@ const WRITING_WORKFLOW: &str = "## 撰写流程
 
 ## 落盘约定
 
-- 正文一律经 `manuscript` 写入（唯一正文通道，会校验格式并同步章节结构）；通用写工具（project_write / project_edit）已禁止触碰正文。
+- 落盘铁律重申：正文的一切撰写/编辑/修改（含局部小改）一律经 `manuscript` 写入（唯一正文通道，会校验格式并同步章节结构）；通用写工具（project_write / project_edit）已禁止触碰正文。
 - `manuscript` 的 content 应包含**全部章节**（含已有内容），不只是新增部分——它是整体替换语义。
 - 更新已有正文前必须先掌握全文，否则 `manuscript` 会拒绝执行：用 `paper_section` 逐个**完整读取全部一级章节**（`# 标题`，计入已读记账），或用 `project_read` 完整读取 `manuscript/main.md`（从 offset 0 续读到 truncated=false）。
 - 写入前会弹出确认框，需用户点击「应用」后才真正保存；用户拒绝时尊重决定，不反复尝试。
@@ -146,13 +154,14 @@ const WRITING_WORKFLOW: &str = "## 撰写流程
 /// 组装论文撰写角色的完整系统提示词。
 pub fn system() -> String {
     [
+        WRITING_CHANNEL_RULE,
         WRITING_ROLE,
         WRITING_CORE,
         markup_cheatsheet(),
         WRITING_WORKFLOW,
         &environment(),
     ]
-    .join("\n\n")
+        .join("\n\n")
 }
 
 #[cfg(test)]
@@ -170,5 +179,8 @@ mod tests {
         assert!(s.contains("Pre-Output Self-Check"));
         assert!(s.contains("manuscript"));
         assert!(s.contains("运行环境"));
+        // 落盘铁律须置于最前（先于核心规范），避免被长文本稀释
+        assert!(s.starts_with("## 落盘铁律"), "落盘铁律应为提示词首段");
+        assert!(s.contains("唯一写入通道是 `manuscript` 工具"));
     }
 }

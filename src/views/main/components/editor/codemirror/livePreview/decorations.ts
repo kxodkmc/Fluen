@@ -360,6 +360,130 @@ function renderTableWidget(node: SyntaxNode, cx: RuleContext): void {
 addRule('Table', renderTableWidget);
 addRule('FTagTable', renderTableWidget);
 
+// ── f-标签块（f-fig / f-tbl / f-eq / f-claim） ──────────────────────
+
+const CAPTION_OPEN_TAG = '<f-caption>';
+const CAPTION_CLOSE_TAG = '</f-caption>';
+
+/** FTag 块节点名 → 闭合标签文本。 */
+const FTAG_CLOSE_BY_NODE: Record<string, string> = {
+  FTagFig: '</f-fig>',
+  FTagTbl: '</f-tbl>',
+  FTagEq: '</f-eq>',
+  FTagClaim: '</f-claim>',
+};
+
+/** 推送一个整行/跨行的 block 替换并同时登记原子性。 */
+function pushHideBlock(cx: RuleContext, from: number, to: number): void {
+  if (to <= from) return;
+  const d = Decoration.replace({ block: true });
+  cx.acc.deco.push(d.range(from, to));
+  cx.acc.atomic.push(d.range(from, to));
+}
+
+/**
+ * 折叠一段纯空白跨度：同行空白行内隐藏；跨行空白对齐行边界后 block 折叠，
+ * 消除标签与内容之间的残留空行。
+ */
+function hideBlankSpan(cx: RuleContext, from: number, to: number): void {
+  if (to <= from) return;
+  if (cx.doc.sliceString(from, to).trim() !== '') return;
+  const startLine = cx.doc.lineAt(from);
+  const endLine = cx.doc.lineAt(to);
+  if (startLine.number === endLine.number) {
+    pushHide(cx, from, to);
+    return;
+  }
+  // 整体 trim 已保证 from..行尾、行首..to 均为空白，对齐后仅折叠换行
+  pushHideBlock(cx, startLine.to, endLine.from);
+}
+
+/**
+ * f-标签块渲染：起始/闭合标签行在光标未触及时隐藏（触及揭示以便编辑属性），
+ * 题注与内嵌表格之间的纯空白跨度折叠，避免渲染态残留空行。
+ * 块内无题注/表格结构时不做空白折叠，降级为源码显示。
+ */
+function renderFtagBlock(node: SyntaxNode, cx: RuleContext): void {
+  const closeTag = FTAG_CLOSE_BY_NODE[node.name];
+  if (!closeTag) return;
+  const text = cx.doc.sliceString(node.from, node.to);
+
+  // ── 起始标签 ──
+  const gtRel = text.indexOf('>');
+  if (gtRel < 0) return;
+  const openTagEnd = node.from + gtRel + 1;
+  const openLine = cx.doc.lineAt(node.from);
+  const openFrom = cx.doc.sliceString(openLine.from, node.from).trim() === ''
+    ? openLine.from
+    : node.from;
+  let innerFrom = openTagEnd;
+  if (openLine.to < node.to && cx.doc.sliceString(openTagEnd, openLine.to).trim() === '') {
+    // 标签独占一行 → 整行隐藏
+    if (!selectionTouches(openFrom, openLine.to, cx.sel)) {
+      pushHideBlock(cx, openFrom, openLine.to);
+    }
+    innerFrom = openLine.to + 1;
+  } else if (!selectionTouches(openFrom, openTagEnd, cx.sel)) {
+    pushHide(cx, openFrom, openTagEnd);
+  }
+
+  // ── 闭合标签 ──
+  let innerTo = node.to;
+  const closeRel = text.lastIndexOf(closeTag);
+  if (closeRel >= 0) {
+    const closeFrom = node.from + closeRel;
+    const closeTo = closeFrom + closeTag.length;
+    const closeLine = cx.doc.lineAt(closeFrom);
+    const aloneOnLine = closeLine.from > node.from
+      && cx.doc.sliceString(closeLine.from, closeFrom).trim() === ''
+      && cx.doc.sliceString(closeTo, closeLine.to).trim() === '';
+    if (aloneOnLine) {
+      if (!selectionTouches(closeLine.from, closeLine.to, cx.sel)) {
+        pushHideBlock(cx, closeLine.from, closeLine.to);
+      }
+      innerTo = closeLine.from;
+    } else if (!selectionTouches(closeFrom, closeTo, cx.sel)) {
+      pushHide(cx, closeFrom, closeTo);
+      innerTo = closeFrom;
+    }
+  }
+
+  // ── 内容间空白折叠（题注/内嵌表之间的空行） ──
+  const bounds: SyntaxNode[] = [];
+  for (let c = node.firstChild; c; c = c.nextSibling) {
+    if (c.name === 'FTagCaption' || c.name === 'FTagTable') bounds.push(c);
+  }
+  if (bounds.length === 0) return;
+  let prev = innerFrom;
+  for (const b of bounds) {
+    hideBlankSpan(cx, prev, b.from);
+    prev = b.to;
+  }
+  hideBlankSpan(cx, prev, innerTo);
+}
+
+addRule('FTagFig', renderFtagBlock);
+addRule('FTagTbl', renderFtagBlock);
+addRule('FTagEq', renderFtagBlock);
+addRule('FTagClaim', renderFtagBlock);
+
+/** 题注文字样式标记。 */
+const captionMark = Decoration.mark({ class: 'fluen-lp-caption' });
+
+/** f-题注：隐藏 <f-caption>/</f-caption> 标记（触及揭示），文字套题注样式。 */
+addRule('FTagCaption', (node, cx) => {
+  const text = cx.doc.sliceString(node.from, node.to);
+  if (!text.startsWith(CAPTION_OPEN_TAG) || !text.endsWith(CAPTION_CLOSE_TAG)) return;
+  const textFrom = node.from + CAPTION_OPEN_TAG.length;
+  const textTo = node.to - CAPTION_CLOSE_TAG.length;
+  if (textTo > textFrom) {
+    cx.acc.deco.push(captionMark.range(textFrom, textTo));
+  }
+  if (selectionTouches(node.from, node.to, cx.sel)) return;
+  pushHide(cx, node.from, textFrom);
+  pushHide(cx, textTo, node.to);
+});
+
 /** 围栏代码块：区域行样式（含语言标签高亮由 CSS 处理）。 */
 addRule('FencedCode', (node, cx) => {
   eachLine(cx, node.from, node.to, (line) => {
@@ -739,6 +863,75 @@ if (import.meta.vitest) {
     it('结构异常的表格（缺分隔行）降级为源码显示', () => {
       const r = build('| A |\n| x |\n| y |\n\n正文。');
       expect(flatten(r).some((d) => d.widget)).toBe(false);
+    });
+  });
+
+  describe('decorations: f-标签块', () => {
+    // 插入器生成的精确形态（与 blockInsert 一致），防两侧行为漂移
+    const FTBL_DOC =
+      '<f-tbl>\n  <f-caption>表格题注</f-caption>\n\n|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |\n\n</f-tbl>\n\n正文段落。';
+
+    it('起始/闭合标签行隐藏为无 widget 的替换区间', () => {
+      const flat = flatten(build(FTBL_DOC));
+      const openHide = flat.find(
+        (d) => !d.widget && d.cls === undefined && d.from === 0 && d.to === '<f-tbl>'.length,
+      );
+      expect(openHide).toBeDefined();
+      const closeFrom = FTBL_DOC.indexOf('</f-tbl>');
+      const closeHide = flat.find(
+        (d) => !d.widget && d.cls === undefined && d.from === closeFrom && d.to === closeFrom + '</f-tbl>'.length,
+      );
+      expect(closeHide).toBeDefined();
+      // 表格 widget 仍渲染
+      expect(flat.some((d) => d.widget)).toBe(true);
+    });
+
+    it('题注标记隐藏，题注文字带 fluen-lp-caption 样式', () => {
+      const flat = flatten(build(FTBL_DOC));
+      const capFrom = FTBL_DOC.indexOf('<f-caption>');
+      const capTextFrom = capFrom + '<f-caption>'.length;
+      const capTextTo = FTBL_DOC.indexOf('</f-caption>');
+      const styled = flat.find(
+        (d) => d.cls === 'fluen-lp-caption' && d.from === capTextFrom && d.to === capTextTo,
+      );
+      expect(styled).toBeDefined();
+      expect(
+        flat.some((d) => !d.widget && d.cls === undefined && d.from === capFrom && d.to === capTextFrom),
+      ).toBe(true);
+      expect(
+        flat.some(
+          (d) => !d.widget && d.cls === undefined && d.from === capTextTo && d.to === capTextTo + '</f-caption>'.length,
+        ),
+      ).toBe(true);
+    });
+
+    it('光标触及题注时揭示标记，起始标签行仍隐藏', () => {
+      const pos = FTBL_DOC.indexOf('表格题注') + 2;
+      const flat = flatten(build(FTBL_DOC, [pos, pos]));
+      const capFrom = FTBL_DOC.indexOf('<f-caption>');
+      expect(
+        flat.some((d) => !d.widget && d.from === capFrom && d.to === capFrom + '<f-caption>'.length),
+      ).toBe(false);
+      expect(
+        flat.some((d) => !d.widget && d.cls === undefined && d.from === 0 && d.to === '<f-tbl>'.length),
+      ).toBe(true);
+    });
+
+    it('f-eq 块的标签行同样隐藏', () => {
+      const md = '<f-eq id="eq:1">\nE=mc^2\n</f-eq>\n\n正文。';
+      const flat = flatten(build(md));
+      expect(flat.some((d) => !d.widget && d.cls === undefined && d.from === 0 && d.to === '<f-eq id="eq:1">'.length)).toBe(true);
+      const closeFrom = md.indexOf('</f-eq>');
+      expect(flat.some((d) => !d.widget && d.cls === undefined && d.from === closeFrom && d.to === closeFrom + 7)).toBe(true);
+    });
+
+    it('光标触及闭合标签行时揭示该行', () => {
+      const closeFrom = FTBL_DOC.indexOf('</f-tbl>');
+      const pos = closeFrom + 2;
+      const flat = flatten(build(FTBL_DOC, [pos, pos]));
+      expect(
+        flat.some((d) => !d.widget && d.cls === undefined && d.from === closeFrom && d.to === closeFrom + '</f-tbl>'.length),
+      ).toBe(false);
     });
   });
 

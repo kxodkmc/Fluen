@@ -146,3 +146,233 @@ impl FluenRuntime {
 pub use referee_ai::engine::EngineConfig;
 #[allow(unused_imports)]
 pub use referee_ai::session::{ChatOptions, SessionConfig};
+
+#[cfg(test)]
+mod tests {
+    //! 预算口径验证：引擎按「每个内部 LLM 轮」累计预算，而调用方（如知识库
+    //! pipeline）只能看到回合的最后一次响应。用脚本化 mock provider 走真实
+    //! 回合循环（工具调用轮 + 收尾轮），对账两侧读数。
+
+    use super::*;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use referee_ai::budget::BudgetConfig;
+    use referee_ai::engine::{EngineReply, EngineStartError};
+    use referee_ai::provider::{
+        ChatRequest, ChatResponse, FinishReason, LlmError, LLMProvider, Message, MessageContent,
+        ModelSpec, MultimodalCapabilities, ProviderCapabilities, ProviderId, Role, StreamChunk,
+        TokenUsage, ToolCall, ToolCallFunction,
+    };
+    use referee_ai::tool::{Tool, ToolContext, ToolError, ToolOutput};
+    use serde_json::{json, Value};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// 脚本化 provider：第 1 轮发工具调用，第 2 轮纯文本收尾。
+    ///
+    /// 两轮 usage 固定不同（1000 / 1100），用于验证引擎把两轮都计入预算。
+    struct ScriptedProvider {
+        calls: Arc<AtomicU32>,
+    }
+
+    impl ScriptedProvider {
+        fn new() -> (Self, Arc<AtomicU32>) {
+            let calls = Arc::new(AtomicU32::new(0));
+            (Self { calls: calls.clone() }, calls)
+        }
+    }
+
+    #[async_trait]
+    impl LLMProvider for ScriptedProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId::new("scripted")
+        }
+        fn capabilities(&self) -> &ProviderCapabilities {
+            static CAPS: ProviderCapabilities = ProviderCapabilities {
+                parallel_tool_calls: false,
+                system_role: true,
+                streaming: false,
+                usage_reported: true,
+                multimodal: MultimodalCapabilities::NONE,
+            };
+            &CAPS
+        }
+        fn model_spec(&self) -> ModelSpec {
+            ModelSpec {
+                context_window_tokens: 128 * 1024,
+                max_output_tokens: 16 * 1024,
+            }
+        }
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let mark = self.calls.fetch_add(1, Ordering::SeqCst);
+            let text = |t: &str| MessageContent::text(t.to_string());
+            Ok(match mark {
+                // 轮 1：发起工具调用（usage total = 1000）
+                0 => ChatResponse {
+                    id: "scripted".into(),
+                    model: "scripted".into(),
+                    message: Message {
+                        role: Role::Assistant,
+                        content: text("我调用工具。"),
+                        reasoning_content: None,
+                        tool_calls: vec![ToolCall {
+                            id: "call_1".into(),
+                            function: ToolCallFunction {
+                                name: "echo_tool".into(),
+                                arguments: json!({"x": 1}).to_string(),
+                            },
+                        }],
+                        tool_call_id: None,
+                        usage: Some(TokenUsage {
+                            prompt_tokens: 900,
+                            completion_tokens: 100,
+                            total_tokens: 1000,
+                            ..Default::default()
+                        }),
+                    },
+                    finish_reason: FinishReason::ToolCalls,
+                    usage: Some(TokenUsage {
+                        prompt_tokens: 900,
+                        completion_tokens: 100,
+                        total_tokens: 1000,
+                        ..Default::default()
+                    }),
+                },
+                // 轮 2：纯文本收尾（usage total = 1100）
+                _ => ChatResponse {
+                    id: "scripted".into(),
+                    model: "scripted".into(),
+                    message: Message {
+                        role: Role::Assistant,
+                        content: text("已完成。"),
+                        reasoning_content: None,
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        usage: Some(TokenUsage {
+                            prompt_tokens: 1050,
+                            completion_tokens: 50,
+                            total_tokens: 1100,
+                            ..Default::default()
+                        }),
+                    },
+                    finish_reason: FinishReason::Stop,
+                    usage: Some(TokenUsage {
+                        prompt_tokens: 1050,
+                        completion_tokens: 50,
+                        total_tokens: 1100,
+                        ..Default::default()
+                    }),
+                },
+            })
+        }
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<BoxStream<'static, Result<StreamChunk, LlmError>>, LlmError> {
+            unreachable!("本测试走非流式路径")
+        }
+    }
+
+    /// 固定成功返回的哑工具（等待语义，与 ForceWaitGuard 包装后的真实 KB 工具一致）。
+    struct EchoTool;
+
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo_tool"
+        }
+        fn description(&self) -> &str {
+            "echo"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn default_wait(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _ctx: ToolContext,
+            _args: Value,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("ok"))
+        }
+    }
+
+    fn build_runtime(session_limit: u64) -> (FluenRuntime, Arc<AtomicU32>) {
+        let mut cfg = EngineConfig::default();
+        cfg.budget = BudgetConfig {
+            session_limit,
+            global_limit: 0,
+        };
+        cfg.cache.enabled = false;
+        let (provider, calls) = ScriptedProvider::new();
+        let runtime = FluenRuntimeBuilder::new(Arc::new(provider))
+            .with_config(cfg)
+            .with_tool(Arc::new(EchoTool))
+            .build();
+        (runtime, calls)
+    }
+
+    fn payload() -> referee_ai::session::ChatPayload {
+        referee_ai::session::ChatPayload {
+            message: Message::user("做一件事"),
+            options: ChatOptions {
+                system_prompt: Some("test".into()),
+                thinking: referee_ai::provider::ThinkingConfig {
+                    enabled: false,
+                    effort: None,
+                },
+                ..ChatOptions::default()
+            },
+            peer_depth: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_budget_counts_every_round_not_just_final() {
+        let (runtime, calls) = build_runtime(0); // 无限制
+        let sid = referee_ai::session::SessionId::new_v4();
+
+        let handle = runtime.chat(sid, payload()).unwrap();
+        let reply = handle.wait().await.unwrap();
+        let resp = match reply {
+            EngineReply::Success(resp) => resp,
+            other => panic!("期望 Success，得到 {other:?}"),
+        };
+
+        // 调用方视角（pipeline 的 history_used 口径）：只有收尾轮 = 1100
+        assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 1100);
+
+        // 引擎预算口径：工具调用轮(1000) + 收尾轮(1100) 全部计入
+        assert_eq!(
+            runtime.session_consumed_tokens(sid),
+            Some(2100),
+            "引擎必须把工具调用轮与收尾轮都计入会话预算"
+        );
+        assert_eq!(runtime.total_consumed_tokens(), 2100);
+
+        // 一次「1 个工具调用」的回合 = 2 次 LLM 调用
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn session_budget_rejection_reports_per_round_cumulative() {
+        // 限额 = 两轮之和：第 1 次回合恰好耗尽，同会话再发起即被拒
+        let (runtime, _calls) = build_runtime(2100);
+        let sid = referee_ai::session::SessionId::new_v4();
+
+        let handle = runtime.chat(sid, payload()).unwrap();
+        handle.wait().await.unwrap();
+        assert_eq!(runtime.session_consumed_tokens(sid), Some(2100));
+
+        // 同会话再次发起：check_budget 读到 per-round 累计 2100 ≥ 2100，拒绝
+        let err = runtime.chat(sid, payload()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Session budget exceeded"),
+            "应报会话预算超限，得到: {msg}"
+        );
+        assert!(msg.contains("2100"), "used/limit 应为累计流水 2100: {msg}");
+    }
+}

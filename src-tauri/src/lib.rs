@@ -12,6 +12,7 @@ pub mod editor;
 mod builtin_providers;
 mod chat_bridge;
 mod knowledge_builder;
+mod knowledge_mcp_bridge;
 mod llm_chat;
 mod logging;
 #[allow(dead_code)]

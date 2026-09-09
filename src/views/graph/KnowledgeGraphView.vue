@@ -133,16 +133,20 @@ const selectedEntry = computed<WikiEntry | null>(() => {
   return entries.value.find((e) => e.id === selectedId.value) ?? null;
 });
 
-/** 选中节点的关联条目（标题）。 */
-const selectedRelations = computed<{ id: string; title: string }[]>(() => {
+/** 选中节点的关联条目（标题；`related` 谓词省略，其余显示 `谓词 :: 标题`）。 */
+const selectedRelations = computed<{ id: string; label: string }[]>(() => {
   if (!selectedEntry.value) return [];
-  const rels = selectedEntry.value.relations ?? [];
-  return rels
-    .map((id) => {
-      const e = entries.value.find((x) => x.id === id);
-      return e ? { id, title: e.title } : null;
-    })
-    .filter((x): x is { id: string; title: string } => x !== null);
+  const result: { id: string; label: string }[] = [];
+  for (const rel of selectedEntry.value.relations ?? []) {
+    const e = entries.value.find((x) => x.id === rel.id);
+    if (e) {
+      result.push({
+        id: rel.id,
+        label: rel.predicate === 'related' ? e.title : `${rel.predicate} :: ${e.title}`,
+      });
+    }
+  }
+  return result;
 });
 
 // ── 类型筛选选项 ────────────────────────────────────────────────────
@@ -364,10 +368,10 @@ function typeLabel(type: WikiType): string {
                   v-for="rel in selectedRelations"
                   :key="rel.id"
                   class="kgv__relation-item"
-                  :title="rel.title"
+                  :title="rel.label"
                   @click="focusRelation(rel.id)"
                 >
-                  {{ rel.title }}
+                  {{ rel.label }}
                 </li>
               </ul>
             </div>

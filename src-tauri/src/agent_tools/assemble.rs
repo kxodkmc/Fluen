@@ -117,7 +117,6 @@ pub fn register_literature_search(
 mod tests {
     use super::*;
     use crate::agent_runtime::approval::Approver;
-    use fluen_knowledge::async_kb::AsyncKnowledgeBase;
     use std::fs;
     use std::path::PathBuf;
 
@@ -188,7 +187,7 @@ mod tests {
     #[test]
     fn register_literature_search_when_kb_exists() {
         let dir = temp_dir("with_kb");
-        AsyncKnowledgeBase::init(&dir.join("references")).unwrap();
+        fluen_kb::KbBuilder::new(dir.join("references")).open().unwrap();
 
         let registry = ToolRegistry::with_defaults();
         register_literature_search(&registry, dir.to_str().unwrap(), &LlmConfig::default()).unwrap();

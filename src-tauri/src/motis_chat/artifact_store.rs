@@ -264,6 +264,22 @@ impl ArtifactStore for ProjectArtifactStore {
         Ok(self.inner.lock().artifacts.get(id).cloned())
     }
 
+    /// 按凭证删除条目（内存镜像 + 落盘同步清理），返回是否存在并已删除。
+    async fn delete(&self, id: &str) -> Result<bool, StoreError> {
+        let found = {
+            let mut inner = self.inner.lock();
+            inner
+                .artifacts
+                .remove(id)
+                .map(|a| inner.total_bytes = inner.total_bytes.saturating_sub(a.bytes.len()))
+                .is_some()
+        };
+        if found {
+            self.remove_file(id);
+        }
+        Ok(found)
+    }
+
     /// 项目作用域：板内全量条目按产出顺序返回（调用者键仅兼容签名）。
     async fn list_by_creator(&self, _creator: uuid::Uuid) -> Result<Vec<Artifact>, StoreError> {
         let inner = self.inner.lock();

@@ -34,6 +34,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useLogger } from '../../../composables/useLogger';
 import { useMascotConfig } from '../../../composables/useMascotConfig';
 import { useProject } from '../../../composables/useProject';
+import { useChatQuotes } from './useChatQuotes';
 import { useI18n } from '../../../i18n';
 import type { MascotConfig } from '../../../types/mascot';
 import type { ChatMessage } from '../types';
@@ -186,6 +187,7 @@ export function useMotisChat() {
   const log = useLogger('motis-chat');
   /** 当前打开的论文项目（发送消息时读取 project_path，供论文内容工具使用）。 */
   const { currentProject } = useProject();
+  const chatQuotes = useChatQuotes();
 
   /* ── 对外状态 ─────────────────────────────────────────────────────── */
   const messages = ref<ChatMessage[]>([]);
@@ -581,6 +583,14 @@ export function useMotisChat() {
 
     // 3. 构造历史（在追加用户消息之前）
     const history = buildHistory();
+
+    // 引用文段（论文编辑器划选添加）：以引用块前缀拼入发送文本，
+    // 用户消息本体保持纯输入内容，引用仅作为附带上下文展示与传递。
+    const quotes = chatQuotes.quotes.value.map((q) => q.text);
+    const quotedText = quotes.length > 0
+      ? `${t('main.motisPanel.quoteFromManuscript')}\n${quotes.map((q) => `> ${q.replace(/\n/g, '\n> ')}`).join('\n\n')}\n\n${text}`
+      : text;
+
     log.info('发送消息', {
       message: text,
       historyCount: history.length,
@@ -593,8 +603,12 @@ export function useMotisChat() {
       role: 'user',
       kind: 'text',
       content: text,
+      quotes: quotes.length > 0 ? quotes : undefined,
       timestamp: Date.now(),
     });
+
+    // 引用已随本条消息发送，消费后清空，避免重复附带
+    chatQuotes.clearQuotes();
 
     // 5. 设置生成状态与思考气泡（新一轮开始时清空遗留的待审批项）
     pendingApprovals.value = [];
@@ -614,9 +628,10 @@ export function useMotisChat() {
     }
 
     try {
-      // 携带当前打开的论文项目路径（供智能体读取论文内容的工具使用）
+      // 携带当前打开的论文项目路径（供智能体读取论文内容的工具使用）；
+      // 引用文段以 blockquote 前缀拼入消息文本一并发送
       await invoke('motis_chat_send', {
-        message: text,
+        message: quotedText,
         history,
         projectPath: currentProject.value?.project_path ?? null,
       });

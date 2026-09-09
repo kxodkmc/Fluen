@@ -14,11 +14,6 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tokio::task::spawn_blocking;
 
-use fluen_knowledge::async_kb::{AsyncKnowledgeBase, AsyncQueryParams};
-use fluen_knowledge::types::{
-    MetaQueryType, QueryResult, RetrievalMethod, WikiEntry, WikiEntryDetail, WikiType,
-};
-
 use crate::ai_services::storage::ConfigStorage as AiServicesConfigStorage;
 use crate::llm_config::model::SceneModelRef;
 use crate::llm_config::storage::ConfigStorage as LlmConfigStorage;
@@ -27,6 +22,7 @@ use crate::task_queue::store::TaskStore;
 use crate::task_queue::types::{TaskKind, TaskRecord};
 
 use super::error::KnowledgeBuilderError;
+use super::kb_adapter::{self, MetaData, QueryResult, WikiEntry, WikiEntryDetail};
 use super::types::KnowledgeBuildOptions;
 
 // ---------------------------------------------------------------------------
@@ -116,40 +112,51 @@ pub async fn knowledge_build_start(
 
 /// 初始化项目的知识库目录结构。
 ///
-/// 创建 `references/wiki/` 下的目录与空索引文件。
-/// 已存在的文件不会被覆盖。
+/// 创建 `references/wiki/` 下的目录与索引（`KbBuilder::open` 幂等：
+/// 已存在的文件不会被覆盖）。
 #[tauri::command]
 pub async fn knowledge_init(project_path: String) -> Result<(), KnowledgeBuilderError> {
     let refs_dir = PathBuf::from(&project_path).join("references");
     spawn_blocking(move || {
-        fluen_knowledge::wiki::init_wiki(&refs_dir).map_err(KnowledgeBuilderError::from)
+        fluen_kb::KbBuilder::new(&refs_dir)
+            .open()
+            .map_err(KnowledgeBuilderError::from)
     })
     .await
     .map_err(|e| KnowledgeBuilderError::TaskQueue(format!("spawn_blocking join error: {e}")))??;
     Ok(())
 }
 
-/// 列出项目知识库中的所有条目（不含正文）。
+/// 列出项目知识库中的所有条目（不含正文；关联带谓词）。
 #[tauri::command]
 pub async fn knowledge_list_entries(
+    app: AppHandle,
     project_path: String,
 ) -> Result<Vec<WikiEntry>, KnowledgeBuilderError> {
-    let kb = open_kb(&project_path)?;
-    kb.list_entries()
+    let kb = open_kb(&app, &project_path).await?;
+    let metas = kb
+        .list_entries(None)
         .await
-        .map_err(KnowledgeBuilderError::from)
+        .map_err(KnowledgeBuilderError::from)?;
+    Ok(metas.iter().map(kb_adapter::meta_to_entry).collect())
 }
 
-/// 获取单个条目详情（含正文、标签名、关联条目标题）。
+/// 获取单个条目详情（含正文（已剥离溯源标签）与关联（谓词 + 标题））。
 #[tauri::command]
 pub async fn knowledge_get_entry(
+    app: AppHandle,
     project_path: String,
     wiki_id: String,
 ) -> Result<Option<WikiEntryDetail>, KnowledgeBuilderError> {
-    let kb = open_kb(&project_path)?;
-    kb.get_entry(wiki_id)
-        .await
-        .map_err(KnowledgeBuilderError::from)
+    let kb = open_kb(&app, &project_path).await?;
+    let id = fluen_kb::WikiId::new(&wiki_id).map_err(KnowledgeBuilderError::from)?;
+    let doc = match kb.get_entry(id).await {
+        Ok(doc) => doc,
+        Err(fluen_kb::KbError::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let titles = kb_adapter::title_map(&kb).await?;
+    Ok(Some(kb_adapter::doc_to_detail(&doc, &titles)))
 }
 
 /// 检索知识库。
@@ -157,62 +164,78 @@ pub async fn knowledge_get_entry(
 /// # 参数
 ///
 /// - `query`：查询文本
-/// - `wiki_type`：限定条目类型（`None` 不限）
-/// - `method`：检索方式（`None` 默认 hybrid）
+/// - `wiki_type`：限定条目类型（`None` 不限；`summary` / `concept` / `entity`）
+/// - `method`：检索方式（`None` 默认 hybrid；`keyword` / `semantic` / `hybrid`）
 /// - `top_k`：返回条数上限（`None` 默认 10）
 #[tauri::command]
 pub async fn knowledge_query(
+    app: AppHandle,
     project_path: String,
     query: String,
-    wiki_type: Option<WikiType>,
-    method: Option<RetrievalMethod>,
+    wiki_type: Option<String>,
+    method: Option<String>,
     top_k: Option<usize>,
 ) -> Result<QueryResult, KnowledgeBuilderError> {
-    let kb = open_kb(&project_path)?;
-    let params = AsyncQueryParams {
+    let kb = open_kb(&app, &project_path).await?;
+    let method = kb_adapter::parse_method(method.as_deref().unwrap_or("hybrid"))?;
+    let wiki_type = match wiki_type.as_deref() {
+        None | Some("") => None,
+        Some(s) => Some(kb_adapter::parse_wiki_type(s)?),
+    };
+    let params = fluen_kb::QueryParams {
         query,
         wiki_type,
-        method: method.unwrap_or_default(),
-        top_k: top_k.unwrap_or(10),
+        method,
+        top_k: Some(top_k.unwrap_or(10)),
         include_content: false,
+        expand: 0,
     };
-    kb.query(params).await.map_err(KnowledgeBuilderError::from)
+    let hits = kb.query(params).await.map_err(KnowledgeBuilderError::from)?;
+    Ok(QueryResult {
+        success: true,
+        results: hits.iter().map(kb_adapter::hit_to_match).collect(),
+    })
 }
 
 /// 查询知识库元信息。
 ///
-/// `query_type` 为 `overview` / `tags` / `recent`，
-/// `limit` 仅对 `recent` 有效（返回最近更新的条目数）。
+/// `query_type` 为 `overview`（仅统计）/ `recent`（附最近更新条目，
+/// `limit` 对其生效）。新库无 tags 概念，`tags` 查询类型已随迁移移除。
 #[tauri::command]
 pub async fn knowledge_meta(
+    app: AppHandle,
     project_path: String,
-    query_type: MetaQueryType,
+    query_type: String,
     limit: Option<usize>,
-) -> Result<fluen_knowledge::types::MetaResult, KnowledgeBuilderError> {
-    let kb = open_kb(&project_path)?;
-    kb.meta(query_type, limit.unwrap_or(10))
-        .await
-        .map_err(KnowledgeBuilderError::from)
+) -> Result<MetaData, KnowledgeBuilderError> {
+    match query_type.as_str() {
+        "overview" | "recent" => {}
+        other => {
+            return Err(KnowledgeBuilderError::Config(format!(
+                "query_type 取值非法: {other:?}（可选 overview / recent）"
+            )));
+        }
+    }
+    let kb = open_kb(&app, &project_path).await?;
+    kb_adapter::meta_result(&kb, &query_type, limit.unwrap_or(10)).await
 }
 
 // ---------------------------------------------------------------------------
 // 辅助函数
 // ---------------------------------------------------------------------------
 
-/// 打开项目的知识库句柄。
+/// 打开项目的知识库句柄（不注入 embedding）。
 ///
+/// 首次用新库打开旧项目时自动执行存量迁移（弹窗确认）。
 /// 知识库目录为 `{project_path}/references/wiki/`。
 /// 若未初始化（`index.db` 不存在），返回错误提示前端先调用 `knowledge_init`。
-fn open_kb(project_path: &str) -> Result<AsyncKnowledgeBase, KnowledgeBuilderError> {
+async fn open_kb(
+    app: &AppHandle,
+    project_path: &str,
+) -> Result<fluen_kb::async_kb::AsyncKb, KnowledgeBuilderError> {
     let refs_dir = PathBuf::from(project_path).join("references");
-    let wiki_db = refs_dir.join("wiki").join("index.db");
-    if !wiki_db.exists() {
-        return Err(KnowledgeBuilderError::Config(format!(
-            "知识库未初始化：{} 不存在，请先调用 knowledge_init",
-            wiki_db.display()
-        )));
-    }
-    AsyncKnowledgeBase::open(&refs_dir).map_err(KnowledgeBuilderError::from)
+    super::migration::ensure_migrated(app, &refs_dir).await?;
+    kb_adapter::open_plain(&refs_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -224,9 +247,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn open_kb_returns_error_when_not_initialized() {
+    fn open_kb_missing_fails_without_migration() {
         let tmp = tempfile::tempdir().unwrap();
-        match open_kb(tmp.path().to_str().unwrap()) {
+        // open_plain（无迁移路径）在未初始化时必须报错
+        let refs_dir = tmp.path().join("references");
+        match kb_adapter::open_plain(&refs_dir) {
             Err(err) => {
                 assert!(matches!(err, KnowledgeBuilderError::Config(_)));
                 assert!(err.to_string().contains("知识库未初始化"));
@@ -239,10 +264,42 @@ mod tests {
     async fn open_kb_succeeds_after_init() {
         let tmp = tempfile::tempdir().unwrap();
         let refs_dir = tmp.path().join("references");
-        fluen_knowledge::wiki::init_wiki(&refs_dir).unwrap();
+        fluen_kb::KbBuilder::new(&refs_dir).open().unwrap();
 
-        let kb = open_kb(tmp.path().to_str().unwrap()).unwrap();
-        let meta = kb.meta(MetaQueryType::Overview, 0).await.unwrap();
-        assert_eq!(meta.data.total_entries, 0);
+        let kb = kb_adapter::open_plain(&refs_dir).unwrap();
+        let meta = kb_adapter::meta_result(&kb, "overview", 0).await.unwrap();
+        assert_eq!(meta.total_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn meta_result_recent_returns_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kb = fluen_kb::KbBuilder::new(tmp.path())
+            .open()
+            .unwrap()
+            .into_async();
+        kb.create(
+            fluen_kb::WikiType::Concept,
+            "元信息测试".into(),
+            "正文".into(),
+            vec![],
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        let data = kb_adapter::meta_result(&kb, "recent", 10).await.unwrap();
+        assert_eq!(data.total_entries, 1);
+        assert_eq!(data.recent_entries.len(), 1);
+        assert_eq!(data.recent_entries[0].title, "元信息测试");
+    }
+
+    #[test]
+    fn parse_wiki_type_and_method_validate() {
+        assert!(kb_adapter::parse_wiki_type("concept").is_ok());
+        assert!(kb_adapter::parse_wiki_type("bogus").is_err());
+        assert!(kb_adapter::parse_method("hybrid").is_ok());
+        assert!(kb_adapter::parse_method("bogus").is_err());
     }
 }

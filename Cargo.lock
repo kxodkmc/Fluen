@@ -1450,7 +1450,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "fluen-knowledge",
+ "fluen-kb",
  "fluen-markup",
  "futures",
  "parking_lot",
@@ -1459,6 +1459,8 @@ dependencies = [
  "referee-ai",
  "referee-core",
  "reqwest 0.12.28",
+ "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1481,22 +1483,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "fluen-knowledge"
+name = "fluen-kb"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "referee-ai",
+ "rmcp",
  "rusqlite",
  "serde",
  "serde_json",
- "serde_yaml",
+ "sha2 0.10.9",
  "tempfile",
- "thiserror 1.0.69",
  "tokio",
- "tokio-util",
- "tracing",
  "uuid",
 ]
 
@@ -4131,6 +4127,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
  "uuid",
@@ -4156,12 +4153,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
 dependencies = [
  "bitflags 2.13.0",
- "chrono",
  "fallible-iterator",
  "fallible-streaming-iterator",
  "hashlink",
  "libsqlite3-sys",
- "serde_json",
  "smallvec",
 ]
 
@@ -5431,6 +5426,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
  "tokio",
 ]
 

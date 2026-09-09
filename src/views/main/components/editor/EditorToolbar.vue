@@ -10,17 +10,18 @@
  * 按钮点击时调用 `useFluenEditor()` 的编辑命令：行内格式经
  * `toggleFormat(kind)` 对当前选区/光标执行切换（行为由 `codemirror/formatting.ts`
  * 纯函数层实现）；标题按钮为下拉菜单，可从 H1-H6 中选择目标级别；表格经
- * `TableGridPicker` 选择尺寸与语法形态后由 `insertBlock` 在光标处插入
- * `<f-tbl>` 块（`codemirror/tableInsert.ts` 生成，规范 §5.3）。
+ * `TableGridPicker` 选择尺寸与语法形态后由 `insertTable` 在光标处插入
+ * （CM6 视图生成 `<f-tbl>` 块，预览编辑视图插入原生表格，由命令路由分发）。
  * 撤销/重做直接消费 composable 暴露的历史栈状态（不可用时按钮禁用）。
  *
- * 仅随编辑视图显示（ContentPanel 中 `v-show` 控制），预览模式不渲染。
+ * 随源码/半预览/预览编辑视图显示（ContentPanel 控制），仅渲染模式不渲染。
  */
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useI18n } from '../../../../i18n';
 import { useFluenEditor } from './composables/useFluenEditor';
-import { buildTableBlock, type TableSyntax } from './codemirror/tableModel';
+import type { TableSyntax } from './codemirror/tableModel';
 import TableGridPicker from './toolbar/TableGridPicker.vue';
+import MathPicker from './toolbar/MathPicker.vue';
 import type { MarkdownFormatKind, HeadingLevel } from './codemirror/formatting';
 
 const { t } = useI18n();
@@ -67,7 +68,15 @@ interface ToolGrid {
   onInsert: (rows: number, cols: number, syntax: TableSyntax) => void;
 }
 
-type Tool = ToolButton | ToolDropdown | ToolGrid;
+/** 公式面板工具：弹出符号/结构面板，插入目标由命令层自动判定。 */
+interface ToolMath {
+  kind: 'math';
+  id: string;
+  glyph: string;
+  label: string;
+}
+
+type Tool = ToolButton | ToolDropdown | ToolGrid | ToolMath;
 
 /** 工具分组，渲染为一段由分隔线区隔的按钮簇。 */
 interface ToolGroup {
@@ -145,6 +154,12 @@ const groups: ToolGroup[] = [
     id: 'insert',
     tools: [
       {
+        kind: 'math',
+        id: 'math',
+        glyph: '∫',
+        label: t('main.content.toolbar.formula'),
+      },
+      {
         kind: 'grid',
         id: 'table',
         icon: [
@@ -157,7 +172,7 @@ const groups: ToolGroup[] = [
         maxRows: 8,
         maxCols: 10,
         onInsert: (rows, cols, syntax) => {
-          editor.insertBlock(buildTableBlock(syntax, rows, cols, t('main.content.toolbar.tableCaption')));
+          editor.insertTable(rows, cols, syntax, t('main.content.toolbar.tableCaption'));
         },
       },
     ],
@@ -181,6 +196,25 @@ function applyDropdown(tool: ToolDropdown, value: HeadingLevel): void {
 function onGridInsert(tool: ToolGrid, rows: number, cols: number, syntax: TableSyntax): void {
   tool.onInsert(rows, cols, syntax);
   openDropdown.value = null;
+}
+
+/**
+ * 公式面板：行内/块级插入后收起面板；符号/结构插入保持面板展开，
+ * 便于连续录入多个符号（面板按钮已 mousedown.prevent，单元格与
+ * 文档光标在插入期间保持不动）。
+ */
+function onMathInsertInline(): void {
+  editor.insertInlineMath();
+  openDropdown.value = null;
+}
+
+function onMathInsertBlock(): void {
+  editor.insertMathBlock();
+  openDropdown.value = null;
+}
+
+function onMathInsertSymbol(latex: string): void {
+  editor.insertMathSnippet(latex);
 }
 
 /** 点击下拉容器外部时关闭。 */
@@ -222,6 +256,7 @@ onUnmounted(() => {
           :title="tool.hint ? `${tool.label}（${tool.hint}）` : tool.label"
           :aria-label="tool.label"
           :disabled="tool.enabled ? !tool.enabled() : false"
+          @mousedown.prevent
           @click="tool.run()"
         >
           <svg v-if="tool.icon" class="editor-toolbar__icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -248,6 +283,7 @@ onUnmounted(() => {
             :title="`${tool.label}（${tool.hint}）`"
             :aria-label="tool.label"
             :aria-expanded="openDropdown === tool.id"
+            @mousedown.prevent
             @click="toggleDropdown(tool.id)"
           >
             <span class="editor-toolbar__glyph editor-toolbar__glyph--heading">{{ tool.glyph }}</span>
@@ -277,11 +313,48 @@ onUnmounted(() => {
                 role="menuitem"
                 type="button"
                 :title="`${tool.label} ${opt.value}（${opt.hint}）`"
+                @mousedown.prevent
                 @click="applyDropdown(tool, opt.value)"
               >
                 <span class="editor-toolbar__menu-glyph">{{ opt.glyph }}</span>
                 <span class="editor-toolbar__menu-hint">{{ opt.hint }}</span>
               </button>
+            </div>
+          </Transition>
+        </div>
+
+        <!-- 公式面板工具 -->
+        <div v-else-if="tool.kind === 'math'" class="editor-toolbar__dropdown" :data-dropdown="tool.id">
+          <button
+            class="editor-toolbar__btn"
+            :class="{ 'editor-toolbar__btn--active': openDropdown === tool.id }"
+            type="button"
+            :title="tool.label"
+            :aria-label="tool.label"
+            :aria-expanded="openDropdown === tool.id"
+            @mousedown.prevent
+            @click="toggleDropdown(tool.id)"
+          >
+            <span class="editor-toolbar__glyph">{{ tool.glyph }}</span>
+            <svg class="editor-toolbar__chevron" viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                d="M4 6l4 4 4-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+
+          <Transition name="toolbar-dropdown">
+            <div v-if="openDropdown === tool.id" class="editor-toolbar__panel">
+              <MathPicker
+                @insert-inline="onMathInsertInline()"
+                @insert-block="onMathInsertBlock()"
+                @insert="onMathInsertSymbol"
+              />
             </div>
           </Transition>
         </div>
@@ -295,6 +368,7 @@ onUnmounted(() => {
             :title="tool.label"
             :aria-label="tool.label"
             :aria-expanded="openDropdown === tool.id"
+            @mousedown.prevent
             @click="toggleDropdown(tool.id)"
           >
             <svg class="editor-toolbar__icon" viewBox="0 0 24 24" aria-hidden="true">

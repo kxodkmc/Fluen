@@ -155,9 +155,14 @@ pub async fn ai_assistant_send(
         window.clone(),
         motis_chat_state.approvals_handle(),
         EVENT_APPROVAL_REQUEST,
+        project_path.clone(),
     ));
-    let (thinking_enabled, runtime) =
-        build_runtime(&llm_config, project_path.as_deref(), approver)?;
+    let (thinking_enabled, runtime) = build_runtime(
+        &llm_config,
+        project_path.as_deref(),
+        approver,
+        motis_chat_state.read_tracker_handle(),
+    )?;
 
     // 3. 回放历史 + 启动流式回合
     let session_id = SessionId::new_v4();

@@ -3,6 +3,8 @@
 //! 支持任何遵循 OpenAI Embeddings API 格式（`POST /embeddings`）的端点，
 //! 包括内置的 ModelScope 免费服务和用户自定义的第三方提供商。
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +23,17 @@ const MODELSCOPE_MODEL: &str = "Qwen/Qwen3-Embedding-4B";
 
 /// 单批最大文本数（避免请求体过大）。
 const MAX_BATCH_SIZE: usize = 32;
+
+/// 单次 Embedding 请求超时（知识库写入持锁调用本接口，超时须远小于工具执行超时）。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 带超时的 HTTP client；构建失败时回退默认 client。
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
 
 /// OpenAI 兼容的 Embedding 提供商。
 ///
@@ -50,7 +63,7 @@ impl OpenAiEmbeddingProvider {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
-            client: reqwest::Client::new(),
+            client: http_client(),
         }
     }
 

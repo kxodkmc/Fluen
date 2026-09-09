@@ -168,6 +168,14 @@ const blocks = computed<RenderBlock[]>(() => {
                 v-html="renderMd(block.msg.content)"
               />
               <template v-else>
+                <!-- 附带引用文段（论文编辑器划选添加） -->
+                <div v-if="block.msg.quotes?.length" class="motis-msg__quotes">
+                  <div
+                    v-for="(quote, qi) in block.msg.quotes"
+                    :key="qi"
+                    class="motis-msg__quote"
+                  >{{ quote }}</div>
+                </div>
                 <span class="motis-msg__text">{{ block.msg.content }}</span><span
                   v-if="block.msg.isStreaming"
                   class="motis-msg__cursor"
@@ -275,6 +283,27 @@ const blocks = computed<RenderBlock[]>(() => {
 
 .motis-msg__text {
   white-space: pre-wrap;
+}
+
+/* 用户消息附带的引用文段（论文划选） */
+.motis-msg__quotes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding-left: 8px;
+  border-left: 2px solid rgba(255, 255, 255, 0.55);
+}
+
+.motis-msg__quote {
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.85;
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* 助手消息 Markdown 渲染：继承气泡字体，重置块级默认边距，词长换行 */

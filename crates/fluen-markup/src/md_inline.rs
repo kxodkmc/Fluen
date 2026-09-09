@@ -100,7 +100,7 @@ impl InlineParser {
                 }
             }
 
-            // 强调族：** __ * _ ~~
+            // 强调族：** __ * _ ~~ ++
             if let Some(inline) = self.try_emphasis(self.pos) {
                 self.flush_text(text_start);
                 self.out.push(inline.node);
@@ -247,6 +247,13 @@ impl InlineParser {
             if let Some(end) = self.match_delim(start, "~~") {
                 let inner: String = self.chars[start + 2..end].iter().collect();
                 return Some(EmphasisHit { node: Inline::Strikethrough(parse_inline(&inner)), end: end + 2 });
+            }
+        }
+        // 下划线 ++
+        if two == (Some('+'), Some('+')) {
+            if let Some(end) = self.match_delim(start, "++") {
+                let inner: String = self.chars[start + 2..end].iter().collect();
+                return Some(EmphasisHit { node: Inline::Underline(parse_inline(&inner)), end: end + 2 });
             }
         }
         // ** __ 加粗

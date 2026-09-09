@@ -226,7 +226,8 @@ impl EngineObserver for AgentReporter {
     /// （超时 / panic / 未注册 / 许可不可用 / 批次收敛），前端据此把
     /// 卡在「运行中」的活动条目落为失败态。
     ///
-    /// `Ok` 结果由 [`ObservedTool`](crate::agent_runtime::observability::ObservedTool)
+    /// `Ok`（正常完成）与 `Failed`（工具主动报错）结果均由
+    /// [`ObservedTool`](crate::agent_runtime::observability::ObservedTool)
     /// 装饰器以完整输入/输出上报，此处跳过避免同一调用双报。
     /// 引擎钩子不携带工具名与输出内容（仅分类），`name` 留空、
     /// 前端按内部调用 ID 关联既有条目。
@@ -264,6 +265,7 @@ fn executor_outcome_error(outcome: ExecutorOutcome) -> &'static str {
         ExecutorOutcome::NotFound => "工具未注册",
         ExecutorOutcome::PermitUnavailable => "并发许可不可用",
         ExecutorOutcome::BatchDeadline => "等待类批次超出总时限，被引擎收敛",
+        ExecutorOutcome::Failed => "工具主动报错（错误文本已随结果回传模型纠错）",
         ExecutorOutcome::Ok => "",
     }
 }

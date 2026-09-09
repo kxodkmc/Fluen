@@ -80,9 +80,12 @@ export function scanTableStructure(
 ): void {
   if (lineStarts.length === 0) return;
 
-  // 解析所有表格行（连续段）
-  const rows: TableRow[] = [];
+  // 跳过块内前导非表格行（<f-tbl> 起始标签行、<f-caption> 题注行、空行等）
   let i = 0;
+  while (i < lineStarts.length && !parseTableRow(lineStarts[i])) i++;
+
+  // 解析连续表格行段（遇到非表格行即终止）
+  const rows: TableRow[] = [];
   while (i < lineStarts.length) {
     const row = parseTableRow(lineStarts[i]);
     if (!row) break;
@@ -98,7 +101,7 @@ export function scanTableStructure(
   // 识别分隔符行位置（通常为第二行）
   let separatorIdx = -1;
   for (let r = 0; r < rows.length; r++) {
-    if (isSeparatorRow(lineStarts[r].text)) {
+    if (isSeparatorRow(rows[r].text)) {
       separatorIdx = r;
       break;
     }
@@ -189,12 +192,16 @@ function buildCells(
       searchFrom = barIdx + 1;
       continue;
     }
-    // 内容区间：去前后空白
+    // 内容区间：去前后空白（全空白时两侧相抵，收敛为零宽区间，
+    // 防止产出 from > to 的逆序元素损坏语法树）
     const raw = text.slice(barIdx + 1, cellEnd);
     const leading = raw.length - raw.trimStart().length;
     const trailing = raw.length - raw.trimEnd().length;
-    const contentAbsFrom = cellAbsFrom + leading;
-    const contentAbsTo = cellAbsTo - trailing;
+    let contentAbsFrom = cellAbsFrom + leading;
+    let contentAbsTo = cellAbsTo - trailing;
+    if (contentAbsTo < contentAbsFrom) {
+      contentAbsFrom = contentAbsTo = cellAbsTo;
+    }
 
     const contentEl = cx.elt(contentNodeName, contentAbsFrom, contentAbsTo);
     cells.push(cx.elt(cellNodeName, cellAbsFrom, cellAbsTo, [contentEl]));

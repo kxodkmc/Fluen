@@ -22,7 +22,8 @@
 //! | `motis:thought` | `{ delta: string }` | 思考增量 |
 //! | `motis:text` | `{ delta: string }` | 文本增量 |
 //! | `motis:tool-call` | `{ id, name, input }` | 工具调用 |
-//! | `motis:finish` | `{ result, total_tokens }` | 完成 |
+//! | `motis:context-usage` | `ContextUsageReport` | 本轮上下文分类估算（发送前） |
+//! | `motis:finish` | `{ result, total_tokens, prompt_tokens, completion_tokens }` | 完成 |
 //! | `motis:error` | `{ message: string }` | 错误 |
 //!
 //! ## 会话模型
@@ -47,8 +48,10 @@ use referee_ai::session::SessionId;
 
 use super::agent_reporter::AgentReporter;
 use super::approval::{ApprovalMap, ApprovalOutcome, MotisApprover};
+use super::context_usage;
+use crate::agent_tools::project::read_state::ReadTracker;
 use super::error::MotisChatError;
-use super::events::EVENT_APPROVAL_REQUEST;
+use super::events::{EVENT_APPROVAL_REQUEST, EVENT_CONTEXT_USAGE};
 use super::federation::FederationPool;
 use super::prompt;
 use super::runtime::build_runtime;
@@ -72,6 +75,8 @@ pub struct MotisChatState {
     handles: Mutex<HashMap<String, referee_ai::engine::ChatHandle>>,
     /// 待审批请求的决策通道映射（key: approval_id）。
     approvals: Arc<ApprovalMap>,
+    /// 项目文件读取跟踪器（写前必读门记账，全智能体共享）。
+    read_tracker: Arc<ReadTracker>,
 }
 
 impl MotisChatState {
@@ -80,12 +85,18 @@ impl MotisChatState {
         Self {
             handles: Mutex::new(HashMap::new()),
             approvals: Arc::new(Mutex::new(HashMap::new())),
+            read_tracker: ReadTracker::new_arc(),
         }
     }
 
     /// 返回审批通道的共享句柄（供 [`MotisApprover`] 写入）。
     pub fn approvals_handle(&self) -> Arc<ApprovalMap> {
         self.approvals.clone()
+    }
+
+    /// 返回读取跟踪器的共享句柄（供装配层接线写前必读门）。
+    pub fn read_tracker_handle(&self) -> Arc<ReadTracker> {
+        self.read_tracker.clone()
     }
 
     /// 回传审批决策：移除并发送决策到等待中的审批请求。
@@ -161,6 +172,7 @@ pub async fn motis_chat_send(
     llm_storage: State<'_, ConfigStorage>,
     chat_state: State<'_, MotisChatState>,
     federation_pool: State<'_, FederationPool>,
+    socstat_mcp: State<'_, crate::mcp_host::socstat::SocstatMcpHost>,
 ) -> Result<(), MotisChatError> {
     // 1. 加载配置
     let mascot_config = mascot_storage
@@ -178,6 +190,7 @@ pub async fn motis_chat_send(
         window.clone(),
         chat_state.approvals_handle(),
         EVENT_APPROVAL_REQUEST,
+        project_path.clone(),
     ));
     // 子智能体事件上报器：委派生命周期与子代理内部工具调用经统一
     // emit 回调分发为 Tauri 事件（事件名由上报器侧指定）
@@ -190,13 +203,15 @@ pub async fn motis_chat_send(
         },
         federation_pool.tracker(),
     ));
-    let (thinking_enabled, runtime) = build_runtime(
+    let bundle = build_runtime(
         &mascot_config,
         &llm_config,
         project_path.as_deref(),
         approver,
+        chat_state.read_tracker_handle(),
         agent_reporter,
         &federation_pool,
+        Some(socstat_mcp.inner().clone()),
     )
     .await?;
 
@@ -211,19 +226,40 @@ pub async fn motis_chat_send(
     } else {
         String::new()
     };
-    let system_prompt = prompt::build_system_prompt(
+    // 成果板清单注入提示词：委派仅回传 artifact_id 且历史只回放纯文本，
+    // 跨轮后 ID 必然丢失——注入真实 ID 让 Motis 随时能用 read_artifact 取回
+    let board_section = bundle
+        .board_store
+        .as_ref()
+        .map(|store| prompt::board_section(&store.snapshot()))
+        .unwrap_or_default();
+    let prompt_sections = prompt::build_system_prompt_parts(
         &mascot_config,
         &mascot_data,
         &agents_desc,
+        &board_section,
         function_calling_available,
     );
+    let system_prompt = prompt::join_sections(&prompt_sections);
+
+    // 本轮请求上下文用量分类估算——发送前推送，驱动前端「上下文容量」面板
+    let usage_report = context_usage::build_report(
+        &prompt_sections,
+        &bundle.tool_declarations,
+        &history,
+        &message,
+        bundle.context_window,
+        bundle.max_output_tokens,
+    );
+    let _ = window.emit(EVENT_CONTEXT_USAGE, &usage_report);
+
     let handle = start_chat_session(
-        &runtime,
+        &bundle.runtime,
         session_id,
         to_referee_messages(&history),
         message,
         system_prompt,
-        thinking_enabled,
+        bundle.thinking_enabled,
     )
     .map_err(MotisChatError::Runtime)?;
 

@@ -31,6 +31,7 @@ import NewProjectDialog from '../../components/NewProjectDialog.vue';
 import AboutDialog from '../../components/AboutDialog.vue';
 import { useMainLayout, MAIN_LAYOUT_KEY } from './composables/useMainLayout';
 import { useMotisChat } from './composables/useMotisChat';
+import { useKbAgentChat, registerKbAgentAutoOpen } from './composables/useKbAgentChat';
 import { MOTIS_CHAT_KEY } from './components/motis';
 import { useProject } from '../../composables/useProject';
 import { useFluenEditor } from './components/editor/composables/useFluenEditor';
@@ -56,6 +57,16 @@ useProjectStatus();
 const motisChat = useMotisChat();
 provide(MOTIS_CHAT_KEY, motisChat);
 
+/* ── 知识库构建对话流（Kb Agent 面板） ────────────────────────────────── */
+// 任何构建启动（右键加入知识库 / 队列遗留任务恢复执行 / 失败重试）都会
+// 收到 kb-build:started 事件 → 自动展开右侧 Kb Agent 面板并聚焦该任务。
+const kbAgentChat = useKbAgentChat();
+registerKbAgentAutoOpen((taskId) => {
+  kbAgentChat.focusTask(taskId);
+  layout.showRightPanel('kbagent');
+});
+void kbAgentChat.setupEventListeners();
+
 /* ── 全局快捷键：保存文档 ─────────────────────────────────────────────── */
 // 主界面按 Ctrl/Cmd+S 保存当前文档。由全局 capture 监听统一接管：
 // 焦点在编辑器内外均生效，并拦截 WebView2 的默认行为（不再被“占用”）。
@@ -63,11 +74,12 @@ provide(MOTIS_CHAT_KEY, motisChat);
 // 触发保存，但全局监听仍会消费该键位以阻止 WebView2 默认行为。
 const SAVE_DOCUMENT_COMMAND = 'save-document';
 
-/** 编辑器视图模式 → 快捷键映射（Mod+1/2/3）。 */
+/** 编辑器视图模式 → 快捷键映射（Mod+1/2/3/4）。 */
 const EDITOR_LAYOUT_SHORTCUTS: ReadonlyArray<readonly [EditorLayoutMode, string]> = [
   ['source', 'Mod-1'],
   ['live', 'Mod-2'],
   ['preview', 'Mod-3'],
+  ['wysiwyg', 'Mod-4'],
 ];
 
 /** 视图模式命令 id：`editor-layout-{mode}`。 */
@@ -81,7 +93,7 @@ onMounted(() => {
   });
   bindShortcut('Mod-s', SAVE_DOCUMENT_COMMAND);
 
-  // 编辑器视图切换（Mod+1 仅源码 / Mod+2 半预览 / Mod+3 仅渲染）
+  // 编辑器视图切换（Mod+1 仅源码 / Mod+2 半预览 / Mod+3 仅渲染 / Mod+4 预览编辑）
   for (const [mode, key] of EDITOR_LAYOUT_SHORTCUTS) {
     registerCommand(layoutCommandId(mode), () => layout.setEditorLayout(mode));
     bindShortcut(key, layoutCommandId(mode));

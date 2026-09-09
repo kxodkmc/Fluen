@@ -69,11 +69,15 @@ watch(
   },
 );
 
-/** 外部切换面板时（如标题栏 Mascot 点击）同步回工具栏。 */
+/** 外部切换面板时（如标题栏 Mascot 点击）同步回工具栏。
+ *
+ * kbagent（知识库构建智能体）不参与底部工具栏模式下拉，跳过同步，
+ * 避免下拉选中一个不存在的模式项。
+ */
 watch(
   () => layout.activeRightPanel.value,
   (next) => {
-    if (next && next !== toolbar.mode.value) {
+    if (next && next !== 'kbagent' && next !== toolbar.mode.value) {
       toolbar.mode.value = next;
     }
   },

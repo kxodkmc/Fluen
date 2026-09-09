@@ -51,6 +51,7 @@ pub fn build_runtime(
     llm: &LlmConfig,
     project_path: Option<&str>,
     approver: Arc<dyn Approver>,
+    read_tracker: Arc<crate::agent_tools::project::read_state::ReadTracker>,
 ) -> Result<(bool, FluenRuntime), AiAssistantError> {
     // 1. 解析 provider 与 model（学术助手直接用全局激活项）
     let (provider, model_id) =
@@ -66,7 +67,7 @@ pub fn build_runtime(
     // 3. 有打开的项目时，装配论文写作工具
     let mut builder = FluenRuntimeBuilder::new(llm_provider);
     if let Some(project_path) = project_path {
-        let registry = build_tool_registry(project_path, llm, approver)?;
+        let registry = build_tool_registry(project_path, llm, approver, read_tracker)?;
         // 审批等待最长 5 分钟，执行器超时须大于该上限（见 approval_executor）
         builder = builder.with_tools(
             registry,
@@ -77,11 +78,12 @@ pub fn build_runtime(
     Ok((thinking_enabled, builder.build()))
 }
 
-/// 装配论文写作工具集（只读直装，写操作 ApprovalGuard 包装）。
+/// 装配论文写作工具集（只读带读取记账；写操作写前必读门 + ApprovalGuard 包装）。
 fn build_tool_registry(
     project_path: &str,
     llm: &LlmConfig,
     approver: Arc<dyn Approver>,
+    read_tracker: Arc<crate::agent_tools::project::read_state::ReadTracker>,
 ) -> Result<ToolRegistry, AiAssistantError> {
     let registry = ToolRegistry::with_defaults();
     let reg_err = |e: referee_ai::tool::RegistryError| {
@@ -89,20 +91,34 @@ fn build_tool_registry(
     };
 
     // 只读：论文大纲与章节读取
-    crate::agent_tools::assemble::register_paper_readers(&registry, project_path)
-        .map_err(reg_err)?;
+    crate::agent_tools::assemble::register_paper_readers(
+        &registry,
+        project_path,
+        read_tracker.clone(),
+    )
+    .map_err(reg_err)?;
 
     // 只读：文献知识库搜索（知识库存在时装配；缺失/打开失败时降级跳过）
     crate::agent_tools::assemble::register_literature_search(&registry, project_path, llm)
         .map_err(reg_err)?;
 
-    // 写操作：论文正文写入（格式校验 + 章节同步，ApprovalGuard 包装）
-    crate::agent_tools::assemble::register_manuscript(&registry, project_path, approver.clone())
-        .map_err(reg_err)?;
+    // 写操作：论文正文写入（格式校验 + 章节同步，读门 + ApprovalGuard 包装）
+    crate::agent_tools::assemble::register_manuscript(
+        &registry,
+        project_path,
+        approver.clone(),
+        read_tracker.clone(),
+    )
+    .map_err(reg_err)?;
 
-    // 读写：项目内文件三件套（写/编辑需审批；正文 main.md 写保护）
-    crate::agent_tools::assemble::register_project_files(&registry, project_path, approver)
-        .map_err(reg_err)?;
+    // 读写：项目内文件三件套（写/编辑经读门与审批；正文 main.md 写保护）
+    crate::agent_tools::assemble::register_project_files(
+        &registry,
+        project_path,
+        approver,
+        read_tracker,
+    )
+    .map_err(reg_err)?;
 
     Ok(registry)
 }

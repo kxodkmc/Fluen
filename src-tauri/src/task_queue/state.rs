@@ -16,10 +16,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
 use crate::ai_services::storage::ConfigStorage as AiServicesConfigStorage;
+use crate::knowledge_builder::reporter::KbReporter;
 use crate::knowledge_builder::session::SessionPool;
 use crate::llm_config::storage::ConfigStorage as LlmConfigStorage;
 
@@ -60,12 +61,17 @@ impl TaskQueueState {
     ///
     /// 同一项目的多次 runner 调用复用同一 `SessionPool`，
     /// 跨论文构建任务通过池复用 runtime（命中模型前缀缓存）。
-    pub fn get_or_create_session_pool(&self, project_path: &Path) -> Arc<SessionPool> {
+    /// 首次创建时绑定传入的构建过程事件上报器（后续传入的同实例）。
+    pub fn get_or_create_session_pool(
+        &self,
+        project_path: &Path,
+        reporter: KbReporter,
+    ) -> Arc<SessionPool> {
         let key = project_path.to_string_lossy().to_string();
         let mut pools = self.session_pools.lock().expect("session_pools poisoned");
         pools
             .entry(key)
-            .or_insert_with(|| Arc::new(SessionPool::new()))
+            .or_insert_with(|| Arc::new(SessionPool::new(reporter)))
             .clone()
     }
 
@@ -100,7 +106,17 @@ impl TaskQueueState {
 
         let cancel_tokens = self.cancel_tokens.clone();
         let active_runners = self.active_runners.clone();
-        let session_pool = self.get_or_create_session_pool(&project_path);
+        // 构建过程事件上报器：emit 到主窗口（Kb Agent 面板监听 kbchat:* 事件）。
+        // 会话池与 runner 共享同一实例（内部 Arc），runner 切换上下文即刻生效。
+        let reporter = {
+            let app = app.clone();
+            KbReporter::new(move |event, payload| {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit(event, payload);
+                }
+            })
+        };
+        let session_pool = self.get_or_create_session_pool(&project_path, reporter);
         let runner = TaskRunner::new(
             project_path,
             kind,
@@ -172,13 +188,18 @@ impl Default for TaskQueueState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::knowledge_builder::reporter::KbReporter;
+
+    fn noop_reporter() -> KbReporter {
+        KbReporter::new(|_, _| {})
+    }
 
     #[test]
     fn get_or_create_session_pool_returns_same_instance() {
         let state = TaskQueueState::new();
         let path = PathBuf::from("/tmp/project-a");
-        let pool1 = state.get_or_create_session_pool(&path);
-        let pool2 = state.get_or_create_session_pool(&path);
+        let pool1 = state.get_or_create_session_pool(&path, noop_reporter());
+        let pool2 = state.get_or_create_session_pool(&path, noop_reporter());
         // Arc 同一指针
         assert!(Arc::ptr_eq(&pool1, &pool2));
     }
@@ -186,19 +207,19 @@ mod tests {
     #[test]
     fn get_or_create_session_pool_different_projects() {
         let state = TaskQueueState::new();
-        let pool_a = state.get_or_create_session_pool(&PathBuf::from("/tmp/project-a"));
-        let pool_b = state.get_or_create_session_pool(&PathBuf::from("/tmp/project-b"));
+        let pool_a = state.get_or_create_session_pool(&PathBuf::from("/tmp/project-a"), noop_reporter());
+        let pool_b = state.get_or_create_session_pool(&PathBuf::from("/tmp/project-b"), noop_reporter());
         assert!(!Arc::ptr_eq(&pool_a, &pool_b));
     }
 
     #[test]
     fn clear_all_session_pools_removes_all() {
         let state = TaskQueueState::new();
-        state.get_or_create_session_pool(&PathBuf::from("/tmp/project-a"));
-        state.get_or_create_session_pool(&PathBuf::from("/tmp/project-b"));
+        state.get_or_create_session_pool(&PathBuf::from("/tmp/project-a"), noop_reporter());
+        state.get_or_create_session_pool(&PathBuf::from("/tmp/project-b"), noop_reporter());
         state.clear_all_session_pools();
         // 清理后再获取应创建新实例
-        let new_pool = state.get_or_create_session_pool(&PathBuf::from("/tmp/project-a"));
+        let new_pool = state.get_or_create_session_pool(&PathBuf::from("/tmp/project-a"), noop_reporter());
         // 验证不是之前的（此处无法直接对比，但至少不 panic）
         assert!(Arc::strong_count(&new_pool) >= 1);
     }

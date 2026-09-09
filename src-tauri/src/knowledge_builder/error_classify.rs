@@ -100,8 +100,8 @@ pub fn classify_error(err: &KnowledgeBuilderError) -> LlmErrorKind {
         // I/O 错误：通常为瞬态（文件锁、临时不可访问）
         KnowledgeBuilderError::Io(_) => LlmErrorKind::Transient { retry_after_ms: 0 },
 
-        // 知识库底层错误：按消息细分
-        KnowledgeBuilderError::Knowledge(e) => classify_by_message(&e.to_string()),
+        // 知识库底层错误（fluen-kb）：按消息细分
+        KnowledgeBuilderError::Kb(e) => classify_by_message(&e.to_string()),
 
         // LLM 调用错误：按消息细分
         KnowledgeBuilderError::Llm(msg) => classify_by_message(msg),

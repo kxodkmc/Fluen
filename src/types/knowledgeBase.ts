@@ -2,11 +2,11 @@
  * 知识库模块的前端类型定义。
  *
  * 与 Rust 后端 `knowledge_builder::types` / `knowledge_builder::events` /
- * `fluen_knowledge::types` 一一对应，序列化格式遵循 serde 默认规则。
+ * `knowledge_builder::kb_adapter` 一一对应，序列化格式遵循 serde 默认规则。
  *
  * @see src-tauri/src/knowledge_builder/types.rs
  * @see src-tauri/src/knowledge_builder/events.rs
- * @see crates/fluen-knowledge/src/types.rs
+ * @see src-tauri/src/knowledge_builder/kb_adapter.rs
  */
 
 // ---------------------------------------------------------------------------
@@ -45,11 +45,29 @@ export type BuildStage =
 /** 条目类型（对应 Rust `WikiType`）。 */
 export type WikiType = 'concept' | 'entity' | 'summary';
 
-/** 检索方式（对应 Rust `RetrievalMethod`）。 */
+/** 检索方式（对应 Rust `SearchMethod`）。 */
 export type RetrievalMethod = 'keyword' | 'semantic' | 'hybrid';
 
-/** 元信息查询类型（对应 Rust `MetaQueryType`）。 */
-export type MetaQueryType = 'overview' | 'tags' | 'recent';
+/** 元信息查询类型（对应 Rust `knowledge_meta` 的 `query_type` 参数）。 */
+export type MetaQueryType = 'overview' | 'recent';
+
+/** 关联引用（列表视图：谓词 + 目标 wikiID）。 */
+export interface RelationRef {
+  /** 关联谓词（如 `related` / `作者` / `应用了`）。 */
+  predicate: string;
+  /** 目标条目 wikiID。 */
+  id: string;
+}
+
+/** 关联条目（详情视图：谓词 + wikiID + 标题）。 */
+export interface RelationInfo {
+  /** 关联谓词。 */
+  predicate: string;
+  /** 目标条目 wikiID。 */
+  id: string;
+  /** 目标条目标题（缺失时回退为 ID）。 */
+  title: string;
+}
 
 /** 知识库条目（对应 Rust `WikiEntry`，列表查询时不含正文）。 */
 export interface WikiEntry {
@@ -57,16 +75,10 @@ export interface WikiEntry {
   wiki_type: WikiType;
   title: string;
   file_path: string;
-  /** 仅 summaries：源文献路径，如 `raw/ref-xxx.pdf`。 */
+  /** 仅 summaries：源文献 refID（`ref-xxx`）。 */
   source?: string;
-  /** 仅 summaries：作者 wikiID 列表（DB 读取时为空）。 */
-  authors?: string[];
-  /** 标签 ID 列表。 */
-  tags?: string[];
-  /** 关联 wikiID 列表（出向）。 */
-  relations?: string[];
-  /** 正文（列表查询时为空，详情查询时填充）。 */
-  content?: string;
+  /** 出向关联（带谓词）。 */
+  relations: RelationRef[];
   /** 创建时间（RFC3339）。 */
   created: string;
   /** 更新时间（RFC3339）。 */
@@ -76,28 +88,23 @@ export interface WikiEntry {
 /**
  * 知识库条目详情（对应 Rust `WikiEntryDetail`）。
  *
- * 通过 `#[serde(flatten)]` 扩展 `WikiEntry`，额外提供标签名与关联条目标题。
- * 由 `knowledge_get_entry` 命令返回。
+ * 由 `knowledge_get_entry` 命令返回；正文已由后端剥离 `<ref-xxx>`
+ * 溯源标签，可直接渲染。
  */
-export interface WikiEntryDetail extends WikiEntry {
-  /** 标签名称列表，与 `tags` 一一对应（空时省略）。 */
-  tag_titles?: string[];
-  /** 关联条目标题列表，与 `relations` 一一对应（空时省略）。 */
-  relation_titles?: string[];
-}
-
-/** 标签（对应 Rust `WikiTag`）。 */
-export interface WikiTag {
+export interface WikiEntryDetail {
   id: string;
+  wiki_type: WikiType;
   title: string;
+  file_path: string;
+  /** 仅 summaries：源文献 refID（`ref-xxx`）。 */
+  source?: string;
+  /** 出向关联（谓词 + wikiID + 标题）。 */
+  relations: RelationInfo[];
+  /** 正文（已剥离溯源标签）。 */
+  content?: string;
+  created: string;
+  updated: string;
 }
-
-/** 实际使用的检索方式（对应 Rust `RetrievalMethodUsed`，snake_case 序列化）。 */
-export type RetrievalMethodUsed =
-  | 'direct_id_lookup'
-  | 'keyword'
-  | 'semantic'
-  | 'hybrid';
 
 /** 单条检索结果（对应 Rust `QueryMatch`）。 */
 export interface QueryMatch {
@@ -106,7 +113,7 @@ export interface QueryMatch {
   wiki_type: WikiType;
   title: string;
   file_path: string;
-  /** 匹配度得分（ID 直查时固定 1.0）。 */
+  /** 匹配度得分。 */
   score: number;
   /** 正文（仅 include_content=true 时返回）。 */
   content?: string;
@@ -115,7 +122,6 @@ export interface QueryMatch {
 /** 检索结果（对应 Rust `QueryResult`）。 */
 export interface QueryResult {
   success: boolean;
-  retrieval_method_used: RetrievalMethodUsed;
   results: QueryMatch[];
 }
 
@@ -125,21 +131,11 @@ export interface RecentEntry {
   title: string;
 }
 
-/** 元信息数据体（对应 Rust `MetaData`，按 query_type 返回不同字段）。 */
+/** 元信息数据体（对应 Rust `MetaData`；新库无 tags 概念）。 */
 export interface MetaData {
   total_entries: number;
-  total_tags: number;
-  embedding_enabled: boolean;
-  /** query_type='tags' 时返回。 */
-  tags?: WikiTag[];
   /** query_type='recent' 时返回。 */
   recent_entries?: RecentEntry[];
-}
-
-/** 元信息查询结果（对应 Rust `MetaResult`）。 */
-export interface MetaResult {
-  success: boolean;
-  data: MetaData;
 }
 
 // ---------------------------------------------------------------------------

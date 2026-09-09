@@ -12,7 +12,10 @@
 //! |------|------|------|
 //! | `agent_id` | string (enum) | 目标子智能体 ID |
 //! | `task` | string | 派发给子智能体的任务描述 |
-//! | `wait` | boolean (默认 true) | 是否同步等待子智能体完成 |
+//! | `reply_mode` | string (默认 "full") | 回传形式：full=回传全文；artifact_ref=仅回传成果板引用 |
+//!
+//! 注意：`wait` 是 referee 引擎保留参数（等待/异步派发分流，执行前被剥离，
+//! 见 referee-ai `tool::executor` 保留字约定），业务参数不得占用该名字。
 //!
 //! ## 执行流程（referee 内核协议）
 //!
@@ -25,7 +28,7 @@
 //! 4. 经 [`Kernel::invoke`](referee_core::Kernel::invoke) 同步 RPC 到目标
 //!    子代理运行时（[`super::federation`] 注册的扩展），论文写作场景
 //!    超时放宽到 10 分钟（见 [`super::timeouts`] 分层）
-//! 5. 结果按 referee 对等工具语义落库：异步派发或超过阈值的大结果写入
+//! 5. 结果落库：显式 `artifact_ref` 模式或超过阈值的大结果写入
 //!    带 ACL 的工件板（按调用者分板），仅回传 `artifact_id`；
 //!    Motis 可经 `list_my_board` / `read_artifact` 取回原文
 //!
@@ -62,6 +65,11 @@ const DESCRIPTION: &str = "将任务派发给子智能体执行。Motis（总督
 
 /// 大结果落库阈值（字节）——与 referee 对等工具一致。
 const LARGE_RESULT_THRESHOLD: usize = 4096;
+
+/// 回传形式：全文（默认）。
+const REPLY_MODE_FULL: &str = "full";
+/// 回传形式：仅成果板引用（artifact_id），不回传正文。
+const REPLY_MODE_ARTIFACT_REF: &str = "artifact_ref";
 
 /// 任务预览长度（登记表与日志展示用）。
 const TASK_PREVIEW_CHARS: usize = 80;
@@ -114,10 +122,11 @@ impl DelegateAgentTool {
                     "type": "string",
                     "description": "派发给子智能体的任务描述（应清晰、完整，包含必要的上下文与约束）"
                 },
-                "wait": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "结果返回形式（默认 true）：true 回传全文；false 回传成果板引用（artifact_id），不回传正文"
+                "reply_mode": {
+                    "type": "string",
+                    "enum": [REPLY_MODE_FULL, REPLY_MODE_ARTIFACT_REF],
+                    "default": REPLY_MODE_FULL,
+                    "description": "结果返回形式（默认 full）：full 回传全文；artifact_ref 仅回传成果板引用（artifact_id），不回传正文"
                 }
             },
             "required": ["agent_id", "task"]
@@ -175,7 +184,8 @@ impl Tool for DelegateAgentTool {
         ToolCategory::Local
     }
 
-    /// 委派是同步等待型工具（默认 wait=true）。
+    /// 委派默认同步等待（引擎保留参数 `wait` 的默认值，与业务参数
+    /// `reply_mode` 无关——回传形式由 `reply_mode` 决定）。
     fn default_wait(&self) -> bool {
         true
     }
@@ -216,12 +226,17 @@ impl Tool for DelegateAgentTool {
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| ToolError::InvalidArguments("缺少 task 参数".into()))?;
 
-        let wait = args.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
+        // 回传形式是独立业务参数（引擎保留参数 `wait` 执行前已被剥离，
+        // 不得借道 ctx.wait 承载业务语义）
+        let reply_mode = args
+            .get("reply_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or(REPLY_MODE_FULL);
 
         tracing::info!(
             agent_id = %agent_id,
             task_preview = %task.chars().take(TASK_PREVIEW_CHARS).collect::<String>(),
-            wait,
+            reply_mode,
             "Motis 委派任务给子智能体"
         );
 
@@ -324,10 +339,12 @@ impl Tool for DelegateAgentTool {
                     None,
                 );
 
-                // 6. 成果落库：异步派发或超阈值大结果写入调用者（父会话）的工件板，
-                //    仅回传 artifact_id（ACL 防止其他会话读取）。
+                // 6. 成果落库：显式 artifact_ref 模式或超阈值大结果写入调用者
+                //    （父会话）的工件板，仅回传 artifact_id（ACL 防止其他会话读取）。
                 //    最终结果由外层观测装饰器统一以 motis:tool-result 回填前端
-                if !ctx.wait || content.len() > LARGE_RESULT_THRESHOLD {
+                if reply_mode == REPLY_MODE_ARTIFACT_REF
+                    || content.len() > LARGE_RESULT_THRESHOLD
+                {
                     let payload = self.store_artifact(&ctx, session_id, agent_id.as_str(), task, &content).await?;
                     return Ok(ToolOutput::from_json(&payload));
                 }
@@ -453,15 +470,26 @@ mod tests {
     }
 
     /// 构建零子代理的联邦：启用清单过滤后为空，不触及任何 LLM provider。
+    /// 成果板注入临时目录实例（不触碰真实用户数据目录）。
     async fn empty_federation() -> Arc<Federation> {
+        use crate::motis_chat::artifact_store::ProjectArtifactStore;
+        use referee_agent::artifact::StoreConfig;
+
         let dir = std::env::temp_dir().join(format!("fluen_delegate_{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(
+            ProjectArtifactStore::open_with_base(dir.clone(), "test-project", StoreConfig::default())
+                .unwrap(),
+        );
         Federation::build(
             &LlmConfig::default(),
             &dir.to_string_lossy(),
             Arc::new(NoopApprover),
+            crate::agent_tools::project::read_state::ReadTracker::new_arc(),
             &["__none__".to_string()],
             0,
             std::sync::Arc::new(DelegationTracker::new()),
+            None,
+            store,
             None,
         )
         .await
@@ -534,5 +562,19 @@ mod tests {
         let enum_vals = schema["properties"]["agent_id"]["enum"].as_array().unwrap();
         assert_eq!(enum_vals.len(), 1);
         assert_eq!(enum_vals[0], "data_analyst");
+    }
+
+    #[test]
+    fn schema_exposes_reply_mode_and_not_reserved_wait() {
+        // `wait` 是引擎保留参数，业务 schema 不得声明同名参数（referee
+        // executor 在执行前剥离它——声明了也会被静默吞掉）
+        let fed = tokio::runtime::Runtime::new().unwrap().block_on(empty_federation());
+        let tool = DelegateAgentTool::new(Vec::new(), noop_reporter(), fed);
+        let schema = tool.input_schema();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(!props.contains_key("wait"), "wait 是引擎保留参数，禁止作为业务参数");
+        let modes = props["reply_mode"]["enum"].as_array().unwrap();
+        assert_eq!(modes[0], REPLY_MODE_FULL);
+        assert_eq!(modes[1], REPLY_MODE_ARTIFACT_REF);
     }
 }

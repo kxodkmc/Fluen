@@ -1,16 +1,18 @@
 //! 文献知识库搜索工具——学术助手检索文献知识库的入口。
 //!
-//! 基于 `fluen-knowledge` 的混合检索能力：
+//! 基于 `fluen-kb` 的混合检索能力：
 //! - **关键词**：SQLite FTS5（trigram 分词，中文子串匹配）+ BM25 排序
 //! - **语义**：查询向量（EmbeddingRouter）与条目向量做余弦相似度
 //! - **混合**：动态加权融合（关键词 0.7~0.9 + 向量 0.3~0.1），embedding 不可用时自动降级关键词
 //!
 //! 工具固定使用 **Hybrid 混合检索**，**最多返回 top4** 条最相关条目
 //! （文献综述页 / 概念页 / 实体页），每条含 id、标题、类型与相关性评分。
+//!
+//! M1 过渡实现：内部直调 fluen-kb（M2 将切换为 MCP `knowledge_query`）。
 
 use async_trait::async_trait;
-use fluen_knowledge::async_kb::{AsyncKnowledgeBase, AsyncQueryParams};
-use fluen_knowledge::types::{RetrievalMethod, WikiType};
+use crate::knowledge_mcp_bridge::KbMcpBridge;
+use fluen_kb::WikiType;
 use referee_ai::tool::{Tool, ToolContext, ToolError, ToolOutput};
 use serde_json::{json, Value};
 
@@ -26,15 +28,19 @@ const DESCRIPTION: &str = "搜索文献知识库：默认混合检索（关键�
 const DEFAULT_TOP_K: usize = 4;
 
 /// 文献知识库搜索工具。
+///
+/// 内部经进程内 MCP 桥接调用 `knowledge_query`（M2：Agent 面统一走 MCP），
+/// 首次执行时懒建立连接（`open_kb` 为同步装配路径，无法直接 async 连接）。
 pub struct LiteratureSearchTool {
     /// 输入参数 JSON Schema。
     parameters: Value,
-    kb: AsyncKnowledgeBase,
+    kb: fluen_kb::handle::Kb,
+    bridge: tokio::sync::OnceCell<KbMcpBridge>,
 }
 
 impl LiteratureSearchTool {
     /// 构造工具。
-    pub fn new(kb: AsyncKnowledgeBase) -> Self {
+    pub fn new(kb: fluen_kb::handle::Kb) -> Self {
         let parameters = json!({
             "type": "object",
             "properties": {
@@ -56,7 +62,19 @@ impl LiteratureSearchTool {
             "required": ["query"]
         });
 
-        Self { parameters, kb }
+        Self {
+            parameters,
+            kb,
+            bridge: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// 懒建立 MCP 桥接（首次执行时连接，后续复用）。
+    async fn bridge(&self) -> Result<&KbMcpBridge, ToolError> {
+        self.bridge
+            .get_or_try_init(|| KbMcpBridge::connect(self.kb.clone()))
+            .await
+            .map_err(|e| ToolError::Execution(format!("知识库 MCP 桥接失败: {e}")))
     }
 }
 
@@ -64,30 +82,25 @@ impl LiteratureSearchTool {
 ///
 /// - `<project>/references/wiki/index.db` 不存在时返回 `None`（知识库尚未构建，
 ///   属正常状态，静默跳过）；
-/// - 打开失败（索引损坏等）仅告警并返回 `None`，不阻断助手启动；
+/// - 打开失败（索引损坏、旧版 schema 未迁移等）仅告警并返回 `None`，不阻断助手启动；
 /// - 成功时注入 embedding router 启用语义检索（未配置 embedding 时由
-///   fluen-knowledge 自动降级为关键词检索）。
-pub fn open_kb(project_path: &str, llm: &LlmConfig) -> Option<AsyncKnowledgeBase> {
+///   fluen-kb 自动降级为关键词检索）。
+pub fn open_kb(project_path: &str, llm: &LlmConfig) -> Option<fluen_kb::handle::Kb> {
     let references_dir = std::path::PathBuf::from(project_path).join("references");
     if !references_dir.join("wiki").join("index.db").is_file() {
         return None;
     }
 
-    let kb = match AsyncKnowledgeBase::open(&references_dir) {
-        Ok(kb) => kb,
+    match crate::knowledge_builder::kb_adapter::open_kb(&references_dir, llm) {
+        Ok(kb) => Some(kb),
         Err(e) => {
             tracing::warn!(
                 references_dir = %references_dir.display(),
                 "文献知识库打开失败，跳过 literature_search 工具: {e}"
             );
-            return None;
+            None
         }
-    };
-
-    Some(match crate::builtin_providers::embedding::build_embedding_router(llm) {
-        Some(router) => kb.with_embedding_provider(std::sync::Arc::new(router)),
-        None => kb,
-    })
+    }
 }
 
 #[async_trait]
@@ -144,32 +157,45 @@ impl Tool for LiteratureSearchTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // 4. 固定默认：Hybrid 混合检索 + 最多 top4
-        let params = AsyncQueryParams {
-            query: query.to_string(),
-            wiki_type,
-            method: RetrievalMethod::Hybrid,
-            top_k: DEFAULT_TOP_K,
-            include_content,
-        };
+        // 4. 固定默认：Hybrid 混合检索 + 最多 top4（经 MCP knowledge_query 转发）
+        let mut mcp_args = json!({
+            "query": query,
+            "method": "hybrid",
+            "top_k": DEFAULT_TOP_K,
+            "include_content": include_content,
+        });
+        if let Some(wt) = wiki_type {
+            mcp_args["wiki_type"] = json!(wt.as_str());
+        }
 
-        let result = self
-            .kb
-            .query(params)
+        let bridge = self.bridge().await?;
+        let hits = bridge
+            .call_tool("knowledge_query", mcp_args)
             .await
-            .map_err(|e| ToolError::Execution(format!("文献检索失败: {}", e)))?;
+            .map_err(ToolError::Execution)?;
+
+        // hits 为 MCP hit_json 数组；content 剥离溯源标签后返回
+        let Some(results) = hits.as_array() else {
+            return Err(ToolError::Execution("knowledge_query 返回格式异常".into()));
+        };
 
         Ok(ToolOutput::from_json(&json!({
             "success": true,
-            "method": result.retrieval_method_used.as_str(),
-            "count": result.results.len(),
-            "results": result.results.iter().map(|m| json!({
-                "id": m.wiki_id,
-                "type": m.wiki_type,
-                "title": m.title,
-                "score": (m.score * 1000.0).round() / 1000.0,
-                "content": m.content,
-            })).collect::<Vec<_>>()
+            "method": "hybrid",
+            "count": results.len(),
+            "results": results.iter().map(|h| {
+                let content = h.get("content").and_then(Value::as_str).map(|c| {
+                    let (plain, _) = fluen_kb::syntax::strip(c);
+                    plain
+                });
+                json!({
+                    "id": h.get("id").cloned().unwrap_or(Value::Null),
+                    "type": h.get("type").cloned().unwrap_or(Value::Null),
+                    "title": h.get("title").cloned().unwrap_or(Value::Null),
+                    "score": h.get("score").cloned().unwrap_or(Value::Null),
+                    "content": content,
+                })
+            }).collect::<Vec<_>>()
         })))
     }
 }
@@ -181,10 +207,11 @@ impl Tool for LiteratureSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fluen_knowledge::wiki::CreateEntryParams;
+    use fluen_kb::ids::SourceId;
     use std::fs;
+    use std::path::PathBuf;
 
-    fn temp_kb_dir() -> std::path::PathBuf {
+    fn temp_kb_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "fluen_literature_test_{}_{:?}_{}",
             std::process::id(),
@@ -196,6 +223,10 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn test_kb(dir: &PathBuf) -> fluen_kb::handle::Kb {
+        fluen_kb::KbBuilder::new(dir).open().unwrap()
     }
 
     fn ctx() -> ToolContext {
@@ -218,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn missing_query_rejected() {
         let dir = temp_kb_dir();
-        let kb = AsyncKnowledgeBase::init(&dir).unwrap();
+        let kb = test_kb(&dir);
         let tool = LiteratureSearchTool::new(kb);
 
         let err = tool
@@ -233,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_wiki_type_rejected() {
         let dir = temp_kb_dir();
-        let kb = AsyncKnowledgeBase::init(&dir).unwrap();
+        let kb = test_kb(&dir);
         let tool = LiteratureSearchTool::new(kb);
 
         let err = tool
@@ -248,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn empty_kb_returns_empty_results() {
         let dir = temp_kb_dir();
-        let kb = AsyncKnowledgeBase::init(&dir).unwrap();
+        let kb = test_kb(&dir);
         let tool = LiteratureSearchTool::new(kb);
 
         let result = output_json(tool.execute(ctx(), json!({ "query": "机器学习" })).await.unwrap());
@@ -262,23 +293,15 @@ mod tests {
     #[tokio::test]
     async fn search_returns_at_most_top4() {
         let dir = temp_kb_dir();
-        let kb = AsyncKnowledgeBase::init(&dir).unwrap();
+        let kb = test_kb(&dir);
 
         // 插入 6 个与"深度学习"相关的概念条目
         for i in 0..6 {
             let title = format!("深度学习概念{}", i);
             let content = format!("深度学习是机器学习的一个分支，概念 {}。", i);
-            kb.create_entry(CreateEntryParams {
-                wiki_type: WikiType::Concept,
-                title,
-                content,
-                source: None,
-                authors: vec![],
-                tags: vec!["deep-learning".into()],
-                relations: vec![],
-            })
-            .await
-            .unwrap();
+            kb.ops()
+                .create(WikiType::Concept, &title, &content, &[], None, &[])
+                .unwrap();
         }
 
         let tool = LiteratureSearchTool::new(kb);
@@ -302,19 +325,18 @@ mod tests {
     #[tokio::test]
     async fn search_with_include_content() {
         let dir = temp_kb_dir();
-        let kb = AsyncKnowledgeBase::init(&dir).unwrap();
+        let kb = test_kb(&dir);
 
-        kb.create_entry(CreateEntryParams {
-            wiki_type: WikiType::Summary,
-            title: "Transformer 综述".into(),
-            content: "Transformer 架构在自然语言处理中广泛应用。".into(),
-            source: Some("raw/ref-transformer.pdf".into()),
-            authors: vec![],
-            tags: vec![],
-            relations: vec![],
-        })
-        .await
-        .unwrap();
+        kb.ops()
+            .create(
+                WikiType::Summary,
+                "Transformer 综述",
+                "Transformer 架构在自然语言处理中广泛应用。",
+                &[],
+                Some(&SourceId::new("ref-0123456789abcdef").unwrap()),
+                &[],
+            )
+            .unwrap();
 
         let tool = LiteratureSearchTool::new(kb);
         let result = output_json(
@@ -337,7 +359,7 @@ mod tests {
 
         // init 后 wiki/index.db 落位，可正常打开
         let references = dir.join("references");
-        AsyncKnowledgeBase::init(&references).unwrap();
+        fluen_kb::KbBuilder::new(&references).open().unwrap();
         assert!(open_kb(dir.to_str().unwrap(), &llm).is_some());
 
         let _ = fs::remove_dir_all(&dir);

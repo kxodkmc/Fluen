@@ -52,9 +52,12 @@ pub mod error;
 pub mod error_classify;
 pub mod events;
 pub mod index_snapshot;
+pub mod kb_adapter;
 pub mod llm_helper;
+pub mod migration;
 pub mod pipeline;
 pub mod prompts;
+pub mod reporter;
 pub mod session;
 pub mod types;
 

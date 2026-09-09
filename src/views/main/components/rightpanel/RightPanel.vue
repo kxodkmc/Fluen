@@ -10,6 +10,7 @@
  */
 import type { RightPanelId } from '../../types';
 import { MotisPanel } from '../motis';
+import { KbAgentPanel } from '../kbagent';
 import AIPanel from '../AIPanel.vue';
 
 defineProps<{
@@ -34,6 +35,11 @@ defineEmits<{
       <!-- 学术助手面板（AIPanel 内部自管理状态） -->
       <div v-show="activeRightPanel === 'assistant'" class="right-panel__pane">
         <AIPanel />
+      </div>
+
+      <!-- 知识库构建智能体面板（纯可视化，构建由文献右键触发） -->
+      <div v-show="activeRightPanel === 'kbagent'" class="right-panel__pane">
+        <KbAgentPanel @close="$emit('close')" />
       </div>
     </div>
   </div>

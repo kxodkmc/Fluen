@@ -24,6 +24,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useProject } from '../../../composables/useProject';
 import type { ChatMessage } from '../types';
+import type { ApprovalRequestPayload, PendingApproval } from './approvalTypes';
 
 /** 传递给后端的历史消息结构。 */
 interface HistoryEntry {
@@ -43,11 +44,6 @@ interface ToolCallPayload {
   name: string;
   input: unknown;
 }
-interface ApprovalRequestPayload {
-  id: string;
-  tool_name: string;
-  input: unknown;
-}
 interface FinishPayload {
   result: unknown;
   total_tokens: number;
@@ -56,13 +52,8 @@ interface ErrorPayload {
   message: string;
 }
 
-/** 待审批的工具写操作（前端确认弹窗条目）。 */
-export interface PendingApproval {
-  id: string;
-  toolName: string;
-  /** 输入参数（含 path / action / content 等）。 */
-  input: Record<string, unknown>;
-}
+/** 待审批条目类型（共享定义，re-export 保持外部引用兼容）。 */
+export type { PendingApproval } from './approvalTypes';
 
 function isTauriEnvironment(): boolean {
   return '__TAURI_INTERNALS__' in window;
@@ -153,6 +144,7 @@ export function useAIAssistant() {
       id: payload.id,
       toolName: payload.tool_name,
       input: (payload.input ?? {}) as Record<string, unknown>,
+      diff: payload.diff,
     });
   }
 

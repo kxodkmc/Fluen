@@ -2,7 +2,7 @@
 members = [
     "crates/boardgame",
     "crates/fluen-markup",
-    "crates/fluen-knowledge",
+    "crates/fluen-kb",
     "crates/socstat",
     "crates/socstat/crates/socstat-mcp",
     "crates/referee/referee-core",

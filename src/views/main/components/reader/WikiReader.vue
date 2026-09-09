@@ -1,4 +1,4 @@
-<template>
+﻿﻿﻿﻿<template>
   <div class="wiki-reader">
     <!-- 加载中 -->
     <div v-if="loading" class="wiki-reader__status">
@@ -37,15 +37,6 @@
         </button>
       </div>
 
-      <!-- 标签行 -->
-      <div v-if="detail.tag_titles?.length" class="wiki-reader__tags">
-        <span
-          v-for="tag in detail.tag_titles"
-          :key="tag"
-          class="wiki-reader__tag"
-        >{{ tag }}</span>
-      </div>
-
       <!-- ── 主体：正文 + 关联侧边栏 ───────────────────────────────── -->
       <div class="wiki-reader__body">
         <!-- 正文（iframe 隔离渲染） -->
@@ -79,20 +70,20 @@
                 </svg>
               </button>
             </div>
-            <ul v-if="detail.relation_titles?.length" class="wiki-reader__relations-list">
+            <ul v-if="detail.relations.length" class="wiki-reader__relations-list">
               <li
-                v-for="(title, idx) in detail.relation_titles"
-                :key="detail.relations?.[idx] ?? title"
+                v-for="rel in detail.relations"
+                :key="rel.predicate + ':' + rel.id"
                 class="wiki-reader__relation"
-                :title="title"
-                @click="openRelation(detail.relations?.[idx] ?? '', title)"
+                :title="relationLabel(rel)"
+                @click="openRelation(rel)"
               >
                 <i
-                  v-if="relationTypeOf(detail.relations?.[idx] ?? '')"
+                  v-if="relationTypeOf(rel.id)"
                   class="wiki-reader__relation-dot"
-                  :class="'wiki-reader__relation-dot--' + relationTypeOf(detail.relations?.[idx] ?? '')"
+                  :class="'wiki-reader__relation-dot--' + relationTypeOf(rel.id)"
                 ></i>
-                <span class="wiki-reader__relation-text">{{ title }}</span>
+                <span class="wiki-reader__relation-text">{{ relationLabel(rel) }}</span>
                 <svg
                   class="wiki-reader__relation-icon"
                   viewBox="0 0 24 24"
@@ -184,7 +175,7 @@ import { useWikiExplorer } from '../../../../composables/useWikiExplorer';
 import { useProject } from '../../../../composables/useProject';
 import { useI18n } from '../../../../i18n';
 import { MAIN_LAYOUT_KEY } from '../../composables/useMainLayout';
-import type { WikiEntryDetail, WikiType } from '../../../../types/knowledgeBase';
+import type { RelationInfo, WikiEntryDetail, WikiType } from '../../../../types/knowledgeBase';
 
 const props = defineProps<{
   /** 知识库条目 ID。 */
@@ -223,8 +214,8 @@ const typeById = computed(() => {
 /** 关联条目按类型计数（类型未知的 ID 忽略）。 */
 const relationTypeCounts = computed(() => {
   const counts = new Map<WikiType, number>();
-  for (const id of detail.value?.relations ?? []) {
-    const type = typeById.value.get(id);
+  for (const rel of detail.value?.relations ?? []) {
+    const type = typeById.value.get(rel.id);
     if (!type) continue;
     counts.set(type, (counts.get(type) ?? 0) + 1);
   }
@@ -240,7 +231,12 @@ const relationStats = computed(() => {
 });
 
 /** 关联条目总数（含类型未知者）。 */
-const relationTotal = computed(() => detail.value?.relations?.length ?? 0);
+const relationTotal = computed(() => detail.value?.relations.length ?? 0);
+
+/** 关联条目展示文本：`related` 谓词省略，其余显示 `谓词 :: 标题`。 */
+function relationLabel(rel: RelationInfo): string {
+  return rel.predicate === 'related' ? rel.title : `${rel.predicate} :: ${rel.title}`;
+}
 
 /** 关联跳转时点击的条目类型（未加载列表时可能为 undefined）。 */
 function relationTypeOf(wikiId: string): WikiType | undefined {
@@ -333,13 +329,12 @@ function escapeHtml(s: string): string {
 }
 
 /** 打开关联条目（在新 tab 或激活已存在 tab）。 */
-function openRelation(wikiId: string, title: string): void {
-  if (!wikiId) return;
+function openRelation(rel: RelationInfo): void {
   layout?.openTab({
-    id: `wiki-${wikiId}`,
-    title,
+    id: `wiki-${rel.id}`,
+    title: rel.title,
     type: 'wiki',
-    wikiId,
+    wikiId: rel.id,
     icon: ICON_WIKI,
   });
 }
@@ -370,7 +365,7 @@ watch(
 
 // 条目列表未加载（直接打开 wiki tab 时）补拉一次，供关联类型统计使用
 watch(detail, (d) => {
-  if (d?.relations?.length && entries.value.length === 0 && projectPath.value) {
+  if (d?.relations.length && entries.value.length === 0 && projectPath.value) {
     void loadEntries(projectPath.value);
   }
 });
@@ -466,26 +461,6 @@ onBeforeUnmount(() => {
 .wiki-reader__close:hover {
   background: var(--fluen-hover);
   color: var(--fluen-ink);
-}
-
-/* ── 标签行 ─────────────────────────────────────────────────────────── */
-.wiki-reader__tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--fluen-hairline);
-  background: var(--fluen-surface);
-  flex-shrink: 0;
-}
-
-.wiki-reader__tag {
-  font-family: var(--fluen-font-sans);
-  font-size: 11px;
-  color: var(--fluen-steel);
-  background: var(--fluen-hover);
-  border-radius: 4px;
-  padding: 2px 8px;
 }
 
 /* ── 主体 ───────────────────────────────────────────────────────────── */

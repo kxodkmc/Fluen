@@ -26,6 +26,7 @@
 //! | SubAgents | 可用子智能体清单 | 动态注入 |
 
 use crate::mascot::model::{MascotConfig, MascotData};
+use crate::motis_chat::artifact_store::BoardEntry;
 
 // ===========================================================================
 // 人格风格文本
@@ -120,12 +121,135 @@ const MOTIS_TOOLS_BODY: &str = "工具使用规则：\n- 调用前评估风险�
 
 /// SubAgents：可用子智能体清单（动态注入，根据 `enabled_agents` 过滤）。
 fn sub_agents_section(agents_desc: &str) -> String {
-    format!("## 可用子智能体\n\n你可以通过 `delegate_agent` 工具调用以下子智能体执行任务：\n\n{agents_desc}\n\n**使用建议**：\n- 撰写论文正文 → `essay_writing`\n- 引导论文思辨讨论 → `essay_critique`\n- 审核论文 → `essay_review`（当前开发中）\n- 检索文献知识 → `knowledge_builder`\n- 统计分析数据 → `data_analyst`\n\n委派时请在 `task` 参数中提供清晰、完整的任务描述，包含必要的上下文、约束和期望输出格式。")
+    format!("## 可用子智能体\n\n你可以通过 `delegate_agent` 工具调用以下子智能体执行任务：\n\n{agents_desc}\n\n**使用建议**：\n- 撰写、编辑、修改论文正文（含局部小改与章节调整）→ `essay_writing`\n- 引导论文思辨讨论 → `essay_critique`\n- 审核论文 → `essay_review`（当前开发中）\n- 检索文献知识 → `knowledge_builder`\n- 统计分析数据 → `data_analyst`\n\n**分工铁律**：你自身不生产任何内容——撰写、编辑、修改论文正文只能委派 `essay_writing`（正文唯一写入通道是它的 `manuscript` 工具）；其他子智能体与你都不具备、也不得尝试编辑论文正文。\n\n委派时请在 `task` 参数中提供清晰、完整的任务描述，包含必要的上下文、约束和期望输出格式。")
+}
+
+/// Board：项目成果板清单段落（动态注入）。
+///
+/// 委派以 `artifact_ref` 模式或大结果落库时仅回传 artifact_id，而对话
+/// 历史每轮只回放纯文本——上一轮工具结果里的 ID 到下一轮必然丢失。
+/// 此处把成果板快照（真实 artifact_id + 标题）直接注入提示词，使
+/// Motis 跨轮都能凭 `read_artifact` 取回成果正文。
+///
+/// 空板返回空串（不注入段落，节省上下文）。
+pub fn board_section(entries: &[BoardEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::with_capacity(entries.len());
+    for (idx, e) in entries.iter().enumerate() {
+        let time = chrono::TimeZone::timestamp_opt(&chrono::Local, e.updated_at as i64, 0)
+            .single()
+            .map(|t| t.format("%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        lines.push(format!(
+            "{}. `{}` 「{}」（{}，{time} 产出）",
+            idx + 1,
+            e.producer_label,
+            e.title,
+            e.artifact_id
+        ));
+    }
+    format!(
+        "## 成果板\n\n子智能体的委派结果会落入项目成果板，**跨对话轮次持久保存**。查看某条成果正文时，调用 `read_artifact` 并传入对应 artifact_id；`list_my_board` 可随时列出全部条目（不限于本会话产出）。当前成果板（按产出顺序）：\n\n{}\n\n注意：artifact_id 是随机 UUID，必须原样引用，不得自行编造或改写。",
+        lines.join("\n")
+    )
 }
 
 // ===========================================================================
 // 组装
 // ===========================================================================
+
+/// 提示词段落类别——供上下文用量统计（[`super::context_usage`]）按类归集。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptSectionKind {
+    /// 基础系统提示词（身份 / 风格 / 约束 / 任务 / 行动 / 环境 / 表达 / 对话）。
+    Base,
+    /// 子智能体清单段（动态注入）。
+    SubAgents,
+    /// 项目成果板段（动态注入）。
+    Board,
+}
+
+/// 带类别标签的提示词段落。
+#[derive(Debug, Clone)]
+pub struct PromptSection {
+    /// 段落类别。
+    pub kind: PromptSectionKind,
+    /// 段落文本。
+    pub text: String,
+}
+
+/// 组装 Motis 系统提示词的分段列表（带类别标签）。
+///
+/// 与 [`build_system_prompt`] 同一事实来源：后者即对本函数结果按
+/// `\n\n` 拼接。分段供上下文用量报告归类估算，拼接顺序与内容完全一致。
+#[allow(clippy::too_many_arguments)]
+pub fn build_system_prompt_parts(
+    config: &MascotConfig,
+    data: &MascotData,
+    agents_desc: &str,
+    board_section: &str,
+    function_calling_available: bool,
+) -> Vec<PromptSection> {
+    let expression = if config.professional_expression {
+        EXPRESSION_PROFESSIONAL
+    } else {
+        EXPRESSION_PLAYFUL
+    };
+
+    let base = |text: String| PromptSection {
+        kind: PromptSectionKind::Base,
+        text,
+    };
+
+    let mut parts = vec![
+        // 身份：工具可用时为总督角色，否则为直接答疑助手
+        base(if function_calling_available {
+            intro(&config.name, mood_to_str(data.mood), data.affinity)
+        } else {
+            intro_direct(&config.name, mood_to_str(data.mood), data.affinity)
+        }),
+        base(resolve_personality_style(&config.personality).to_string()),
+        base(MOTIS_SYSTEM_BODY.to_string()),
+    ];
+
+    // 工具 / 委派 / 子智能体相关文案仅在能力可用时注入
+    if function_calling_available {
+        parts.push(base(MOTIS_TASKS_BODY.to_string()));
+        parts.push(base(MOTIS_ACTIONS_BODY.to_string()));
+        parts.push(base(MOTIS_TOOLS_BODY.to_string()));
+        if !agents_desc.trim().is_empty() {
+            parts.push(PromptSection {
+                kind: PromptSectionKind::SubAgents,
+                text: sub_agents_section(agents_desc),
+            });
+        }
+        if !board_section.trim().is_empty() {
+            parts.push(PromptSection {
+                kind: PromptSectionKind::Board,
+                text: board_section.to_string(),
+            });
+        }
+    } else {
+        parts.push(base(MOTIS_DIRECT_TASKS_BODY.to_string()));
+        parts.push(base(MOTIS_DIRECT_ACTIONS_BODY.to_string()));
+    }
+
+    parts.push(base(environment(&detect_os(), &today())));
+    parts.push(base(expression.to_string()));
+    parts.push(base(MOTIS_DIALOG_BODY.to_string()));
+    parts
+}
+
+/// 将分段列表拼接为最终系统提示词（分段间以空行分隔）。
+pub fn join_sections(sections: &[PromptSection]) -> String {
+    sections
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
 
 /// 组装 Motis 系统提示词。
 ///
@@ -134,48 +258,31 @@ fn sub_agents_section(agents_desc: &str) -> String {
 /// - `false`（工具与子智能体不可用）：切换为直接答疑助手，**不得**提及任何工具与委派，
 ///   既避免误导模型，也节省上下文
 ///
-/// 动态变量（心情 / 好感度 / 系统 / 日期 / 子智能体清单）在组装时直接插值——
-/// 每轮对话调用一次，状态永远最新。
+/// 动态变量（心情 / 好感度 / 系统 / 日期 / 子智能体清单 / 成果板清单）在组装时
+/// 直接插值——每轮对话调用一次，状态永远最新。
+///
+/// `board_section` 为预渲染的成果板清单段落（[`board_section`] 产出，
+/// 空串表示空板不注入）。
+///
+/// 生产路径已改用 [`build_system_prompt_parts`] 分段组装（供上下文容量
+/// 分类统计）；本函数保留为「同一事实来源」的拼接锚点——单元测试
+/// `parts_join_equals_full_prompt` 依赖它保证 parts 拼接结果与完整
+/// 提示词逐字节一致。
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn build_system_prompt(
     config: &MascotConfig,
     data: &MascotData,
     agents_desc: &str,
+    board_section: &str,
     function_calling_available: bool,
 ) -> String {
-    let expression = if config.professional_expression {
-        EXPRESSION_PROFESSIONAL
-    } else {
-        EXPRESSION_PLAYFUL
-    };
-
-    let mut parts = vec![
-        // 身份：工具可用时为总督角色，否则为直接答疑助手
-        if function_calling_available {
-            intro(&config.name, mood_to_str(data.mood), data.affinity)
-        } else {
-            intro_direct(&config.name, mood_to_str(data.mood), data.affinity)
-        },
-        resolve_personality_style(&config.personality).to_string(),
-        MOTIS_SYSTEM_BODY.to_string(),
-    ];
-
-    // 工具 / 委派 / 子智能体相关文案仅在能力可用时注入
-    if function_calling_available {
-        parts.push(MOTIS_TASKS_BODY.to_string());
-        parts.push(MOTIS_ACTIONS_BODY.to_string());
-        parts.push(MOTIS_TOOLS_BODY.to_string());
-        if !agents_desc.trim().is_empty() {
-            parts.push(sub_agents_section(agents_desc));
-        }
-    } else {
-        parts.push(MOTIS_DIRECT_TASKS_BODY.to_string());
-        parts.push(MOTIS_DIRECT_ACTIONS_BODY.to_string());
-    }
-
-    parts.push(environment(&detect_os(), &today()));
-    parts.push(expression.to_string());
-    parts.push(MOTIS_DIALOG_BODY.to_string());
-    parts.join("\n\n")
+    join_sections(&build_system_prompt_parts(
+        config,
+        data,
+        agents_desc,
+        board_section,
+        function_calling_available,
+    ))
 }
 
 /// 检测当前操作系统名称。
@@ -225,7 +332,7 @@ mod tests {
     #[test]
     fn prompt_contains_all_sections() {
         let agents_desc = "- `essay_writing`: 论文撰写助手\n- `essay_review`: 论文审核助手（开发中）\n- `essay_critique`: 论文思辨助手\n- `knowledge_builder`: 知识库助手\n- `data_analyst`: 数据分析助手";
-        let prompt = build_system_prompt(&sample_config(), &sample_data(), agents_desc, true);
+        let prompt = build_system_prompt(&sample_config(), &sample_data(), agents_desc, "", true);
         // 每段的关键锚点
         assert!(prompt.contains("你是 Motis"));
         assert!(prompt.contains("总督角色"));
@@ -249,7 +356,7 @@ mod tests {
     #[test]
     fn direct_mode_omits_tool_and_agent_mentions() {
         // 工具不可用时：撤掉总督 / 委派 / 工具 / 子智能体文案，避免误导模型同时也省上下文
-        let prompt = build_system_prompt(&sample_config(), &sample_data(), "", false);
+        let prompt = build_system_prompt(&sample_config(), &sample_data(), "", "", false);
         assert!(prompt.contains("你是 Motis"));
         assert!(!prompt.contains("总督角色"));
         assert!(!prompt.contains("delegate_agent"));
@@ -267,10 +374,42 @@ mod tests {
     #[test]
     fn agentic_mode_skips_empty_agents_description() {
         // 工具可用但委派清单为空时，不再注入``子智能体清单`段落
-        let prompt = build_system_prompt(&sample_config(), &sample_data(), "", true);
+        let prompt = build_system_prompt(&sample_config(), &sample_data(), "", "", true);
         assert!(prompt.contains("delegate_agent"));
         assert!(prompt.contains("工具使用规则"));
         assert!(!prompt.contains("可用子智能体"));
+    }
+
+    #[test]
+    fn board_section_injected_only_when_agentic_and_non_empty() {
+        let entries = vec![BoardEntry {
+            artifact_id: "0e6f1c2a-1111-2222-3333-444455556666".into(),
+            producer_label: "delegate_agent:essay_writing".into(),
+            title: "撰写引言段落".into(),
+            updated_at: 1_756_362_259, // 2026-08-28 附近，仅验证格式化不报错
+        }];
+
+        // 空板：不注入成果板段落
+        let empty = build_system_prompt(&sample_config(), &sample_data(), "x", "", true);
+        assert!(!empty.contains("成果板"));
+
+        // 工具可用且有成果：注入清单，含真实 artifact_id
+        let section = board_section(&entries);
+        let prompt = build_system_prompt(&sample_config(), &sample_data(), "x", &section, true);
+        assert!(prompt.contains("## 成果板"));
+        assert!(prompt.contains("read_artifact"));
+        assert!(prompt.contains("0e6f1c2a-1111-2222-3333-444455556666"));
+        assert!(prompt.contains("撰写引言段落"));
+
+        // 直接答疑模式：即使传入非空清单也不注入（不提及任何工具）
+        let direct = build_system_prompt(&sample_config(), &sample_data(), "x", &section, false);
+        assert!(!direct.contains("成果板"));
+        assert!(!direct.contains("read_artifact"));
+    }
+
+    #[test]
+    fn board_section_empty_entries_yield_empty_string() {
+        assert!(board_section(&[]).is_empty());
     }
 
     #[test]
@@ -290,7 +429,7 @@ mod tests {
     fn professional_expression_switches_mode() {
         let mut config = sample_config();
         config.professional_expression = true;
-        let prompt = build_system_prompt(&config, &sample_data(), "", true);
+        let prompt = build_system_prompt(&config, &sample_data(), "", "", true);
         assert!(prompt.contains("专业化表述"));
         assert!(!prompt.contains("拟人化趣味文案"));
     }
@@ -299,7 +438,45 @@ mod tests {
     fn mood_maps_to_chinese() {
         let mut data = sample_data();
         data.mood = Mood::Sad;
-        let prompt = build_system_prompt(&sample_config(), &data, "", true);
+        let prompt = build_system_prompt(&sample_config(), &data, "", "", true);
         assert!(prompt.contains("当前心情：难过"));
+    }
+
+    #[test]
+    fn parts_join_equals_full_prompt() {
+        // parts 拼接与 build_system_prompt 输出逐字节一致（同一事实来源）
+        let section = board_section(&[BoardEntry {
+            artifact_id: "id-1".into(),
+            producer_label: "delegate_agent:essay_writing".into(),
+            title: "标题".into(),
+            updated_at: 1_756_362_259,
+        }]);
+        let parts = build_system_prompt_parts(&sample_config(), &sample_data(), "agents", &section, true);
+        let joined = parts
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(
+            joined,
+            build_system_prompt(&sample_config(), &sample_data(), "agents", &section, true)
+        );
+        // 子智能体与成果板段落独立归类，其余归 Base
+        let kinds: Vec<_> = parts.iter().map(|s| s.kind).collect();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == PromptSectionKind::SubAgents)
+                .count(),
+            1
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == PromptSectionKind::Board).count(),
+            1
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == PromptSectionKind::Base).count(),
+            parts.len() - 2
+        );
     }
 }

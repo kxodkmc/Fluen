@@ -33,23 +33,23 @@
 //! - 每次 `engine.chat()` 使用独立 `SessionId`（由 `new_session_id()` 创建）
 
 use std::path::Path;
-use std::sync::Arc;
-
 use tokio_util::sync::CancellationToken;
 
-use fluen_knowledge::async_kb::{AsyncKnowledgeBase, AsyncQueryParams};
+use fluen_kb::async_kb::AsyncKb;
+use fluen_kb::ids::{Predicate, WikiId, WikiType};
+use fluen_kb::search::QueryParams;
 use referee_ai::session::SessionId;
-use fluen_knowledge::types::{RetrievalMethod, WikiType};
 
 use crate::agent_runtime::FluenRuntime;
 use crate::llm_config::model::LlmConfig;
 
-use super::chat_retry::{chat_until_captured, KB_BUILD_SYSTEM_PROMPT};
+use super::chat_retry::chat_until_captured;
 use super::error::KnowledgeBuilderError;
 use super::events::KbBuildProgressPayload;
 use super::index_snapshot::IndexSnapshot;
 use super::llm_helper::{
-    new_session_id, run_chat, CreateEntryCapture, PlanCapture, UsageCapture, UsageSnapshot,
+    new_session_id, CreateEntryCapture, PlanCapture, RelationsCapture, RelationPair, UsageCapture,
+    UsageSnapshot,
 };
 use super::prompts::{
     render_create_concept, render_create_entity, render_create_summary,
@@ -92,6 +92,7 @@ async fn build_flow(
     conversation: &SessionId,
     plan_capture: &PlanCapture,
     entry_capture: &CreateEntryCapture,
+    relations_capture: &RelationsCapture,
     usage_capture: &UsageCapture,
     cancel: &CancellationToken,
     on_progress: impl Fn(KbBuildProgressPayload),
@@ -104,19 +105,9 @@ async fn build_flow(
         "知识库构建启动（V2.1）"
     );
 
-    // 初始化知识库（用于 L2 检索，与 session runtime 内的 KB 共享同一 DB）
+    // 初始化知识库（用于 L2 检索与关联落库，与 session 桥接的 KB 共享同一 DB）
     let refs_dir = project_path.join("references");
-    let kb = match crate::builtin_providers::embedding::build_embedding_router(llm_config) {
-        Some(router) => {
-            tracing::debug!(ref_id = %ref_id, "Embedding 已启用，注入路由器");
-            AsyncKnowledgeBase::init(&refs_dir)?
-                .with_embedding_provider(Arc::new(router))
-        }
-        None => {
-            tracing::debug!(ref_id = %ref_id, "Embedding 已禁用，使用纯关键词检索");
-            AsyncKnowledgeBase::init(&refs_dir)?
-        }
-    };
+    let kb = super::kb_adapter::init_kb_async(&refs_dir, llm_config)?;
 
     // ── 实时读取 Index 快照（每次构建任务从磁盘解析，确保最新状态）──
     let index_md = read_index_md(&refs_dir);
@@ -124,7 +115,6 @@ async fn build_flow(
     tracing::info!(
         ref_id = %ref_id,
         total_entries = snapshot.total_entries(),
-        tags = snapshot.tags.len(),
         estimated_tokens = snapshot.estimated_tokens(),
         "Index 快照已解析"
     );
@@ -230,6 +220,7 @@ async fn build_flow(
                 session.thinking_enabled(),
                 entry_capture,
                 usage_capture,
+                ref_id,
                 planned,
                 &candidates,
                 cancel,
@@ -278,6 +269,7 @@ async fn build_flow(
                 session.thinking_enabled(),
                 entry_capture,
                 usage_capture,
+                ref_id,
                 planned,
                 &candidates,
                 cancel,
@@ -335,13 +327,13 @@ async fn build_flow(
                 related_count = summary_related.len(),
                 "写入 summary 关联"
             );
-            kb.edit_entry(fluen_knowledge::wiki::EditEntryParams {
-                wiki_id: summary_id.clone(),
-                edits: Vec::new(),
-                add_relations: summary_related,
-                add_tags: Vec::new(),
-            })
-            .await?;
+            let summary_wiki_id = WikiId::new(summary_id)?;
+            let relations = summary_related
+                .iter()
+                .map(|id| Ok((Predicate::related(), WikiId::new(id)?)))
+                .collect::<Result<Vec<_>, KnowledgeBuilderError>>()?;
+            kb.merge(summary_wiki_id, String::new(), relations)
+                .await?;
         }
 
         // ── 步骤 2：Concept/Entity 关联（AI 判断，工具写入）──
@@ -379,16 +371,20 @@ async fn build_flow(
                 entry_count = entries_table.len(),
                 "AI 建立 concept/entity 关联"
             );
-            let usage = run_establish_entry_relations(
+            let (pairs, usage) = run_establish_entry_relations(
                 session.runtime(),
                 &conversation,
                 session.thinking_enabled(),
+                relations_capture,
                 usage_capture,
                 &entries_table,
                 cancel,
             )
             .await?;
             session.update_usage(usage);
+
+            // Rust 端确定性落库：merge 关联并自动补双向
+            apply_relations(&kb, &pairs).await?;
         }
 
         tracing::info!(ref_id = %ref_id, history_used = session.history_used(), "阶段 EstablishingRelations 完成");
@@ -438,6 +434,7 @@ pub async fn build(
     session: &mut KnowledgeBuildSession,
     plan_capture: &PlanCapture,
     entry_capture: &CreateEntryCapture,
+    relations_capture: &RelationsCapture,
     usage_capture: &UsageCapture,
     cancel: &CancellationToken,
     on_progress: impl Fn(KbBuildProgressPayload),
@@ -453,6 +450,7 @@ pub async fn build(
         &conversation,
         plan_capture,
         entry_capture,
+        relations_capture,
         usage_capture,
         cancel,
         on_progress,
@@ -580,11 +578,12 @@ async fn run_create_concept(
     thinking_enabled: bool,
     entry_capture: &CreateEntryCapture,
     usage_capture: &UsageCapture,
+    ref_id: &str,
     planned: &PlannedEntry,
     candidates: &[L2Candidate],
     cancel: &CancellationToken,
 ) -> Result<(String, UsageSnapshot), KnowledgeBuilderError> {
-    let prompt = render_create_concept(&planned.title, &planned.brief, candidates);
+    let prompt = render_create_concept(ref_id, &planned.title, &planned.brief, candidates);
 
     clear_capture(entry_capture);
 
@@ -621,11 +620,12 @@ async fn run_create_entity(
     thinking_enabled: bool,
     entry_capture: &CreateEntryCapture,
     usage_capture: &UsageCapture,
+    ref_id: &str,
     planned: &PlannedEntry,
     candidates: &[L2Candidate],
     cancel: &CancellationToken,
 ) -> Result<(String, UsageSnapshot), KnowledgeBuilderError> {
-    let prompt = render_create_entity(&planned.title, &planned.brief, candidates);
+    let prompt = render_create_entity(ref_id, &planned.title, &planned.brief, candidates);
 
     clear_capture(entry_capture);
 
@@ -654,28 +654,42 @@ async fn run_create_entity(
 /// AI 驱动的 concept/entity 关联建立。
 ///
 /// 传入「wikiID → 类型 → 标题」对照表，AI 基于标题判断语义关联，
-/// 通过 `edit_entry` 工具用 wikiID 写入，确保链接格式合规。
-/// 返回 usage。
+/// 通过 `submit_relations` 工具结构化提交关联对（Rust 端负责落库与补双向）。
+/// 返回 `(关联对, usage)`。
 async fn run_establish_entry_relations(
     runtime: &FluenRuntime,
     session_id: &SessionId,
     thinking_enabled: bool,
+    relations_capture: &RelationsCapture,
     usage_capture: &UsageCapture,
     entries: &[(String, &str, String)],
     cancel: &CancellationToken,
-) -> Result<UsageSnapshot, KnowledgeBuilderError> {
+) -> Result<(Vec<RelationPair>, UsageSnapshot), KnowledgeBuilderError> {
     let prompt = render_establish_entry_relations(entries);
 
+    // 清空 capture（循环内由闭包逐次取出）
+    {
+        let mut cap = relations_capture.lock().unwrap();
+        *cap = None;
+    }
+
     // 复用共享会话：关联判定在同一下上文完成，无独立历史
-    let (_text, usage) = run_chat(runtime, session_id.clone(), &prompt, KB_BUILD_SYSTEM_PROMPT, thinking_enabled)
-        .await?;
+    let (pairs, usage) = chat_until_captured(
+        runtime,
+        thinking_enabled,
+        session_id.clone(),
+        &prompt,
+        "请立即调用 submit_relations 工具提交条目间关联关系（from/to 为 wikiID，无需双向提交）",
+        || relations_capture.lock().expect("relations capture poisoned").take(),
+    )
+    .await?;
 
     if cancel.is_cancelled() {
         return Err(KnowledgeBuilderError::Cancelled);
     }
 
     super::llm_helper::set_usage(usage_capture, usage);
-    Ok(usage)
+    Ok((pairs, usage))
 }
 
 // ---------------------------------------------------------------------------
@@ -687,25 +701,25 @@ async fn run_establish_entry_relations(
 /// 默认使用 hybrid 检索（向量 + 关键词）；Embedding 未配置时自动降级为关键词检索。
 /// 返回紧凑的 [`L2Candidate`] 列表（含 wiki_id 供 AI 合并调用）。
 async fn l2_query(
-    kb: &AsyncKnowledgeBase,
+    kb: &AsyncKb,
     query: &str,
     wiki_type: Option<WikiType>,
 ) -> Result<Vec<L2Candidate>, KnowledgeBuilderError> {
-    let params = AsyncQueryParams {
+    let params = QueryParams {
         query: query.to_string(),
         wiki_type,
-        method: RetrievalMethod::Hybrid,
-        top_k: 3,
+        method: fluen_kb::search::SearchMethod::Hybrid,
+        top_k: Some(3),
         include_content: false,
+        expand: 0,
     };
-    let result = kb.query(params).await.map_err(KnowledgeBuilderError::from)?;
-    let candidates: Vec<L2Candidate> = result
-        .results
+    let hits = kb.query(params).await.map_err(KnowledgeBuilderError::from)?;
+    let candidates: Vec<L2Candidate> = hits
         .into_iter()
-        .map(|m| L2Candidate {
-            wiki_id: m.wiki_id,
-            title: m.title,
-            score: m.score,
+        .map(|h| L2Candidate {
+            wiki_id: h.meta.id.as_str().to_string(),
+            title: h.meta.title,
+            score: h.score,
         })
         .collect();
     tracing::debug!(query = %query, count = candidates.len(), "L2 检索完成");
@@ -715,6 +729,39 @@ async fn l2_query(
 // ---------------------------------------------------------------------------
 // 辅助函数
 // ---------------------------------------------------------------------------
+
+/// 将 AI 提交的关联对经 `merge` 落库，并自动补反向关联（去重幂等）。
+async fn apply_relations(
+    kb: &AsyncKb,
+    pairs: &[RelationPair],
+) -> Result<(), KnowledgeBuilderError> {
+    // 按 from 分组，减少 rebuild 次数
+    use std::collections::BTreeMap;
+    let mut grouped: BTreeMap<String, Vec<(Predicate, WikiId)>> = BTreeMap::new();
+    for pair in pairs {
+        let predicate = match &pair.predicate {
+            Some(p) => Predicate::new(p).map_err(KnowledgeBuilderError::from)?,
+            None => Predicate::related(),
+        };
+        let from = WikiId::new(&pair.from)?;
+        let to = WikiId::new(&pair.to)?;
+        grouped
+            .entry(pair.from.clone())
+            .or_default()
+            .push((predicate.clone(), to.clone()));
+        grouped
+            .entry(pair.to.clone())
+            .or_default()
+            .push((predicate, from.clone()));
+    }
+    for (from_raw, relations) in grouped {
+        let id = WikiId::new(&from_raw)?;
+        kb.merge(id, String::new(), relations)
+            .await
+            .map_err(KnowledgeBuilderError::from)?;
+    }
+    Ok(())
+}
 
 /// 检查取消令牌。
 fn check_cancel(cancel: &CancellationToken) -> Result<(), KnowledgeBuilderError> {

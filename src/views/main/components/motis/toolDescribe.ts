@@ -18,6 +18,9 @@ export type ToolCategory =
   | 'search'
   | 'manuscript'
   | 'delegate'
+  | 'kbQuery'
+  | 'kbEntry'
+  | 'kbSubmit'
   | 'generic';
 
 /** 单条工具调用的展示描述。 */
@@ -58,6 +61,18 @@ const CATEGORY_LABELS: Record<ToolCategory, { verbKey: string; countKey: string 
   delegate: {
     verbKey: 'main.motisPanel.activity.verbDelegate',
     countKey: 'main.motisPanel.activity.countDelegate',
+  },
+  kbQuery: {
+    verbKey: 'main.motisPanel.activity.verbKbQuery',
+    countKey: 'main.motisPanel.activity.countKbQuery',
+  },
+  kbEntry: {
+    verbKey: 'main.motisPanel.activity.verbKbEntry',
+    countKey: 'main.motisPanel.activity.countKbEntry',
+  },
+  kbSubmit: {
+    verbKey: 'main.motisPanel.activity.verbKbSubmit',
+    countKey: 'main.motisPanel.activity.countKbSubmit',
   },
   generic: {
     verbKey: 'main.motisPanel.activity.verbCall',
@@ -135,6 +150,25 @@ export function describeToolCall(msg: ChatMessage): ToolDisplay {
         objectKey: agentId ? AGENT_NAME_KEYS[agentId] : undefined,
       });
     }
+    // ── 知识库构建智能体的工具（kbchat 事件流） ──────────────────────
+    case 'knowledge_query':
+    case 'knowledge_query_batch': {
+      const query = inputStr(msg.toolInput, 'query')?.trim();
+      return makeDisplay('kbQuery', { objectText: query || undefined });
+    }
+    case 'knowledge_create_entry': {
+      const title = inputStr(msg.toolInput, 'title')?.trim();
+      return makeDisplay('kbEntry', { objectText: title || undefined });
+    }
+    case 'knowledge_edit_entry':
+    case 'knowledge_get_entry': {
+      const id = inputStr(msg.toolInput, 'id')?.trim();
+      return makeDisplay('kbEntry', { objectText: id || undefined });
+    }
+    case 'submit_plan':
+    case 'submit_relations':
+      // 「已提交方案/关联」动词已含对象语义，无需附加对象
+      return makeDisplay('kbSubmit');
     default:
       return makeDisplay('generic', { objectText: msg.toolName });
   }

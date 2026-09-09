@@ -1,11 +1,11 @@
 //! Embedding 路由器：按优先级尝试多个内置提供商，失败自动降级。
 //!
-//! 实现 [`KnowledgeEmbedding`] trait，可直接注入 [`AsyncKnowledgeBase`]。
+//! 实现 [`fluen_kb::KnowledgeEmbedding`] trait（同步单文本），可直接注入
+//! `fluen_kb::AsyncKb`。
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fluen_knowledge::types::KnowledgeEmbedding;
 
 use super::openai_provider::OpenAiEmbeddingProvider;
 use crate::llm_config::model::{EmbeddingConfig, LlmConfig};
@@ -60,6 +60,55 @@ impl EmbeddingRouter {
     /// 当前已注册的提供商数量。
     pub fn provider_count(&self) -> usize {
         self.providers.len()
+    }
+
+    /// 批量嵌入：按优先级逐个提供商尝试，失败降级。
+    ///
+    /// 供新 trait 实现复用（批 → 单调用循环摊平）。
+    pub async fn embed_batch(&self, texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
+        if self.providers.is_empty() {
+            return Err(anyhow::anyhow!("没有可用的内置 Embedding 提供商"));
+        }
+
+        let text_count = texts.len();
+        let mut last_err: Option<anyhow::Error> = None;
+
+        for provider in &self.providers {
+            match provider.embed(texts.clone()).await {
+                Ok(result) => {
+                    if result.len() != text_count {
+                        tracing::warn!(
+                            provider = provider.name(),
+                            expected = text_count,
+                            actual = result.len(),
+                            "Embedding 提供商返回数量不匹配，尝试下一个"
+                        );
+                        last_err = Some(anyhow::anyhow!(
+                            "返回向量数量 {} 与输入文本数量 {} 不匹配",
+                            result.len(),
+                            text_count
+                        ));
+                        continue;
+                    }
+                    tracing::debug!(
+                        provider = provider.name(),
+                        count = result.len(),
+                        "Embedding 成功"
+                    );
+                    return Ok(result);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = provider.name(),
+                        error = %e,
+                        "Embedding 失败，尝试下一个提供商"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("所有内置 Embedding 提供商均不可用")))
     }
 }
 
@@ -116,52 +165,27 @@ fn resolve_custom_provider(
     ))
 }
 
-#[async_trait]
-impl KnowledgeEmbedding for EmbeddingRouter {
-    async fn embed(&self, texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
-        if self.providers.is_empty() {
-            return Err(anyhow::anyhow!("没有可用的内置 Embedding 提供商"));
-        }
+/// 新库 trait 适配：同步单文本接口。
+///
+/// fluen-kb 在 `spawn_blocking` 中调用本方法，此时 tokio runtime 上下文
+/// 仍然可用，通过 `Handle::block_on` 驱动异步批量提供商并取首个结果。
+impl fluen_kb::KnowledgeEmbedding for EmbeddingRouter {
+    fn embed(&self, text: &str) -> fluen_kb::KbResult<Vec<f32>> {
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            fluen_kb::KbError::Embedding(
+                "EmbeddingRouter 需在 tokio runtime 上下文中调用（spawn_blocking 内可用）".into(),
+            )
+        })?;
+        let embeddings = handle
+            .block_on(self.embed_batch(vec![text.to_string()]))
+            .map_err(|e| fluen_kb::KbError::Embedding(format!("{e}")))?;
+        embeddings.into_iter().next().ok_or_else(|| {
+            fluen_kb::KbError::Embedding("embedding provider returned empty".into())
+        })
+    }
 
-        let text_count = texts.len();
-        let mut last_err: Option<anyhow::Error> = None;
-
-        for provider in &self.providers {
-            match provider.embed(texts.clone()).await {
-                Ok(result) => {
-                    if result.len() != text_count {
-                        tracing::warn!(
-                            provider = provider.name(),
-                            expected = text_count,
-                            actual = result.len(),
-                            "Embedding 提供商返回数量不匹配，尝试下一个"
-                        );
-                        last_err = Some(anyhow::anyhow!(
-                            "返回向量数量 {} 与输入文本数量 {} 不匹配",
-                            result.len(),
-                            text_count
-                        ));
-                        continue;
-                    }
-                    tracing::debug!(
-                        provider = provider.name(),
-                        count = result.len(),
-                        "Embedding 成功"
-                    );
-                    return Ok(result);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        provider = provider.name(),
-                        error = %e,
-                        "Embedding 失败，尝试下一个提供商"
-                    );
-                    last_err = Some(e);
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("所有内置 Embedding 提供商均不可用")))
+    fn model_name(&self) -> &str {
+        "builtin-router"
     }
 }
 
@@ -220,7 +244,7 @@ mod tests {
             }),
         ]);
 
-        let result = router.embed(vec!["hello".into()]).await.unwrap();
+        let result = router.embed_batch(vec!["hello".into()]).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], vec![0.1, 0.2]);
     }
@@ -238,7 +262,7 @@ mod tests {
             }),
         ]);
 
-        let result = router.embed(vec!["hello".into()]).await;
+        let result = router.embed_batch(vec!["hello".into()]).await;
         assert!(result.is_err());
     }
 
@@ -255,7 +279,7 @@ mod tests {
             }),
         ]);
 
-        let result = router.embed(vec!["hello".into()]).await.unwrap();
+        let result = router.embed_batch(vec!["hello".into()]).await.unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -277,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn router_empty_providers_returns_error() {
         let router = EmbeddingRouter::with_providers(vec![]);
-        let result = router.embed(vec!["hello".into()]).await;
+        let result = router.embed_batch(vec!["hello".into()]).await;
         assert!(result.is_err());
     }
 
@@ -306,7 +330,7 @@ mod tests {
         ]);
 
         // 输入 2 条文本，mismatch 只返回 1 条 → 降级到 ok
-        let result = router.embed(vec!["a".into(), "b".into()]).await.unwrap();
+        let result = router.embed_batch(vec!["a".into(), "b".into()]).await.unwrap();
         assert_eq!(result.len(), 2);
     }
 }

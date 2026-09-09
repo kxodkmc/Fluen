@@ -34,8 +34,8 @@ export function useMainLayout() {
   const aiPanelWidth = ref<number>(DEFAULT_PANEL_SIZES.aiPanel);
 
   /* ── 编辑器视图模式 ─────────────────────────────────────────────────── */
-  /** 默认进入预览视图（仅渲染 HTML），源码/半预览可通过切换控件或 Mod+1/2 进入。 */
-  const editorLayout = ref<EditorLayoutMode>('preview');
+  /** 默认进入半预览视图（WYSIWYG 实时渲染），源码/仅渲染可通过切换控件或 Mod+1/3 进入。 */
+  const editorLayout = ref<EditorLayoutMode>('live');
 
   /* ── 活动栏 ─────────────────────────────────────────────────────────── */
   const activeActivity = ref<string>('outline');

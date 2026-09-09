@@ -20,7 +20,9 @@
 //!
 //! ## 示例
 //!
-//! ```no_run
+//! ```rust,ignore
+//! // 本模块为 crate 私有（mod agent_runtime），doctest 无法链接此路径，
+//! // 示例仅作概念展示、不参与编译
 //! use std::sync::Arc;
 //! use fluen_lib::agent_runtime::observability::observe_registry;
 //! use referee_ai::tool::ToolRegistry;

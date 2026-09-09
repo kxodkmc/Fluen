@@ -106,6 +106,8 @@ pub enum Inline {
     Strong(Vec<Inline>),
     /// 删除线 `~~x~~`。
     Strikethrough(Vec<Inline>),
+    /// 下划线 `++x++`（ins 扩展语法）。
+    Underline(Vec<Inline>),
     /// 行内代码 `` `x` ``。内容为原始文本（不二次解析）。
     Code(String),
     /// 行内数学 `$...$`。内容为 LaTeX 源（原样）。

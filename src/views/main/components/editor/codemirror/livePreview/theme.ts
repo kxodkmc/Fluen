@@ -62,6 +62,10 @@ export const livePreviewTheme: Extension = [
       textDecoration: 'line-through',
       color: 'var(--fluen-slate)',
     },
+    '& .fluen-lp-underline': {
+      textDecoration: 'underline',
+      textUnderlineOffset: '2px',
+    },
     '& .fluen-lp-code-inline': {
       fontFamily: 'var(--fluen-font-mono)',
       fontSize: '0.92em',
@@ -84,6 +88,12 @@ export const livePreviewTheme: Extension = [
       cursor: 'help',
     },
 
+    /* ── f-标签题注 ─────────────────────────────────────────────── */
+    '& .fluen-lp-caption': {
+      color: 'var(--fluen-slate)',
+      fontSize: '0.9em',
+    },
+
     /* ── 引用块 ─────────────────────────────────────────────────── */
     '& .fluen-lp-quote': {
       borderLeft: '3px solid var(--fluen-hairline)',
@@ -100,12 +110,104 @@ export const livePreviewTheme: Extension = [
     },
     '& .fluen-lp-fence:first-of-type': { paddingTop: '8px' },
 
-    /* ── 表格 ───────────────────────────────────────────────────── */
-    '& .fluen-lp-table-head': {
-      fontWeight: '600',
-      background: 'var(--fluen-surface-soft)',
+    /* ── 表格（结构化编辑 widget：三线表 + 行列手柄） ────────────── */
+    '& .fluen-lp-tablebox': {
+      position: 'relative',
+      margin: '22px 0 4px 24px',
     },
-    '& .fluen-lp-table-body': { color: 'var(--fluen-charcoal)' },
+    '& .fluen-lp-table': {
+      borderCollapse: 'collapse',
+      fontSize: '0.92em',
+    },
+    '& .fluen-lp-table th': {
+      fontWeight: '600',
+      borderTop: '2px solid var(--fluen-ink)',
+      borderBottom: '1px solid var(--fluen-ink)',
+      padding: '4px 12px',
+      textAlign: 'left',
+      cursor: 'text',
+      minWidth: '56px',
+      height: '1.7em',
+    },
+    '& .fluen-lp-table td': {
+      padding: '3px 12px',
+      cursor: 'text',
+      minWidth: '56px',
+      height: '1.7em',
+    },
+    '& .fluen-lp-table tbody tr:last-child td': {
+      borderBottom: '2px solid var(--fluen-ink)',
+    },
+    '& .fluen-lp-table [contenteditable]:focus': {
+      outline: '2px solid var(--fluen-accent)',
+      outlineOffset: '-2px',
+    },
+    // 单元格内公式（失焦渲染态）：KaTeX 基线对齐微调
+    '& .fluen-lp-cell-math': {
+      display: 'inline-block',
+      lineHeight: '1',
+    },
+
+    /* 行/列手柄（Word/Notion 式：+ 插入 / × 删除，悬停单元格时出现） */
+    '& .fluen-lp-tbhandle': {
+      position: 'absolute',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '2px',
+      zIndex: '10',
+    },
+    // hidden 属性兜底：作者样式的 display:flex 会覆盖 UA 的 [hidden] 规则
+    '& .fluen-lp-tbhandle[hidden]': {
+      display: 'none',
+    },
+    '& .fluen-lp-tbhandle--col': {
+      top: '-20px',
+      height: '18px',
+    },
+    '& .fluen-lp-tbhandle--col .fluen-lp-tbhandle__line': {
+      position: 'absolute',
+      top: '18px',
+      bottom: '-2px',
+      left: '50%',
+      width: '2px',
+      transform: 'translateX(-50%)',
+      background: 'var(--fluen-accent)',
+      opacity: '0.35',
+    },
+    '& .fluen-lp-tbhandle--row': {
+      left: '-24px',
+      width: '18px',
+    },
+    '& .fluen-lp-tbhandle--row .fluen-lp-tbhandle__line': {
+      position: 'absolute',
+      left: '18px',
+      right: '-2px',
+      top: '50%',
+      height: '2px',
+      transform: 'translateY(-50%)',
+      background: 'var(--fluen-accent)',
+      opacity: '0.35',
+    },
+    '& .fluen-lp-tbhandle__btn': {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: '17px',
+      height: '17px',
+      padding: '0',
+      border: 'none',
+      borderRadius: '50%',
+      background: 'var(--fluen-accent)',
+      color: 'var(--fluen-on-accent)',
+      fontFamily: 'var(--fluen-font-sans)',
+      fontSize: '13px',
+      lineHeight: '1',
+      cursor: 'pointer',
+    },
+    '& .fluen-lp-tbhandle__btn:hover': {
+      background: 'var(--fluen-accent-hover)',
+    },
 
     /* ── 水平线 / 任务列表 ─────────────────────────────────────── */
     '& .fluen-lp-hr': {

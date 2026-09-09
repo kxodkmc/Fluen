@@ -201,7 +201,7 @@ function handleCloseMenu(): void {
 
 // ── 知识库构建 ──────────────────────────────────────────────────────
 
-/** 触发知识库构建。 */
+/** 触发知识库构建（面板由 kb-build:started 事件驱动自动打开，此处无需处理）。 */
 async function handleAddToKnowledgeBase(entry: ReferenceEntry): Promise<void> {
   if (!projectPath.value) return;
   try {

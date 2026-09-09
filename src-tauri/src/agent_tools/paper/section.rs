@@ -8,18 +8,22 @@
 //! - `## 研究背景`：返回该二级章节及其子章节
 //! - 省略 `#` 前缀：按标题文本匹配任意层级
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use referee_ai::tool::{Tool, ToolCategory, ToolContext, ToolError, ToolOutput};
 use serde_json::{json, Value};
 
 use super::PaperReader;
-use crate::agent_tools::parse::extract_section;
+use crate::agent_tools::parse::{extract_section, h1_sec_ids};
+use crate::agent_tools::project::read_state::ReadTracker;
 
 /// 工具名称。
 pub const PAPER_SECTION_TOOL_NAME: &str = "paper_section";
 
 /// 工具描述。
-const DESCRIPTION: &str = "读取当前在写论文指定章节的内容：`# 引言` 返回该一级章节的全部内容（含其下 ##、### 子章节）；`## 背景` 返回该二级章节及其子章节；省略 # 前缀则按标题文本匹配任意层级。建议先调用 paper_outline 查看大纲再选择标题。";
+const DESCRIPTION: &str = "读取当前在写论文指定章节的内容：`# 引言` 返回该一级章节的全部内容（含其下 ##、### 子章节）；`## 背景` 返回该二级章节及其子章节；省略 # 前缀则按标题文本匹配任意层级。建议先调用 paper_outline 查看大纲再选择标题。完整读取全部一级章节（`# 标题`）会计入已读记账，可满足 manuscript 更新前的写前必读要求。";
 
 /// 论文章节内容读取工具。
 pub struct PaperSectionTool {
@@ -27,11 +31,19 @@ pub struct PaperSectionTool {
     parameters: Value,
     /// 论文全文读取器（referee `read` 封装）。
     reader: PaperReader,
+    /// 读取状态跟踪器（完整读取一级章节时登记其备份文件；`None` 不记账）。
+    tracker: Option<Arc<ReadTracker>>,
 }
 
 impl PaperSectionTool {
-    /// 构造工具（`project_path` 为论文项目根目录）。
+    /// 构造工具（`project_path` 为论文项目根目录，不接跟踪器）。
     pub fn new(project_path: String) -> Self {
+        Self::with_tracker(project_path, None)
+    }
+
+    /// 构造工具并接入读取跟踪器（装配层应使用本构造函数：完整读取
+    /// 一级章节时登记章节备份，供写前必读门认可结构化读取路径）。
+    pub fn with_tracker(project_path: String, tracker: Option<Arc<ReadTracker>>) -> Self {
         let parameters = json!({
             "type": "object",
             "properties": {
@@ -45,6 +57,7 @@ impl PaperSectionTool {
         Self {
             parameters,
             reader: PaperReader::new(project_path),
+            tracker,
         }
     }
 }
@@ -84,17 +97,36 @@ impl Tool for PaperSectionTool {
             .ok_or_else(|| ToolError::InvalidArguments("缺少 heading 参数（章节标题引用）".into()))?;
 
         let md = self.reader.read_full().await?;
-        match extract_section(&md, heading) {
-            Ok(section) => Ok(ToolOutput::from_json(&json!({
-                "heading": format!(
-                    "{} {}",
-                    "#".repeat(section.heading.level as usize),
-                    section.heading.text
-                ),
-                "content": section.content,
-            }))),
-            Err(e) => Err(ToolError::InvalidArguments(e.message)),
+        let section = match extract_section(&md, heading) {
+            Ok(section) => section,
+            Err(e) => return Err(ToolError::InvalidArguments(e.message)),
+        };
+
+        // 记账：完整读取一级章节时，将其章节备份登记为「整体已知」，
+        // 供写前必读门认可结构化读取路径；子章节读取仅为部分内容，不记账
+        if section.heading.level == 1 {
+            if let (Some(tracker), Some((_, id))) = (
+                &self.tracker,
+                h1_sec_ids(&md)
+                    .into_iter()
+                    .find(|(title, _)| *title == section.heading.text),
+            ) {
+                let backup = PathBuf::from(self.reader.project_path())
+                    .join("manuscript")
+                    .join("sections")
+                    .join(format!("{id}.md"));
+                tracker.record_full(&backup);
+            }
         }
+
+        Ok(ToolOutput::from_json(&json!({
+            "heading": format!(
+                "{} {}",
+                "#".repeat(section.heading.level as usize),
+                section.heading.text
+            ),
+            "content": section.content,
+        })))
     }
 }
 
@@ -206,5 +238,50 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Execution(_)));
+    }
+
+    #[tokio::test]
+    async fn h1_read_records_backup_as_full() {
+        let (storage, project_dir) = build_test_project("section_record_h1");
+        let tracker = crate::agent_tools::project::read_state::ReadTracker::new_arc();
+        let tool = PaperSectionTool::with_tracker(
+            project_dir.to_string_lossy().to_string(),
+            Some(tracker.clone()),
+        );
+
+        output_json(
+            tool.execute(ctx(), json!({ "heading": "# 引言" }))
+                .await
+                .unwrap(),
+        );
+
+        let sections = project_dir.join("manuscript").join("sections");
+        assert!(tracker.is_fully_read(&sections.join("sec-aaa11111.md")));
+        assert!(!tracker.is_fully_read(&sections.join("sec-bbb22222.md")));
+
+        let _ = fs::remove_dir_all(&storage);
+    }
+
+    #[tokio::test]
+    async fn h2_read_does_not_record() {
+        let (storage, project_dir) = build_test_project("section_record_h2");
+        let tracker = crate::agent_tools::project::read_state::ReadTracker::new_arc();
+        let tool = PaperSectionTool::with_tracker(
+            project_dir.to_string_lossy().to_string(),
+            Some(tracker.clone()),
+        );
+
+        output_json(
+            tool.execute(ctx(), json!({ "heading": "## 研究背景" }))
+                .await
+                .unwrap(),
+        );
+
+        // 子章节仅为部分内容，不应登记任何章节备份为「整体已知」
+        let sections = project_dir.join("manuscript").join("sections");
+        assert!(!tracker.is_fully_read(&sections.join("sec-aaa11111.md")));
+        assert!(!tracker.is_fully_read(&sections.join("sec-bbb22222.md")));
+
+        let _ = fs::remove_dir_all(&storage);
     }
 }

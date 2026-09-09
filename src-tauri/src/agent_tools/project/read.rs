@@ -5,17 +5,20 @@
 //! 返回 `offset` / `end` / `total_chars` / `truncated` 元数据，
 //! 模型可据 `end` 续读，避免大文件刷爆上下文。
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use referee_ai::tool::{Tool, ToolCategory, ToolContext, ToolError, ToolOutput};
 use serde_json::{json, Value};
 
+use super::read_state::ReadTracker;
 use super::ProjectFs;
 
 /// 工具名称。
 pub const PROJECT_READ_TOOL_NAME: &str = "project_read";
 
 /// 工具描述。
-const DESCRIPTION: &str = "读取论文项目内的文本文件：返回行/句边界对齐的字符窗口与实际区间（file_path/offset/end/total_chars/truncated/content），truncated=true 时用 offset=end 续读。path 相对项目根（如 references/references-index.json）；禁止访问 .git。";
+const DESCRIPTION: &str = "读取论文项目内的文本文件：返回行/句边界对齐的字符窗口与实际区间（file_path/offset/end/total_chars/truncated/content），truncated=true 时用 offset=end 续读。path 相对项目根（如 references/references-index.json）；禁止访问 .git。注意：修改任何已有文件前，必须先用本工具把全文读完（所有窗口覆盖 0..total_chars 且文件未变更），否则 project_write / project_edit / manuscript 会拒绝执行。";
 
 /// 项目文件读取工具。
 pub struct ProjectReadTool {
@@ -23,11 +26,18 @@ pub struct ProjectReadTool {
     parameters: Value,
     /// 路径安全层。
     fs: ProjectFs,
+    /// 读取状态跟踪器（供写前必读门记账；`None` 时不记账）。
+    tracker: Option<Arc<ReadTracker>>,
 }
 
 impl ProjectReadTool {
-    /// 构造工具（`project_path` 为论文项目根目录）。
+    /// 构造工具（`project_path` 为论文项目根目录，不接跟踪器）。
     pub fn new(project_path: String) -> Self {
+        Self::with_tracker(project_path, None)
+    }
+
+    /// 构造工具并接入读取跟踪器（装配层应始终使用本构造函数）。
+    pub fn with_tracker(project_path: String, tracker: Option<Arc<ReadTracker>>) -> Self {
         let parameters = json!({
             "type": "object",
             "properties": {
@@ -43,6 +53,7 @@ impl ProjectReadTool {
         Self {
             parameters,
             fs: ProjectFs::new(project_path),
+            tracker,
         }
     }
 }
@@ -92,7 +103,21 @@ impl Tool for ProjectReadTool {
         }
 
         // 输出原样透传（referee read 已返回带续读元数据的结构化 JSON）
-        self.fs.read_tool().execute(self.fs.ctx(), read_args).await
+        let output = self.fs.read_tool().execute(self.fs.ctx(), read_args).await?;
+
+        // 记账：解析窗口元数据登记进跟踪器（解析失败静默跳过，不影响读取）
+        if let (Some(tracker), Ok(meta)) =
+            (&self.tracker, serde_json::from_str::<Value>(&output.content))
+        {
+            if let (Some(offset), Some(end), Some(total)) = (
+                meta.get("offset").and_then(Value::as_u64),
+                meta.get("end").and_then(Value::as_u64),
+                meta.get("total_chars").and_then(Value::as_u64),
+            ) {
+                tracker.record_read(&abs, offset as usize, end as usize, total as usize);
+            }
+        }
+        Ok(output)
     }
 }
 

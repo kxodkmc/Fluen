@@ -33,7 +33,7 @@ use tauri::{Emitter, Window};
 use crate::agent_runtime::FluenRuntime;
 
 use referee_ai::engine::ChatHandle;
-use referee_ai::provider::{Message, Role, StreamChunk, ThinkingConfig};
+use referee_ai::provider::{Message, Role, StreamChunk, ThinkingConfig, TokenUsage};
 use referee_ai::session::{ChatOptions, ChatPayload, SessionId};
 
 /// 前端历史消息（`motis_chat_send` / `ai_assistant_send` 的 `history` 参数）。
@@ -62,6 +62,7 @@ pub struct ChatEvents {
 
 /// 事件 payload（与前端契约一致）。
 mod payload {
+    use referee_ai::provider::TokenUsage;
     use serde::Serialize;
 
     #[derive(Serialize, Clone)]
@@ -85,6 +86,23 @@ mod payload {
     pub struct Finish {
         pub result: serde_json::Value,
         pub total_tokens: usize,
+        /// 真实输入 token（vendor 上报 usage 时才有；OpenAI 兼容流式
+        /// 需厂商支持，不支持时为 None）。
+        pub prompt_tokens: Option<usize>,
+        /// 真实输出 token（同上）。
+        pub completion_tokens: Option<usize>,
+    }
+
+    impl Finish {
+        /// 从回合末次 usage 构造（无 usage 时三个计数均为缺省）。
+        pub fn from_usage(result: serde_json::Value, usage: Option<&TokenUsage>) -> Self {
+            Self {
+                result,
+                total_tokens: usage.map(|u| u.total_tokens).unwrap_or(0),
+                prompt_tokens: usage.map(|u| u.prompt_tokens),
+                completion_tokens: usage.map(|u| u.completion_tokens),
+            }
+        }
     }
 
     #[derive(Serialize, Clone)]
@@ -185,15 +203,14 @@ pub async fn consume_stream(handle: ChatHandle, window: &Window, events: &ChatEv
         }
         EngineReply::Success(resp) => {
             // chat_stream 正常不返回 Success；稳健处理
-            let total = resp.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
             let _ = window.emit(
                 events.finish,
-                payload::Finish {
-                    result: serde_json::Value::String(
+                payload::Finish::from_usage(
+                    serde_json::Value::String(
                         resp.message.content.as_text().unwrap_or_default().to_string(),
                     ),
-                    total_tokens: total,
-                },
+                    resp.usage.as_ref(),
+                ),
             );
             return;
         }
@@ -202,7 +219,7 @@ pub async fn consume_stream(handle: ChatHandle, window: &Window, events: &ChatEv
     let mut stream = stream;
     let mut acc = ToolCallAccumulator::default();
     let mut full_text = String::new();
-    let mut last_usage: Option<usize> = None;
+    let mut last_usage: Option<TokenUsage> = None;
     let mut errored = false;
 
     while let Some(chunk) = stream.next().await {
@@ -233,7 +250,7 @@ pub async fn consume_stream(handle: ChatHandle, window: &Window, events: &ChatEv
                 // 第二回合之后的工具行从时间线消失）。先冲刷本回合残余再重置。
                 acc.flush_all(window, events);
                 acc = ToolCallAccumulator::default();
-                last_usage = usage.map(|u| u.total_tokens);
+                last_usage = usage;
             }
             Err(e) => {
                 tracing::error!(
@@ -259,10 +276,10 @@ pub async fn consume_stream(handle: ChatHandle, window: &Window, events: &ChatEv
     acc.flush_all(window, events);
     let _ = window.emit(
         events.finish,
-        payload::Finish {
-            result: serde_json::Value::String(full_text),
-            total_tokens: last_usage.unwrap_or(0),
-        },
+        payload::Finish::from_usage(
+            serde_json::Value::String(full_text),
+            last_usage.as_ref(),
+        ),
     );
 }
 

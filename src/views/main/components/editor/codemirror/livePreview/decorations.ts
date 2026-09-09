@@ -23,7 +23,8 @@ import { Decoration } from '@codemirror/view';
 import { type Range, type Text } from '@codemirror/state';
 import type { DecorationSet } from '@codemirror/view';
 import type { SyntaxNode, Tree } from '@lezer/common';
-import { BulletWidget, MathWidget, TaskCheckboxWidget } from './widgets';
+import { BulletWidget, MathWidget, TableWidget, TaskCheckboxWidget } from './widgets';
+import { parseMarkdownTableText } from '../tableModel';
 import { scanMathRegions, type MathRegion } from './mathDisplayScan';
 
 // ── 装饰模板（模块级复用；Decoration 实例不可变可共享） ─────────────
@@ -31,6 +32,7 @@ import { scanMathRegions, type MathRegion } from './mathDisplayScan';
 const decoBold = Decoration.mark({ class: 'fluen-lp-strong' });
 const decoItalic = Decoration.mark({ class: 'fluen-lp-em' });
 const decoStrike = Decoration.mark({ class: 'fluen-lp-strike' });
+const decoUnderline = Decoration.mark({ class: 'fluen-lp-underline' });
 const decoInlineCode = Decoration.mark({ class: 'fluen-lp-code-inline' });
 
 const lineHeading: ReadonlyArray<Decoration | null> = [
@@ -44,8 +46,6 @@ const lineHeading: ReadonlyArray<Decoration | null> = [
 ];
 const lineQuote = Decoration.line({ class: 'fluen-lp-quote' });
 const lineFence = Decoration.line({ class: 'fluen-lp-fence' });
-const lineTableHead = Decoration.line({ class: 'fluen-lp-table-head' });
-const lineTableBody = Decoration.line({ class: 'fluen-lp-table-body' });
 const lineTaskDone = Decoration.line({ class: 'fluen-lp-task-done' });
 const lineMathSrc = Decoration.line({ class: 'fluen-lp-math-src' });
 const lineHr = Decoration.line({ class: 'fluen-lp-hr' });
@@ -191,11 +191,12 @@ for (let level = 1 as const, cap = 6 as const; level <= cap; level++) {
   });
 }
 
-/** 强调族：粗体/斜体/删除线/上标/下标。 */
+/** 强调族：粗体/斜体/删除线/下划线/上标/下标。 */
 const EMPHASIS_FAMILIES: ReadonlyArray<{ node: string; deco: Decoration; mark: string }> = [
   { node: 'StrongEmphasis', deco: decoBold, mark: 'EmphasisMark' },
   { node: 'Emphasis', deco: decoItalic, mark: 'EmphasisMark' },
   { node: 'Strikethrough', deco: decoStrike, mark: 'StrikethroughMark' },
+  { node: 'Underline', deco: decoUnderline, mark: 'UnderlineMark' },
   { node: 'Superscript', deco: decoItalic, mark: 'SuperscriptMark' },
   { node: 'Subscript', deco: decoItalic, mark: 'SubscriptMark' },
 ];
@@ -337,25 +338,150 @@ addRule('HorizontalRule', (node, cx) => {
   cx.acc.deco.push(lineHr.range(line.from, line.from));
 });
 
-/** 表格：表头加粗、正文弱化，保持网格原样可编辑。 */
-addRule('Table', (node, cx) => {
-  let headerOpen = false;
-  for (
-    let child: SyntaxNode | null = node.firstChild;
-    child;
-    child = child.nextSibling
-  ) {
-    if (child.name === 'TableHeader') {
-      headerOpen = true;
-      eachLine(cx, child.from, child.to, (line) => {
-        cx.acc.deco.push(lineTableHead.range(line.from, line.from));
-      });
-    } else if ((headerOpen || child.name === 'TableRow') && child.name === 'TableRow') {
-      eachLine(cx, child.from, child.to, (line) => {
-        cx.acc.deco.push(lineTableBody.range(line.from, line.from));
-      });
+/**
+ * 表格：整体替换为可交互表格 widget（原子块，永不揭示源码）。
+ *
+ * 覆盖两种来源的同一渲染规则：
+ *   - `Table`：裸 GFM 表（f-tbl 之外的普通 Markdown 表）
+ *   - `FTagTable`：`<f-tbl>` 内嵌 MD 表（ftagSyntax 的块解析器接管后，
+ *     内嵌表由 tableStructure.ts 产出 FTagTable 结构节点）
+ *
+ * 单元格编辑与行列操作在渲染态完成，由插件层写回文档（见 plugin.ts）；
+ * 源码形态仅在仅源码视图出现。解析失败（结构异常）时降级为源码显示。
+ */
+function renderTableWidget(node: SyntaxNode, cx: RuleContext): void {
+  const model = parseMarkdownTableText(cx.doc.sliceString(node.from, node.to));
+  if (!model) return;
+  const d = Decoration.replace({ widget: new TableWidget(model), block: true });
+  cx.acc.deco.push(d.range(node.from, node.to));
+  cx.acc.atomic.push(d.range(node.from, node.to));
+}
+
+addRule('Table', renderTableWidget);
+addRule('FTagTable', renderTableWidget);
+
+// ── f-标签块（f-fig / f-tbl / f-eq / f-claim） ──────────────────────
+
+const CAPTION_OPEN_TAG = '<f-caption>';
+const CAPTION_CLOSE_TAG = '</f-caption>';
+
+/** FTag 块节点名 → 闭合标签文本。 */
+const FTAG_CLOSE_BY_NODE: Record<string, string> = {
+  FTagFig: '</f-fig>',
+  FTagTbl: '</f-tbl>',
+  FTagEq: '</f-eq>',
+  FTagClaim: '</f-claim>',
+};
+
+/** 推送一个整行/跨行的 block 替换并同时登记原子性。 */
+function pushHideBlock(cx: RuleContext, from: number, to: number): void {
+  if (to <= from) return;
+  const d = Decoration.replace({ block: true });
+  cx.acc.deco.push(d.range(from, to));
+  cx.acc.atomic.push(d.range(from, to));
+}
+
+/**
+ * 折叠一段纯空白跨度：同行空白行内隐藏；跨行空白对齐行边界后 block 折叠，
+ * 消除标签与内容之间的残留空行。
+ */
+function hideBlankSpan(cx: RuleContext, from: number, to: number): void {
+  if (to <= from) return;
+  if (cx.doc.sliceString(from, to).trim() !== '') return;
+  const startLine = cx.doc.lineAt(from);
+  const endLine = cx.doc.lineAt(to);
+  if (startLine.number === endLine.number) {
+    pushHide(cx, from, to);
+    return;
+  }
+  // 整体 trim 已保证 from..行尾、行首..to 均为空白，对齐后仅折叠换行
+  pushHideBlock(cx, startLine.to, endLine.from);
+}
+
+/**
+ * f-标签块渲染：起始/闭合标签行在光标未触及时隐藏（触及揭示以便编辑属性），
+ * 题注与内嵌表格之间的纯空白跨度折叠，避免渲染态残留空行。
+ * 块内无题注/表格结构时不做空白折叠，降级为源码显示。
+ */
+function renderFtagBlock(node: SyntaxNode, cx: RuleContext): void {
+  const closeTag = FTAG_CLOSE_BY_NODE[node.name];
+  if (!closeTag) return;
+  const text = cx.doc.sliceString(node.from, node.to);
+
+  // ── 起始标签 ──
+  const gtRel = text.indexOf('>');
+  if (gtRel < 0) return;
+  const openTagEnd = node.from + gtRel + 1;
+  const openLine = cx.doc.lineAt(node.from);
+  const openFrom = cx.doc.sliceString(openLine.from, node.from).trim() === ''
+    ? openLine.from
+    : node.from;
+  let innerFrom = openTagEnd;
+  if (openLine.to < node.to && cx.doc.sliceString(openTagEnd, openLine.to).trim() === '') {
+    // 标签独占一行 → 整行隐藏
+    if (!selectionTouches(openFrom, openLine.to, cx.sel)) {
+      pushHideBlock(cx, openFrom, openLine.to);
+    }
+    innerFrom = openLine.to + 1;
+  } else if (!selectionTouches(openFrom, openTagEnd, cx.sel)) {
+    pushHide(cx, openFrom, openTagEnd);
+  }
+
+  // ── 闭合标签 ──
+  let innerTo = node.to;
+  const closeRel = text.lastIndexOf(closeTag);
+  if (closeRel >= 0) {
+    const closeFrom = node.from + closeRel;
+    const closeTo = closeFrom + closeTag.length;
+    const closeLine = cx.doc.lineAt(closeFrom);
+    const aloneOnLine = closeLine.from > node.from
+      && cx.doc.sliceString(closeLine.from, closeFrom).trim() === ''
+      && cx.doc.sliceString(closeTo, closeLine.to).trim() === '';
+    if (aloneOnLine) {
+      if (!selectionTouches(closeLine.from, closeLine.to, cx.sel)) {
+        pushHideBlock(cx, closeLine.from, closeLine.to);
+      }
+      innerTo = closeLine.from;
+    } else if (!selectionTouches(closeFrom, closeTo, cx.sel)) {
+      pushHide(cx, closeFrom, closeTo);
+      innerTo = closeFrom;
     }
   }
+
+  // ── 内容间空白折叠（题注/内嵌表之间的空行） ──
+  const bounds: SyntaxNode[] = [];
+  for (let c = node.firstChild; c; c = c.nextSibling) {
+    if (c.name === 'FTagCaption' || c.name === 'FTagTable') bounds.push(c);
+  }
+  if (bounds.length === 0) return;
+  let prev = innerFrom;
+  for (const b of bounds) {
+    hideBlankSpan(cx, prev, b.from);
+    prev = b.to;
+  }
+  hideBlankSpan(cx, prev, innerTo);
+}
+
+addRule('FTagFig', renderFtagBlock);
+addRule('FTagTbl', renderFtagBlock);
+addRule('FTagEq', renderFtagBlock);
+addRule('FTagClaim', renderFtagBlock);
+
+/** 题注文字样式标记。 */
+const captionMark = Decoration.mark({ class: 'fluen-lp-caption' });
+
+/** f-题注：隐藏 <f-caption>/</f-caption> 标记（触及揭示），文字套题注样式。 */
+addRule('FTagCaption', (node, cx) => {
+  const text = cx.doc.sliceString(node.from, node.to);
+  if (!text.startsWith(CAPTION_OPEN_TAG) || !text.endsWith(CAPTION_CLOSE_TAG)) return;
+  const textFrom = node.from + CAPTION_OPEN_TAG.length;
+  const textTo = node.to - CAPTION_CLOSE_TAG.length;
+  if (textTo > textFrom) {
+    cx.acc.deco.push(captionMark.range(textFrom, textTo));
+  }
+  if (selectionTouches(node.from, node.to, cx.sel)) return;
+  pushHide(cx, node.from, textFrom);
+  pushHide(cx, textTo, node.to);
 });
 
 /** 围栏代码块：区域行样式（含语言标签高亮由 CSS 处理）。 */
@@ -527,15 +653,18 @@ if (import.meta.vitest) {
   const { syntaxTree } = await import('@codemirror/language');
   const { markdown, markdownLanguage } = await import('@codemirror/lang-markdown');
   const { fluenMathExtension } = await import('./mathSyntax');
+  const { ftagExtension } = await import('../ftagSyntax');
+  const { underlineExtension } = await import('../underlineSyntax');
 
   function setup(md: string) {
     const state = EditorState.create({
       doc: md,
       extensions: [
-        // 与生产 setup.ts 相同的方言配置（GFM base），确保规则覆盖真实语法树
+        // 与生产 setup.ts 完全一致的方言组合（GFM base + f-标签/下划线/数学），
+        // 确保 f-tbl 块解析器认领后规则仍覆盖真实语法树
         markdown({
           base: markdownLanguage,
-          extensions: [fluenMathExtension],
+          extensions: [ftagExtension, underlineExtension, fluenMathExtension],
           addKeymap: false,
         }),
       ],
@@ -623,6 +752,14 @@ if (import.meta.vitest) {
       expect(flat.some((d) => d.cls === 'fluen-lp-em')).toBe(true);
       expect(flat.some((d) => d.cls === 'fluen-lp-strike')).toBe(true);
     });
+
+    it('下划线渲染为 underline 装饰并隐藏 ++ 记号', () => {
+      const md = '++下划++ 文本\n\n普通文本段落';
+      const r = build(md);
+      const flat = flatten(r);
+      expect(flat.some((d) => d.cls === 'fluen-lp-underline')).toBe(true);
+      expect(countAtomic(r)).toBe(2); // 两侧 ++ 各一组隐藏
+    });
   });
 
   describe('decorations: 链接与图片', () => {
@@ -690,6 +827,111 @@ if (import.meta.vitest) {
       const r = build(md, [pos, pos]);
       const flat = flatten(r);
       expect(flat.some((d) => d.cls === 'fluen-lp-math-src')).toBe(true);
+    });
+  });
+
+  describe('decorations: 表格', () => {
+    const BARE_TABLE = '| A | B |\n| --- | --- |\n| 1 | 2 |';
+
+    it('裸 GFM 表整体替换为可交互 widget（原子块）', () => {
+      const md = `${BARE_TABLE}\n\n正文段落。`;
+      const r = build(md);
+      const flat = flatten(r);
+      const widget = flat.find((d) => d.widget && d.from === 0);
+      expect(widget).toBeDefined();
+      expect(widget!.to - widget!.from).toBe(BARE_TABLE.length);
+      expect(r.atomicRanges.iter().value).not.toBeNull(); // 注册原子性，光标不进入
+    });
+
+    it('<f-tbl> 内嵌 MD 表（FTagTable 节点）同样渲染 widget', () => {
+      // 插入器生成的精确形态：插入器输出直接复制于此，防两侧行为漂移
+      const md = '<f-tbl>\n  <f-caption>表格题注</f-caption>\n\n|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |\n\n</f-tbl>\n\n正文段落。';
+      const r = build(md);
+      const widget = flatten(r).find((d) => d.widget && d.cls === undefined);
+      expect(widget).toBeDefined();
+      const inner = '|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |';
+      expect(widget!.to - widget!.from).toBe(inner.length);
+    });
+
+    it('光标在表格内仍渲染 widget（半预览不揭示表格源码）', () => {
+      const md = `${BARE_TABLE}\n\n正文段落。`;
+      const inside = md.indexOf('| 1 |');
+      const r = build(md, [inside, inside]);
+      expect(flatten(r).some((d) => d.widget && d.cls === undefined)).toBe(true);
+    });
+
+    it('结构异常的表格（缺分隔行）降级为源码显示', () => {
+      const r = build('| A |\n| x |\n| y |\n\n正文。');
+      expect(flatten(r).some((d) => d.widget)).toBe(false);
+    });
+  });
+
+  describe('decorations: f-标签块', () => {
+    // 插入器生成的精确形态（与 blockInsert 一致），防两侧行为漂移
+    const FTBL_DOC =
+      '<f-tbl>\n  <f-caption>表格题注</f-caption>\n\n|  |  |  |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |\n\n</f-tbl>\n\n正文段落。';
+
+    it('起始/闭合标签行隐藏为无 widget 的替换区间', () => {
+      const flat = flatten(build(FTBL_DOC));
+      const openHide = flat.find(
+        (d) => !d.widget && d.cls === undefined && d.from === 0 && d.to === '<f-tbl>'.length,
+      );
+      expect(openHide).toBeDefined();
+      const closeFrom = FTBL_DOC.indexOf('</f-tbl>');
+      const closeHide = flat.find(
+        (d) => !d.widget && d.cls === undefined && d.from === closeFrom && d.to === closeFrom + '</f-tbl>'.length,
+      );
+      expect(closeHide).toBeDefined();
+      // 表格 widget 仍渲染
+      expect(flat.some((d) => d.widget)).toBe(true);
+    });
+
+    it('题注标记隐藏，题注文字带 fluen-lp-caption 样式', () => {
+      const flat = flatten(build(FTBL_DOC));
+      const capFrom = FTBL_DOC.indexOf('<f-caption>');
+      const capTextFrom = capFrom + '<f-caption>'.length;
+      const capTextTo = FTBL_DOC.indexOf('</f-caption>');
+      const styled = flat.find(
+        (d) => d.cls === 'fluen-lp-caption' && d.from === capTextFrom && d.to === capTextTo,
+      );
+      expect(styled).toBeDefined();
+      expect(
+        flat.some((d) => !d.widget && d.cls === undefined && d.from === capFrom && d.to === capTextFrom),
+      ).toBe(true);
+      expect(
+        flat.some(
+          (d) => !d.widget && d.cls === undefined && d.from === capTextTo && d.to === capTextTo + '</f-caption>'.length,
+        ),
+      ).toBe(true);
+    });
+
+    it('光标触及题注时揭示标记，起始标签行仍隐藏', () => {
+      const pos = FTBL_DOC.indexOf('表格题注') + 2;
+      const flat = flatten(build(FTBL_DOC, [pos, pos]));
+      const capFrom = FTBL_DOC.indexOf('<f-caption>');
+      expect(
+        flat.some((d) => !d.widget && d.from === capFrom && d.to === capFrom + '<f-caption>'.length),
+      ).toBe(false);
+      expect(
+        flat.some((d) => !d.widget && d.cls === undefined && d.from === 0 && d.to === '<f-tbl>'.length),
+      ).toBe(true);
+    });
+
+    it('f-eq 块的标签行同样隐藏', () => {
+      const md = '<f-eq id="eq:1">\nE=mc^2\n</f-eq>\n\n正文。';
+      const flat = flatten(build(md));
+      expect(flat.some((d) => !d.widget && d.cls === undefined && d.from === 0 && d.to === '<f-eq id="eq:1">'.length)).toBe(true);
+      const closeFrom = md.indexOf('</f-eq>');
+      expect(flat.some((d) => !d.widget && d.cls === undefined && d.from === closeFrom && d.to === closeFrom + 7)).toBe(true);
+    });
+
+    it('光标触及闭合标签行时揭示该行', () => {
+      const closeFrom = FTBL_DOC.indexOf('</f-tbl>');
+      const pos = closeFrom + 2;
+      const flat = flatten(build(FTBL_DOC, [pos, pos]));
+      expect(
+        flat.some((d) => !d.widget && d.cls === undefined && d.from === closeFrom && d.to === closeFrom + '</f-tbl>'.length),
+      ).toBe(false);
     });
   });
 

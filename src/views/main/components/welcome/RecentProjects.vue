@@ -83,7 +83,6 @@ function formatRelativeTime(iso: string): string {
         </svg>
       </div>
       <h1 class="welcome__title">{{ t('main.content.welcome.title') }}</h1>
-      <p class="welcome__subtitle">{{ t('main.content.welcome.subtitle') }}</p>
     </header>
 
     <!-- ── 主操作 CTA ───────────────────────────────────────────────── -->
@@ -164,15 +163,6 @@ function formatRelativeTime(iso: string): string {
   line-height: 1.25;
   letter-spacing: -0.5px;
   color: var(--fluen-ink);
-}
-
-.welcome__subtitle {
-  margin: 0;
-  font-family: var(--fluen-font-sans);
-  font-size: 14px;
-  font-weight: 400;
-  line-height: 1.5;
-  color: var(--fluen-steel);
 }
 
 /* ╔═ CTA 按钮 ═════════════════════════════════════════════════════════ */

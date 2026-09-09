@@ -95,7 +95,10 @@ fn normalize_base_url(url: &str) -> String {
 ///
 /// `context_window` / `max_output_tokens` 未配置时回退到 128K / 16K，
 /// 足以覆盖大多数主流模型的上下文窗口。
-fn resolve_model_spec(provider: &ProviderConfig, model_id: &str) -> (usize, usize) {
+///
+/// 除构造 provider 时注入 `ModelSpec` 外，也供上下文用量统计
+/// （[`crate::motis_chat::context_usage`]）取分母使用。
+pub fn resolve_model_spec(provider: &ProviderConfig, model_id: &str) -> (usize, usize) {
     const DEFAULT_CONTEXT: usize = 128 * 1024;
     const DEFAULT_MAX_OUTPUT: usize = 16 * 1024;
 
